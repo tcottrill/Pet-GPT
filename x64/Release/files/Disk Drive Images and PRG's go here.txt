@@ -1,0 +1,4 @@
+Telengard is a modified version of what's on Zimmers to work mostly correct with the PET.
+Adventure was my acid test of getting the disk drive emulation working. 
+It plays Petscii Robots just fine BTW, it's better if you remap the keys though.
+

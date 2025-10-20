@@ -1,2 +1,347 @@
-# Pet-GPT
-A ChatGPT Created Commodore Pet Emuator
+# PETEMU — A Commodore PET Emulator Coded by ChatGPT
+
+## Overview
+
+**PETEMU** is a modern Commodore PET 2001/4000/8000-series emulator written in C++17, derived collaboratively with ChatGPT (OpenAI GPT-5).  
+The goal is to preserve hardware-level accuracy while maintaining clean, modular C++ architecture suitable for research, restoration, and educational use.
+
+All source files within the `petemu/` folder were **generated or refactored by ChatGPT** using Commodore PET technical documentation, legacy emulator codebases, and formal bus specifications as reference materials.  
+Integration with **my framework** providing windowing, input, file I/O, logging, OpenGL video output, and general platform abstraction.
+
+---
+
+## Features
+
+- **Cycle-accurate 6502 CPU core**
+  - Derived from my standalone CPU implementation.
+  - Includes all documented and undocumented opcodes.
+  - Supports IRQ/NMI and decimal mode behavior identical to PET hardware.
+
+- **IEEE-488 Bus Emulation**
+  - Implements TALK/LISTEN, ATN, DAV, NRFD, NDAC, and EOI phases.
+  - Fully compatible with PET KERNAL channel handling (`SETTMO`, `CHKIN`, etc.).
+  - Emulates realistic 64 µs timing windows for each bus phase.
+  - Named-channel and secondary address support.
+
+- **Disk Drive Emulation**
+  - Emulates 2040/4040-style dual drives using D64 disk images.
+  - Handles directory and sequential file access via Commodore DOS logic.
+  - Supports OPEN/CLOSE/READ/WRITE command channels.
+
+- **Video Emulation**
+  - PET 40×25 text display with monochrome character ROM.
+  - Implements correct video RAM mirroring and screen refresh.
+  - Optional OpenGL scaling with CRT-like phosphor persistence.
+
+- **Keyboard Input**
+  - Matrix-based key scanning identical to PET 2001N.
+  - Mapped to PC keys via input layer, with customizable layout.
+
+---
+
+General Notes: 
+This emulator was my foray into really leaning into prompt generation and is an attempt to see just what I can really get out of ChatGPT.
+The PetEmu code is mostly based off of the work by Thomas Skibo. I used his code as a starting point, and I have documented that everywhere. 
+I am happiest with the IEEE disk code, it was a frustrating experience, I went through about 60 iterations and 3 full restarts. 
+Once ChatGPT gets stuck on something, it can be really difficult to change it's mind, I found that heavy logging is very useful 
+until you get something that is working. ChatGPT is great at reading logs and those can change it's thinking. Otherwise you can get 
+get in a loop of: this will fix it!, no, this will fix it!, well this is obviously the issue, try this! and on and on again like a merry go round,
+until you are back at where you started, except with a lot worse code then you started with. When this happens I have found your best option is to 
+provide heavy logs to change it's mind, or delete and start a new session with a radically differently worded prompt. 
+I think this was an interesting adventure, I am now working on updating my game engine with ChatGPT and for better or worse (mostly worse I'm afraid), I think AI is here to stay.
+It's either embrace it and work to understand and use it to your advantage or let the world pass by you and get left in the cold. 
+
+Addendum: Keyboard emulation is not very good, no lower case support although I have worked on it. 
+I tried adding speaker sound output to the VIA/PIA code but abandoned it about 20 iterations in. I may get back to it some day. 
+ChatGPT was having a major issue with it, and I would eventually love to have full, MESS style VIA and PIA support. 
+
+## Technical Architecture
+
+### 1. CPU and Memory Map
+
+The emulator uses a single 6502 CPU instance executing from a dynamically mapped memory table.  
+Memory regions are resolved through function pointers to support ROM, RAM, and I/O-mapped areas.
+
+| Address Range | Description                      | Notes                            |
+|----------------|----------------------------------|----------------------------------|
+| `$0000–$03FF`  | Zero Page / Stack / System RAM   | 1 KB                             |
+| `$0400–$07FF`  | Screen Memory                    | Mirrors on some models           |
+| `$0800–$7FFF`  | Expansion / User RAM             | Up to 32 KB total                |
+| `$8000–$8FFF`  | I/O Space (VIA, PIA, IEEE, etc.) | Banked via decode logic          |
+| `$9000–$9FFF`  | Character Generator ROM          | 2 KB mapped from 901447-10.bin   |
+| `$A000–$BFFF`  | BASIC ROM                        | 8 KB (basic-4-b000.901465-23.bin)|
+| `$C000–$CFFF`  | EDIT ROM                         | 4 KB (edit-4-40-n.901447-29.bin) |
+| `$E000–$FFFF`  | KERNAL ROM                       | 8 KB (kernal-4.901465-22.bin)    |
+
+All reads/writes pass through an abstracted `ReadMem()` / `WriteMem()` interface that can dynamically remap regions to different handlers (e.g., IEEE bus or drive I/O).
+
+---
+
+### 2. IEEE-488 Bus Flow
+
+The IEEE-488 implementation follows the protocol timing outlined in **Michael Steil’s cbmbus documentation** and **Commodore PET technical notes**.
+
+Each bus operation is modeled as a sequence of states:
+```
+IDLE → ATN → DAV → NRFD → NDAC → EOI
+```
+
+#### Devices Implemented
+- **Device 8 (Primary Drive)**
+- **Device 9 (Optional Secondary Drive)**
+- **Device 4–5 (Reserved for Printers)**
+
+The emulator supports:
+- TALK and LISTEN addressing.
+- File channel routing via DOS command parser.
+- Timing-accurate ATN and handshake control lines.
+- Open/Close handling per logical channel (0–15).
+
+Each device implements:
+```cpp
+bool ieee488_device::Listen(uint8_t sec_addr);
+bool ieee488_device::Talk(uint8_t sec_addr);
+bool ieee488_device::SendByte(uint8_t data);
+bool ieee488_device::ReceiveByte(uint8_t& out);
+```
+
+---
+
+### 3. D64 Disk Image Handler
+
+### 3.1 D64 File I/O Capabilities
+
+PETEMU provides full **read and write support** for Commodore D64 disk images, including both **PRG** (program) and **SEQ** (sequential) file types.  
+All file operations are routed through the IEEE-488 command channel (typically device 8, secondary address 15) and follow the same logic as a physical Commodore 2040/4040 disk drive.
+
+#### Supported File Types
+
+| Type | Description | Notes |
+|------|--------------|-------|
+| **PRG** | Standard program file | Can be loaded and saved directly using BASIC commands (`LOAD`, `SAVE`) |
+| **SEQ** | Sequential data file | Fully readable and writable using BASIC file I/O commands (`OPEN`, `PRINT#`, `INPUT#`, `GET#`) |
+
+#### Implementation Details
+
+- PETEMU parses the BAM (Block Allocation Map) and directory entries to identify file type and starting track/sector.
+- Sequential access is supported through internal buffering and sector-chaining logic.
+- Writes allocate free sectors from the BAM dynamically and correctly update file length and directory entries on close.
+- All file operations maintain correct Commodore DOS channel behavior and status codes.
+- The command channel (15) is used for drive commands such as:
+  ```
+  OPEN15,8,15,"N:DISKNAME,ID"
+  OPEN15,8,15,"S:filename"
+  OPEN15,8,15,"I0:"
+  ```
+- The drive automatically flushes pending writes on `CLOSE` and updates the BAM.
+
+#### Example BASIC Operations
+
+```
+OPEN 1,8,2,"DATA,SEQ,W"   : REM Open SEQ file for writing
+PRINT#1,"HELLO WORLD"
+CLOSE 1
+
+OPEN 1,8,2,"DATA,SEQ,R"   : REM Open SEQ file for reading
+INPUT#1,A$ : PRINT A$
+CLOSE 1
+
+SAVE "HELLO",8             : REM Save program as PRG file
+LOAD "HELLO",8             : REM Load program back
+```
+
+These operations behave identically to a real PET drive.  
+Both **PRG** and **SEQ** files can be created, read, appended, and deleted using standard DOS commands or BASIC syntax.
+
+
+The D64 logic is based on **unusedino.de’s technical reference** and verified against the MAME drive format handlers.
+
+- Supports 35-track, 683-sector D64 images.
+- Handles BAM, directory, and sequential file parsing.
+- Channel 15 command processing for DOS commands (`I0:`, `N:`, `S:` etc.).
+- Disk image read/write caching via `sys_fileio`.
+
+Each image is accessed through a `D64Drive` object that wraps file access and provides per-sector data buffers.
+
+---
+
+### 4. Video System
+
+The PET video module simulates:
+- Character ROM lookup per scanline.
+- Cursor blinking, reverse video, and screen mirroring.
+- OpenGL backend for scalable rendering.
+
+Future expansion plans include:
+- 80-column support for PET 8032.
+- Optional green-phosphor postprocessing.
+
+---
+
+### 5. Keyboard Matrix
+
+The keyboard is represented as an 8x10 matrix, scanned each frame by toggling VIA port bits.  
+PC key events from the input layer set matrix rows/columns through a translation table:
+```cpp
+void PETKeyboard::SetKeyState(int row, int col, bool pressed);
+```
+This enables accurate detection of simultaneous keypresses (e.g., Shift + Run/Stop).
+
+---
+
+### 6. Timing and Synchronization
+
+The emulator uses:
+- 1.0 MHz system clock (approx. 1.008 MHz NTSC).
+- 60 Hz video frame rate.
+- IEEE-488 timing windows of 64 µs per handshake phase.
+- Internal timebase synchronized with host high-resolution timer.
+
+Frame pacing is achieved via:
+```cpp
+double cycles_per_frame = 1'000'000.0 / 60.0;
+```
+
+The CPU, video, and bus logic are advanced in deterministic substeps to maintain sync.
+
+---
+
+## Credits and Provenance
+
+### Derived From
+Portions of this emulator were **inspired by**:
+
+- **Thomas Skibo’s JavaScript Commodore PET Emulator**  
+  Copyright (c) 2012, 2014  
+  Used for educational purposes and to train ChatGPT’s architectural understanding.
+
+- **MAME/MESS Commodore PET Source Trees**  
+  For timing validation, IEEE-488 implementation structure, and memory map behavior.
+
+- **Technical Documentation**
+  - [unusedino.de/ec64 D64 format](http://unusedino.de/ec64/technical/formats/d64.html)
+  - [mist64 cbmbus documentation](https://github.com/mist64/cbmbus_doc)
+
+---
+
+## License
+
+All code authored or derived via ChatGPT is released under the **MIT License**, except where noted.
+
+```
+MIT License
+
+Copyright (c) 2025 Tim Cottrill
+Permission is hereby granted, free of charge...
+```
+
+External reference materials remain under their original respective licenses.
+
+---
+
+## Build Requirements
+
+- **C++17 or later**
+- **Visual Studio 2022**
+- **GLEW / OpenGL**
+- **Windows 10/11**
+---
+
+## ROMs and Disks
+
+Expected ROMs (in `/roms`):
+```
+basic-4-b000.901465-23.bin
+edit-4-40-n.901447-29.bin
+kernal-4.901465-22.bin
+character.901447-10.bin
+```
+
+D64 disk images (in `/disks`):
+```
+Whatever you want.
+```
+
+---
+
+## Acknowledgments
+
+- Thomas Skibo — Original JavaScript PET emulator.
+- MAME/MESS developers — PET and IEEE-488 documentation.
+- Michael Steil — cbmbus and Commodore DOS insights.
+- OpenAI ChatGPT (GPT-5) — code generation and documentation.
+- Tim Cottrill — author, integrator, and maintainer.
+
+---
+
+## Contact
+
+**Author:** Tim Cottrill  
+**ChatGPT Collaboration:** OpenAI GPT-5  
+**Date:** October 2025  
+**Project Type:** Commodore PET Emulator (ChatGPT-Derived)
+
+---
+
+## Command-Line Usage
+
+PETEMU accepts a small set of command-line flags to select ROM sets and attach disk images or single files. These map directly to the logic in `emulator.cpp`.
+
+### Flags
+
+- `-basic4`  
+  Load the PET **BASIC 4** ROM set (B000/C000/D000 + EDIT-4-N @ E000 + KERNAL-4 @ F000).
+
+- `-basic2`  
+  Load the PET **BASIC 2** ROM set (C000/D000 + EDIT-2-N @ E000 + KERNAL-2 @ F000). If neither `-basic4` nor `-basic2` is present, PETEMU defaults to a 2001N BASIC 2 set.
+
+- `-disk <path>`  
+  Attaches media to **device 8**. The path is resolved relative to `./files`:
+  - If `<path>` ends with `.d64`, PETEMU mounts the **D64 image** (read/write depending on host file permissions).
+  - Otherwise, PETEMU enables the **folder backend** and will optionally **prime a PRG** so you can `LOAD"",8` immediately.
+
+> Notes:
+> - ROMs are loaded from `./roms/`. See the **ROMs and Disks** section for exact file names.
+> - The IEEE-488 host root is `./files`. Place your D64s and PRGs there.
+
+### Examples
+
+```bash
+# BASIC 4 + mount a D64 image on device 8
+petemu -basic4 -disk adventure.d64
+
+# BASIC 2 (N editor) + attach a single PRG via the folder backend
+# You can then LOAD"",8 to autoload this program
+petemu -basic2 -disk hello.prg
+
+# Default ROM set (2001N BASIC 2) + D64
+petemu -disk utils.d64
+```
+
+### In-PET BASIC Commands
+
+Once the emulator has started:
+
+```basic
+LOAD "$",8         : REM Directory of the mounted D64 or folder backend
+LIST
+
+LOAD "PROGRAM",8   : REM Load PRG from disk or folder backend
+RUN
+
+OPEN 1,8,2,"DATA,SEQ,W"   : REM Write a SEQ file
+PRINT#1,"HELLO"
+CLOSE 1
+
+OPEN 1,8,2,"DATA,SEQ,R"   : REM Read it back
+INPUT#1,A$ : PRINT A$
+CLOSE 1
+```
+
+### Behavior Reference (from emulator.cpp)
+
+- IEEE-488 host root is set to `./files` at startup; `-disk` paths are joined to this root.  
+- `.d64` paths call `io().setIeeeD64Image("<root>/<path>")`.  
+- Non-`.d64` paths enable the folder backend and call `LoadPrgIntoIEEE(...)` to prime a PRG for `LOAD"",8`.  
+- ROM set selection is by `-basic4` or `-basic2`; otherwise 2001N BASIC 2 is loaded.
+

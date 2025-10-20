@@ -1,0 +1,17 @@
+Basic 4 Roms are from Zimmers.net. Use these names: 
+const std::string p_basB = dir + "basic-4-b000.901465-23.bin"; // 4096 bytes -> $B000
+const std::string p_basC = dir + "basic-4-c000.901465-20.bin"; // 4096 bytes -> $C000
+const std::string p_basD = dir + "basic-4-d000.901465-21.bin"; // 4096 bytes -> $D000
+const std::string p_edit = dir + "edit-4-n.901447-29.bin";     // 2048 bytes -> $E000
+const std::string p_kern = dir + "kernal-4.901465-22.bin";     // 4096 bytes -> $F000
+const std::string p_ch1 = dir + "characters-1.901447-08.bin"; // >=1024 (use first 1KB)
+const std::string p_ch2 = dir + "characters-2.901447-10.bin"; // >=1024 (use first 1KB)
+
+Basic 2 Roms are from the MESS (TM) Bios files for the 2001-N Pet.
+
+const std::string path_basicC = dir + "basic-2-c000.901465-01.bin";
+const std::string path_basicD = dir + "basic-2-d000.901465-02.bin";
+const std::string path_edit = dir + (editorN ? "edit-2-n.901447-24.bin"	: "edit-2-b.901474-01.bin");
+const std::string path_kernal = dir + "kernal-2.901465-03.bin";
+const std::string path_ch1 = dir + "characters-1.901447-08.bin";
+const std::string path_ch2 = dir + "characters-2.901447-10.bin";
