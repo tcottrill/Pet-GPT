@@ -1,3 +1,8 @@
+<p align="center">
+  <a href="https://github.com/tcottrill/Pet-GPT">
+    <img src="pet.png" alt="PETEMU Logo" width="480">
+  </a>
+</p>
 # PETEMU — A Commodore PET Emulator Coded by ChatGPT
 
 ## Overview
