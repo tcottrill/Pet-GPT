@@ -1,0 +1,295 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Source Files\sys_general">
+      <UniqueIdentifier>{ee1bcc69-eefc-4fd1-91f8-9ffb38a8dd69}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\cpu_cores">
+      <UniqueIdentifier>{800de45a-745e-4efb-aabc-8be819849fd7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\petsrc">
+      <UniqueIdentifier>{1a533dd1-6ab3-4503-829d-b175be20df72}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\sys_audio">
+      <UniqueIdentifier>{1e2914e1-612f-4937-a063-92971b1cda22}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\petsrc\Disk Drive">
+      <UniqueIdentifier>{bc6f4ecb-6f1e-4372-b7c6-e8705cbc97c7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\sys_input">
+      <UniqueIdentifier>{6c00f337-a2f6-4a4a-b6a8-b07f65e16c88}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\thirdparty">
+      <UniqueIdentifier>{0701eae8-0356-45e6-b5a9-4fb2dfc653be}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\system">
+      <UniqueIdentifier>{d8a1e2f3-4b5c-6d7e-8f9a-0b1c2d3e4f5a}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="framework.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="targetver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Resource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="emulator.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_general\colordefs.h">
+      <Filter>Source Files\sys_general</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_general\fast_poly.h">
+      <Filter>Source Files\sys_general</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_general\fileio.h">
+      <Filter>Source Files\sys_general</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_general\MathUtils.h">
+      <Filter>Source Files\sys_general</Filter>
+    </ClInclude>
+    <ClInclude Include="cpu_cores\cpu_6502.h">
+      <Filter>Source Files\cpu_cores</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_general\sys_gl.h">
+      <Filter>Source Files\sys_general</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_general\debug_draw.h">
+      <Filter>Source Files\sys_general</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_general\shader_util.h">
+      <Filter>Source Files\sys_general</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\pet_gl.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\pet_machine.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\pet_mem.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\pet2001video.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\pet2001io.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\pet_kbd_input.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\via6522.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\pet2001ieee.h">
+      <Filter>Source Files\petsrc\Disk Drive</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\ieee_helpers.h">
+      <Filter>Source Files\petsrc\Disk Drive</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\pia6520.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_audio\helper_functions.h">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_audio\mixer.h">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_audio\xaudio2_backend.h">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_audio\audio_3d.h">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_audio\emptywav.h">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_audio\error_wav.h">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\cb2_render.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="cpu_cores\deftypes.h">
+      <Filter>Source Files\cpu_cores</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_input\joystick.h">
+      <Filter>Source Files\sys_input</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_input\rawinput.h">
+      <Filter>Source Files\sys_input</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_general\sys_log.h">
+      <Filter>Source Files\sys_general</Filter>
+    </ClInclude>
+    <ClInclude Include="sys_general\iniFile.h">
+      <Filter>Source Files\sys_general</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\glew.h">
+      <Filter>Source Files\thirdparty</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\wglew.h">
+      <Filter>Source Files\thirdparty</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\miniz.h">
+      <Filter>Source Files\thirdparty</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\stb_image.h">
+      <Filter>Source Files\thirdparty</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\stb_image_write.h">
+      <Filter>Source Files\thirdparty</Filter>
+    </ClInclude>
+    <ClInclude Include="system\FrameLimiter.h">
+      <Filter>Source Files\system</Filter>
+    </ClInclude>
+    <ClInclude Include="system\wintimer.h">
+      <Filter>Source Files\system</Filter>
+    </ClInclude>
+    <ClInclude Include="system\path_helper.h">
+      <Filter>Source Files\system</Filter>
+    </ClInclude>
+    <ClInclude Include="system\utf8conv.h">
+      <Filter>Source Files\system</Filter>
+    </ClInclude>
+    <ClInclude Include="system\host_app.h">
+      <Filter>Source Files\system</Filter>
+    </ClInclude>
+    <ClInclude Include="system\host_resource.h">
+      <Filter>Source Files\system</Filter>
+    </ClInclude>
+    <ClInclude Include="system\host_view.h">
+      <Filter>Source Files\system</Filter>
+    </ClInclude>
+    <ClInclude Include="system\host_window.h">
+      <Filter>Source Files\system</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="emulator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="pet_host_app.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_general\fast_poly.cpp">
+      <Filter>Source Files\sys_general</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_general\fileio.cpp">
+      <Filter>Source Files\sys_general</Filter>
+    </ClCompile>
+    <ClCompile Include="cpu_cores\cpu_6502.cpp">
+      <Filter>Source Files\cpu_cores</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_general\sys_gl.cpp">
+      <Filter>Source Files\sys_general</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet_gl.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet_machine.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet_mem.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet2001video.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet2001io.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet_kbd_input.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\via6522.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet2001ieee_ioport.cpp">
+      <Filter>Source Files\petsrc\Disk Drive</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet2001ieee_d64.cpp">
+      <Filter>Source Files\petsrc\Disk Drive</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet2001ieee_vdrive.cpp">
+      <Filter>Source Files\petsrc\Disk Drive</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet2001ieee_seq.cpp">
+      <Filter>Source Files\petsrc\Disk Drive</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pia6520.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_audio\helper_functions.cpp">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_audio\mixer.cpp">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_audio\xaudio2_backend.cpp">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_audio\audio_3d.cpp">
+      <Filter>Source Files\sys_audio</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_input\Joystick.cpp">
+      <Filter>Source Files\sys_input</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_input\rawinput.cpp">
+      <Filter>Source Files\sys_input</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_general\sys_log.cpp">
+      <Filter>Source Files\sys_general</Filter>
+    </ClCompile>
+    <ClCompile Include="sys_general\iniFile.cpp">
+      <Filter>Source Files\sys_general</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\glew.c">
+      <Filter>Source Files\thirdparty</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\miniz.c">
+      <Filter>Source Files\thirdparty</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\stb_image_impl.cpp">
+      <Filter>Source Files\thirdparty</Filter>
+    </ClCompile>
+    <ClCompile Include="system\host_window.cpp">
+      <Filter>Source Files\system</Filter>
+    </ClCompile>
+    <ClCompile Include="system\host_view.cpp">
+      <Filter>Source Files\system</Filter>
+    </ClCompile>
+    <ClCompile Include="system\wintimer.cpp">
+      <Filter>Source Files\system</Filter>
+    </ClCompile>
+    <ClCompile Include="system\path_helper.cpp">
+      <Filter>Source Files\system</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="petemu.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="petemu.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,25 @@
+Place your Commodore PET ROM .bin files in this folder.
+
+Download them from zimmers.net (plain .bin files - no extraction, just save them here):
+https://www.zimmers.net/anonftp/pub/cbm/firmware/computers/pet/
+
+
+BASIC 4 (default set)
+---------------------
+basic-4-b000.901465-23.bin     ($B000)
+basic-4-c000.901465-20.bin     ($C000)
+basic-4-d000.901465-21.bin     ($D000)
+edit-4-n.901447-29.bin         ($E000)
+kernal-4.901465-22.bin         ($F000)
+characters-1.901447-08.bin
+characters-2.901447-10.bin
+
+
+BASIC 2 (2001-N set)
+--------------------
+basic-2-c000.901465-01.bin     ($C000)
+basic-2-d000.901465-02.bin     ($D000)
+edit-2-n.901447-24.bin         ($E000)   (or edit-2-b.901474-01.bin)
+kernal-2.901465-03.bin         ($F000)
+characters-1.901447-08.bin
+characters-2.901447-10.bin
