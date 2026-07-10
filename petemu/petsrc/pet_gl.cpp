@@ -57,6 +57,8 @@ uniform float uBlurV;      // vertical spot sigma, source px
 uniform float uHalation;   // glow strength 0..1
 uniform float uHalRadius;  // glow radius, source px
 uniform float uScanline;   // beam ripple strength 0..1 (0 = off)
+uniform float uContrast;   // video gain (>=1); overdrive fattens strokes via saturation
+uniform float uBright;     // black-level lift 0..0.25 (misadjusted-tube glow)
 uniform int   uTintOn;
 uniform vec3  uTint;
 
@@ -79,6 +81,12 @@ void main(){
     }
     vec3 col = acc / wsum;
 
+    // 1b) Beam overdrive: video gain, clamped like a saturating phosphor.
+    //     Gain pushes the spot's dim skirt past full-white, so strokes get
+    //     FATTER while the clamp keeps their edges hard (fat, not blurry).
+    //     Clamp before halation: the screen blend needs values <= 1.
+    col = min(col * uContrast, vec3(1.0));
+
     // 2) Halation: cheap wide blur from the mip pyramid, screen blend so the
     //    glow brightens darks without clipping whites.
     if (uHalation > 0.0) {
@@ -100,7 +108,11 @@ void main(){
         col *= 1.0 - uScanline * (1.0 - w);
     }
 
-    // 4) Phosphor tint (monochrome image -> green screen).
+    // 3b) Black-level lift, before tint so the raised background glows in the
+    //     phosphor color rather than gray.
+    col += uBright;
+
+    // 4) Phosphor tint (monochrome image -> green screen / B&W).
     if (uTintOn != 0) col *= uTint;
     fragColor = vec4(col, 1.0);
 }
@@ -208,6 +220,8 @@ bool PetGL::init(int winW, int winH, const char* title,
     m_halation  = get_config_float("video", "mono_halation", 0.15f);
     m_halRadius = get_config_float("video", "mono_halation_radius", 4.0f);
     m_scanline  = get_config_float("video", "mono_scanline", 0.0f);
+    m_contrast  = get_config_float("video", "mono_contrast", 1.0f);
+    m_bright    = get_config_float("video", "mono_brightness", 0.0f);
     clampKnobs();
 
     // ---- Mono monitor program (single pass; reuses the same quad VAO/VS) ----
@@ -225,6 +239,8 @@ bool PetGL::init(int winW, int winH, const char* title,
         uCrtHalationLoc = glGetUniformLocation(crtProg, "uHalation");
         uCrtHalRadLoc   = glGetUniformLocation(crtProg, "uHalRadius");
         uCrtScanLoc     = glGetUniformLocation(crtProg, "uScanline");
+        uCrtContrastLoc = glGetUniformLocation(crtProg, "uContrast");
+        uCrtBrightLoc   = glGetUniformLocation(crtProg, "uBright");
         uCrtTintOnLoc   = glGetUniformLocation(crtProg, "uTintOn");
         uCrtTintLoc     = glGetUniformLocation(crtProg, "uTint");
         glUniform1i(uCrtTexLoc, 0);
@@ -250,6 +266,8 @@ static const struct { const char* name; float step, lo, hi; } k_knobs[] = {
     { "mono_halation",        0.02f, 0.0f, 1.0f  },
     { "mono_halation_radius", 0.5f,  1.0f, 16.0f },
     { "mono_scanline",        0.02f, 0.0f, 1.0f  },
+    { "mono_contrast",        0.05f, 1.0f, 3.0f  },
+    { "mono_brightness",      0.01f, 0.0f, 0.25f },
 };
 static const int k_knobCount = (int)(sizeof(k_knobs) / sizeof(k_knobs[0]));
 
@@ -260,7 +278,9 @@ float* PetGL::knobPtr(int idx)
     case 1: return &m_blurV;
     case 2: return &m_halation;
     case 3: return &m_halRadius;
-    default: return &m_scanline;
+    case 4: return &m_scanline;
+    case 5: return &m_contrast;
+    default: return &m_bright;
     }
 }
 
@@ -381,6 +401,8 @@ void PetGL::draw()
         glUniform1f(uCrtHalationLoc, m_halation);
         glUniform1f(uCrtHalRadLoc,   m_halRadius);
         glUniform1f(uCrtScanLoc,     m_scanline);
+        glUniform1f(uCrtContrastLoc, m_contrast);
+        glUniform1f(uCrtBrightLoc,   m_bright);
         glUniform1i(uCrtTintOnLoc,   m_tintOn ? 1 : 0);
         glUniform3f(uCrtTintLoc, m_tint[0], m_tint[1], m_tint[2]);
     }

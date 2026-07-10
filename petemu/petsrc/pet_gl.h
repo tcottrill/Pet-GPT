@@ -78,6 +78,8 @@ private:
     int uCrtHalationLoc = -1;       // glow strength (0..1)
     int uCrtHalRadLoc   = -1;       // glow radius (source px)
     int uCrtScanLoc     = -1;       // beam ripple strength (0..1, default 0)
+    int uCrtContrastLoc = -1;       // video gain (fat text via saturation)
+    int uCrtBrightLoc   = -1;       // black-level lift
     int uCrtTintOnLoc   = -1;
     int uCrtTintLoc     = -1;
 
@@ -91,6 +93,8 @@ private:
     float m_halation  = 0.15f;  // 0..1   glow strength
     float m_halRadius = 4.0f;   // 1..16  glow radius, PET px
     float m_scanline  = 0.0f;   // 0..1   beam ripple (off by default)
+    float m_contrast  = 1.0f;   // 1..3   video gain: overdrive = fatter strokes
+    float m_bright    = 0.0f;   // 0..0.25 black-level lift (background glow)
 
     int  m_tuneSel = 0;         // selected knob for live tuning
     char m_tuneBuf[64] = {0};   // status string storage
