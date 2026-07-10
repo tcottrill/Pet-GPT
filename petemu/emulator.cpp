@@ -355,6 +355,10 @@ static int g_ram_kb    = 32; // configured RAM size in KB (4/8/16/32)
 
 static bool load_basic_set(int which) {
 	const std::string romdir = "./roms/";
+	// BASIC 4 maps $B000-$BFFF; BASIC 2 does not. Unmap it when switching
+	// down, or stale BASIC-4 bytes stay readable (and write-protected) there
+	// and ROM-detection code misidentifies the machine.
+	if (which == 2 && g_pet) g_pet->bus().clearROM(0xB000, 0x1000);
 	bool ok = (which == 4) ? load_pet4_romset(*g_pet, romdir)
 	                       : load_pet2001n_romset(*g_pet, romdir); // BASIC 2 default boot set
 	if (!ok) { LOG_ERROR("[PET] Failed to load BASIC %d ROM set from %s", which, romdir.c_str()); return false; }
@@ -407,13 +411,25 @@ bool emu_run_frame()
 {
 	g_pet->io().cb2ResetEdgeLog();
 
-	update_keyboard(g_pet);
-	poll_crt_tuning_keys();
+	// Only feed host input to the PET while the emulator window is in the
+	// foreground. RawInput uses RIDEV_INPUTSINK (so releases are tracked even
+	// unfocused), but without this gate everything typed into OTHER apps was
+	// also typed into BASIC (and CapsLock fired RUN/STOP).
+	const bool focused = (GetForegroundWindow() == win_get_window());
+	if (focused) {
+		update_keyboard(g_pet);
+		poll_crt_tuning_keys();
+	}
+	else {
+		uint8_t idle[10];
+		memset(idle, 0xFF, sizeof(idle));   // active-low: all released
+		g_pet->io().setKeyrows(idle);
+	}
 
 	// Poll the host gamepad and feed the emulated SNES adapter.
 	if (g_snes_enabled) {
 		poll_joystick();
-		g_pet->io().setSnesButtons(map_joy_to_snes());
+		g_pet->io().setSnesButtons(focused ? map_joy_to_snes() : 0);
 	}
 
 	// 2) Run ~1/60 sec of CPU afterward

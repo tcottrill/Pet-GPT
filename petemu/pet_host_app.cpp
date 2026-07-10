@@ -39,6 +39,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     app.set_monitor = PetSetMonitor;
     app.get_monitor = PetGetMonitor;
     app.about_text  = "Commodore PET Emulator\n\nF11 / Alt+Enter: fullscreen\nF10: CRT (mono monitor)\n"
+                      "F12: graphics / business typing mode\n"
                       "View > Monitor: green phosphor / black & white\n"
                       "CRT tuning: F9 knob, PgUp/PgDn adjust (Shift = coarse), F8 dump ini\n"
                       "File > Load: .prg / .d64";

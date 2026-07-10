@@ -55,6 +55,9 @@ void Pet2001Video::reset()
     blank = false;
     blankRequested = false;
     blankCountdownMs = -1;
+    // Hardware reset drives CA2 back to the graphics charset (VIA PCR resets
+    // to 0); without this a reset from text mode kept rendering charset2.
+    if (charset1) activeCharset = charset1;
     // If charsets are set, show empty screen; otherwise still fine.
     redrawScreen();
 }

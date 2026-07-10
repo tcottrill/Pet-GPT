@@ -17,13 +17,13 @@
 //   - Mirrors L/R modifiers into aggregate VKs (SHIFT/CONTROL/MENU) for ToUnicodeEx.
 //   - Explicit handling for OEM punctuation (', ", =, +, ,, <, ., >, -, _, /, ?).
 //   - Reflects host L/R Shift as PET Shift matrix keys while held (helps games).
-//   - Graphics mode toggle: F11 switches between "graphics" (default) and "business".
+//   - Graphics mode toggle: F12 switches between "graphics" (default) and "business".
 //
 // Public API in this file (declared in pet_kbd_input.h):
 //   void set_pet_graphics_mode(bool) noexcept;
 //   bool get_pet_graphics_mode() noexcept;
 //   void toggle_pet_graphics_mode() noexcept;
-//   void build_pet_rows_from_vk(uint8_t out[10]);        // fills + pushes, handles F11
+//   void build_pet_rows_from_vk(uint8_t out[10]);        // fills + pushes, handles F12
 
 // -----------------------------------------------------------------------------
 
@@ -299,25 +299,27 @@ void toggle_pet_graphics_mode() noexcept { g_pet_graphics_shift_mode = !g_pet_gr
 
 // -----------------------------------------------------------------------------
 // Core worker used by both public paths (global-keys vs supplied-keys)
-// handleF11Toggle: if true, toggles graphics mode on F11 edge (global path).
-// pushAfterBuild : if true, pushes to g_pet->bus().io().setKeyrows(out).
+// handleModeToggle: if true, toggles graphics mode on F12 edge (global path).
+// pushAfterBuild  : if true, pushes to g_pet->bus().io().setKeyrows(out).
 // -----------------------------------------------------------------------------
 static void build_pet_rows_core(std::uint8_t out[10],
 	const unsigned char key_state[256],
-	bool handleF11Toggle,
+	bool handleModeToggle,
 	bool pushAfterBuild)
 {
-	// Optional: toggle graphics/business mode on F11 when using global path
-	static bool prevF11 = false;
-	if (handleF11Toggle) {
-		const bool currF11 = (key_state[VK_F11] != 0);
-		if (currF11 && !prevF11) {
+	// Optional: toggle graphics/business mode on F12 when using global path.
+	// (Was F11, but F11 is the host's fullscreen accelerator - the double
+	// binding silently flipped typing mode on every fullscreen toggle.)
+	static bool prevF12 = false;
+	if (handleModeToggle) {
+		const bool currF12 = (key_state[VK_F12] != 0);
+		if (currF12 && !prevF12) {
 			g_pet_graphics_shift_mode = !g_pet_graphics_shift_mode;
 			OutputDebugStringA(g_pet_graphics_shift_mode
 				? "[PET KBD] Graphics mode: ON (Shift+letter -> PET graphics)\n"
 				: "[PET KBD] Graphics mode: OFF (business typing)\n");
 		}
-		prevF11 = currF11;
+		prevF12 = currF12;
 	}
 
 	// Initialize to idle (all 1s): active-low matrix
@@ -458,11 +460,11 @@ static void build_pet_rows_core(std::uint8_t out[10],
 
 // -----------------------------------------------------------------------------
 // Public API: build from globals (key[256]) and push (original single-call behavior).
-// Also handles the F11 graphics-mode toggle.
+// Also handles the F12 graphics-mode toggle.
 // -----------------------------------------------------------------------------
 void build_pet_rows_from_vk(std::uint8_t out[PET_KBD_ROWS_BYTES])
 {
-	build_pet_rows_core(out, ::key /*global*/, /*handleF11Toggle=*/true, /*pushAfterBuild=*/true);
+	build_pet_rows_core(out, ::key /*global*/, /*handleModeToggle=*/true, /*pushAfterBuild=*/true);
 }
 
 void update_keyboard(PetMachine* pet)

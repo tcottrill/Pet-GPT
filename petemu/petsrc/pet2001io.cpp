@@ -511,12 +511,13 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 
 	case VIA_PCR:
 	{
-		// Preserve PET-specific charset toggle behavior
-		const uint8_t old_pcr = m_via.readReg(0x0C);
-		const bool old_is_toggle = ((old_pcr & 0x0C) == 0x0C);
+		// CA2 is the charset line. Whenever the NEW PCR puts CA2 in manual
+		// output mode (bits 3:2 = 11), the charset follows bit 1 - regardless
+		// of the OLD mode. Requiring the old PCR to already be in manual mode
+		// swallowed the KERNAL's first PCR write after reset, leaving the
+		// display in a stale charset until the user poked 59468 twice.
 		const bool new_is_toggle = ((d8 & 0x0C) == 0x0C);
-
-		if (old_is_toggle && new_is_toggle && ((old_pcr ^ d8) & 0x02))
+		if (new_is_toggle)
 			m_video.setCharset((d8 & 0x02) != 0);
 
 		m_via.writeReg(0x0C, d8);
@@ -529,6 +530,12 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 
 	case VIA_ANH:
 		m_via.writeReg(0x0F, d8);
+		// SNES adapter: $E84F is the CONVENTIONAL way to drive user-port
+		// LATCH(PA5)/CLOCK(PA3) - it's ORA without the CA2 handshake ($E841
+		// accesses touch CA2, the charset line). Mirror the VIA_DRA hook or
+		// the adapter never sees the edges and the pad reads dead/stuck.
+		m_snes.onPortAWrite(m_via.getPortAOutput());
+		refreshSnesData();
 		return;
 
 	default:
