@@ -199,8 +199,9 @@ static inline bool press_pet_special_from_vk(std::uint8_t out[10], int vk, const
 	const bool sh = ((kbState[VK_SHIFT] | kbState[VK_LSHIFT] | kbState[VK_RSHIFT]) & 0x80) != 0;
 
 	switch (vk) {
-	case VK_SPACE:   row = 9; col = 2; break; // Space
-	case VK_RETURN:  row = 6; col = 5; break; // Return
+	case VK_SPACE:     row = 9; col = 2; break; // Space
+	case VK_RETURN:    row = 6; col = 5; break; // Return
+	case VK_SEPARATOR: row = 6; col = 5; break; // Numpad Enter (RawInput remaps E0 Return here)
 	case VK_CAPITAL: row = 9; col = 4; break; // RUN/STOP (CapsLock)
 	//case VK_HOME:    row = 9; col = 0; break; // CLR/HOME
 	case VK_HOME: row = 0; col = 6; break; // CLR/HOME (graphics keyboard)
@@ -341,6 +342,17 @@ static void build_pet_rows_core(std::uint8_t out[10],
 	mirrorAgg(VK_SHIFT, VK_LSHIFT, VK_RSHIFT);
 	mirrorAgg(VK_CONTROL, VK_LCONTROL, VK_RCONTROL);
 	mirrorAgg(VK_MENU, VK_LMENU, VK_RMENU);
+
+	// Plain Ctrl (without Alt) has no PET meaning, but ToUnicodeEx turns
+	// Ctrl+letter into control codes - Ctrl+M gives 0x0D and Ctrl+J 0x0A,
+	// both of which map to PET RETURN (spurious presses). Strip Ctrl from
+	// the translation state unless Alt is also down (AltGr on intl layouts).
+	const bool altDown = (kbState[VK_MENU] & 0x80) != 0;
+	if (!altDown && (kbState[VK_CONTROL] & 0x80)) {
+		kbState[VK_CONTROL] = 0;
+		kbState[VK_LCONTROL] = 0;
+		kbState[VK_RCONTROL] = 0;
+	}
 
 	HKL layout = GetKeyboardLayout(0);
 

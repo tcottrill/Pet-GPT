@@ -1,4 +1,4 @@
-﻿#include "framework.h"
+#include "framework.h"
 #include "glew.h"
 #include "wglew.h"
 #include "sys_log.h"
@@ -210,6 +210,19 @@ static bool load_pet2001n_romset(PetMachine& m, const std::string& dir)
 	if (!rd(dir + "901447-24.ud8", editN))  return false;   // EDIT (normal) @ E000 (2KB)
 	if (!rd(dir + "901465-03.ud9", kernal)) return false;   // KERNAL @ F000
 
+	// A truncated image would install partially and leave open-bus holes in
+	// ROM space (a short KERNAL puts $FFFF in the reset vector -> the CPU
+	// runs wild through open bus with only a log line as a symptom). Fail.
+	auto sized = [](const std::vector<uint8_t>& v, size_t want, const char* name) -> bool {
+		if (v.size() == want) return true;
+		LOG_ERROR("ROM %s size=%zu (expected %zu) - set not installed", name, v.size(), want);
+		return false;
+	};
+	if (!sized(basicC, 0x1000, "901465-01.ud6")) return false;
+	if (!sized(basicD, 0x1000, "901465-02.ud7")) return false;
+	if (!sized(editN,  0x0800, "901447-24.ud8")) return false;
+	if (!sized(kernal, 0x1000, "901465-03.ud9")) return false;
+
 	// Use PetMachine::loadRom so CPU MEM mirror is kept in sync
 	if (!m.loadRom(basicC.data(), basicC.size(), 0xC000)) return false;
 	if (!m.loadRom(basicD.data(), basicD.size(), 0xD000)) return false;
@@ -282,13 +295,13 @@ static bool load_pet2_romset(PetMachine& pet, const std::string& dir, bool edito
 	if (!readFile(path_ch1, char1)) return false;
 	if (!readFile(path_ch2, char2)) return false;
 
-	if (basicC.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", path_basicC.c_str(), basicC.size());
-	if (basicD.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", path_basicD.c_str(), basicD.size());
+	if (basicC.size() != 0x1000) { LOG_ERROR("%s size=%zu (expected 4096) - not installed", path_basicC.c_str(), basicC.size()); return false; }
+	if (basicD.size() != 0x1000) { LOG_ERROR("%s size=%zu (expected 4096) - not installed", path_basicD.c_str(), basicD.size()); return false; }
 	if (!(editE.size() == 0x0800 || editE.size() == 0x1000))
 		LOG_ERROR("%s size=%zu (expected 2048 or 4096)", path_edit.c_str(), editE.size());
-	if (kernalF.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", path_kernal.c_str(), kernalF.size());
-	if (char1.size() < 0x0400)    LOG_ERROR("%s size=%zu (expected >=1024)", path_ch1.c_str(), char1.size());
-	if (char2.size() < 0x0400)    LOG_ERROR("%s size=%zu (expected >=1024)", path_ch2.c_str(), char2.size());
+	if (kernalF.size() != 0x1000) { LOG_ERROR("%s size=%zu (expected 4096) - not installed", path_kernal.c_str(), kernalF.size()); return false; }
+	if (char1.size() < 0x0400)    { LOG_ERROR("%s size=%zu (expected >=1024) - not installed", path_ch1.c_str(), char1.size()); return false; }
+	if (char2.size() < 0x0400)    { LOG_ERROR("%s size=%zu (expected >=1024) - not installed", path_ch2.c_str(), char2.size()); return false; }
 
 	if (!pet.loadRom(basicC.data(), std::min<size_t>(basicC.size(), 0x1000), 0xC000)) { LOG_ERROR("load BASIC C000 failed"); return false; }
 	if (!pet.loadRom(basicD.data(), std::min<size_t>(basicD.size(), 0x1000), 0xD000)) { LOG_ERROR("load BASIC D000 failed"); return false; }
@@ -326,13 +339,13 @@ static bool load_pet4_romset(PetMachine& pet, const std::string& dir)
 	if (!readFile(p_ch1, char1)) return false;
 	if (!readFile(p_ch2, char2)) return false;
 
-	if (basB.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", p_basB.c_str(), basB.size());
-	if (basC.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", p_basC.c_str(), basC.size());
-	if (basD.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", p_basD.c_str(), basD.size());
-	if (editN.size() != 0x0800) LOG_ERROR("%s size=%zu (expected 2048)", p_edit.c_str(), editN.size());
-	if (kernalF.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", p_kern.c_str(), kernalF.size());
-	if (char1.size() < 0x0400)    LOG_ERROR("%s size=%zu (expected >=1024)", p_ch1.c_str(), char1.size());
-	if (char2.size() < 0x0400)    LOG_ERROR("%s size=%zu (expected >=1024)", p_ch2.c_str(), char2.size());
+	if (basB.size() != 0x1000) { LOG_ERROR("%s size=%zu (expected 4096) - not installed", p_basB.c_str(), basB.size()); return false; }
+	if (basC.size() != 0x1000) { LOG_ERROR("%s size=%zu (expected 4096) - not installed", p_basC.c_str(), basC.size()); return false; }
+	if (basD.size() != 0x1000) { LOG_ERROR("%s size=%zu (expected 4096) - not installed", p_basD.c_str(), basD.size()); return false; }
+	if (editN.size() != 0x0800) { LOG_ERROR("%s size=%zu (expected 2048) - not installed", p_edit.c_str(), editN.size()); return false; }
+	if (kernalF.size() != 0x1000) { LOG_ERROR("%s size=%zu (expected 4096) - not installed", p_kern.c_str(), kernalF.size()); return false; }
+	if (char1.size() < 0x0400)    { LOG_ERROR("%s size=%zu (expected >=1024) - not installed", p_ch1.c_str(), char1.size()); return false; }
+	if (char2.size() < 0x0400)    { LOG_ERROR("%s size=%zu (expected >=1024) - not installed", p_ch2.c_str(), char2.size()); return false; }
 
 	// Install ROMs into the bus overlay + CPU MEM mirror
 	if (!pet.loadRom(basB.data(), std::min<size_t>(basB.size(), 0x1000), 0xB000)) { LOG_ERROR("load BASIC B000 failed"); return false; }
@@ -455,10 +468,12 @@ bool emu_run_frame()
 	// audio time-base matches game time exactly.
 	const double frameCycles = (double)g_pet->io().cb2GetTickCounter();
 
-	g_cb2render.render(edges, edgeCount, frameStartLevel, stream_data, (int)frameCount, frameCycles);
+	if (stream_data) {
+		g_cb2render.render(edges, edgeCount, frameStartLevel, stream_data, (int)frameCount, frameCycles);
 
-	// Send to sound driver
-	stream_update(1, stream_data); // 1 channel
+		// Send to sound driver
+		stream_update(1, stream_data); // 1 channel
+	}
 
 	mixer_update();
 
@@ -629,6 +644,14 @@ static bool reset_and_wait_for_ready()
 	if (!g_pet) return false;
 	g_pet->reset();
 
+	// Reset preserves screen RAM (like real hardware), so the pre-reset
+	// "READY." prompt is still sitting in $8000 and the scan below would
+	// match it on frame 1 - before cold-start has run - and the subsequent
+	// NEW would wipe the injected program. Blank the screen bytes first
+	// (the KERNAL clears the screen during cold start anyway).
+	for (uint16_t a = VIDRAM_ADDR; a <= VIDRAM_END; ++a)
+		g_pet->bus().writeByte(a, 0x20);
+
 	static const uint8_t READY[6] = { 0x12, 0x05, 0x01, 0x04, 0x19, 0x2E }; // "READY." screen codes
 	const int cyclesPerFrame = 1000000 / 60;
 	const int maxFrames = 300;   // ~5 s emulated backstop; the loop exits as soon as READY appears
@@ -671,8 +694,26 @@ void pet_load_software(const char* utf8_path) {
 	// (equivalent to LOAD"name",8,1). The CPU executes from the same RAM buffer
 	// PetMem::writeByte() stores into, so the bytes are visible immediately.
 	std::vector<uint8_t> file;
-	if (!ieee_helpers::read_all_file(p, file) || file.size() < 2) {
-		LOG_ERROR("[PET] failed to read PRG '%s'", p.c_str());
+	if (!ieee_helpers::read_all_file(p, file) || file.size() <= 2) {
+		// <= 2: a load address with zero payload is a truncated/corrupt PRG;
+		// injecting it would leave BASIC with VARTAB==TXTTAB and garbage links.
+		LOG_ERROR("[PET] failed to read PRG '%s' (missing or empty)", p.c_str());
+		return;
+	}
+
+	auto& mem = g_pet->bus();
+	const uint16_t loadAddr = (uint16_t)file[0] | ((uint16_t)file[1] << 8);
+	const size_t   nbytes   = file.size() - 2;
+	const uint32_t endAddr  = (uint32_t)loadAddr + (uint32_t)nbytes;   // exclusive
+
+	// Reject rather than truncate: a partial load "succeeds" and then fails
+	// bizarrely at run time (writeByte drops the tail, VARTAB points past RAM,
+	// the first variable store corrupts BASIC state). Checked BEFORE the
+	// reset below so a bad file leaves the running session untouched.
+	if (endAddr > mem.ramConfiguredBytes()) {
+		LOG_ERROR("[PET] PRG '%s' needs RAM to $%04X but only %zuK is configured - "
+		          "not loaded (Machine > Memory to raise it)",
+		          p.c_str(), (unsigned)endAddr, mem.ramConfiguredBytes() / 1024);
 		return;
 	}
 
@@ -681,15 +722,6 @@ void pet_load_software(const char* utf8_path) {
 	// across reset, and we wait for the READY prompt so cold-start doesn't wipe
 	// the program we're about to inject.
 	reset_and_wait_for_ready();
-
-	auto& mem = g_pet->bus();
-	const uint16_t loadAddr = (uint16_t)file[0] | ((uint16_t)file[1] << 8);
-	const size_t   nbytes   = file.size() - 2;
-	const uint32_t endAddr  = (uint32_t)loadAddr + (uint32_t)nbytes;   // exclusive
-
-	if (endAddr > mem.ramConfiguredBytes())
-		LOG_WARN("[PET] PRG '%s' ends at $%04X, past configured RAM ($%04zX); "
-		         "trailing bytes not loaded", p.c_str(), (unsigned)endAddr, mem.ramConfiguredBytes());
 
 	for (size_t i = 0; i < nbytes; ++i) {
 		const uint32_t a = (uint32_t)loadAddr + (uint32_t)i;
@@ -735,6 +767,8 @@ void emu_end()
 	remove_joystick();
 	stream_stop(1, 1);
 	mixer_end();
+	std::free(stream_data);
+	stream_data = nullptr;
 	delete g_pet;
 	g_pet = nullptr;
 }

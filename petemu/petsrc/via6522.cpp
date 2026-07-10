@@ -98,6 +98,7 @@ void VIA6522::reset()
 	t1_reload_pending = false;
 	t2_reload_pending = false;
 	t2_oneshot_fired = false;
+	t1_oneshot_fired = false;
 
 	t2_counter = 0;
 	t2_latch = 0;
@@ -117,6 +118,8 @@ void VIA6522::reset()
 	// Inputs
 	portA_in = 0xFF;
 	portB_in = 0xFF;
+	ira_latch = 0xFF;
+	irb_latch = 0xFF;
 
 	// CA1/CB1
 	ca1_in = false;
@@ -206,6 +209,10 @@ void VIA6522::setPortAInput(uint8_t value)
 
 void VIA6522::setPortBInput(uint8_t value)
 {
+	// T2 pulse-counting mode (ACR5): count PB6 NEGATIVE edges.
+	if (t2_counts_external && (portB_in & 0x40) && !(value & 0x40))
+		externalT2Pulse();
+
 	portB_in = value;
 }
 
@@ -253,22 +260,47 @@ bool VIA6522::getCB2Output() const
 // Register Access
 // -----------------------------------------------------------------------------
 
-uint8_t VIA6522::readPortA()
+// Flag clears on ORA/ORB access. Per the 6522 datasheet, reading or writing
+// the port clears the corresponding C1 flag and (unless the C2 line is in an
+// "independent interrupt" input mode, PCR mode 001/011) the C2 flag too.
+// Register $F (ORA no-handshake) performs NO clears - callers decide.
+void VIA6522::clearPortAFlags()
 {
-	uint8_t out = (ora & ddra) | (portA_in & ~ddra);
-
-	// Reading ORA clears IFR bit 1 (CA1)
-	if (ifr & 0x02) {
-		ifr &= ~0x02;
+	const uint8_t ca2m = (pcr >> 1) & 0x07;
+	uint8_t mask = 0x02;                        // CA1
+	if (ca2m != 1 && ca2m != 3) mask |= 0x01;   // CA2, unless independent
+	if (ifr & mask) {
+		ifr &= (uint8_t)~mask;
 		updateIFR();
 	}
-	return out;
+}
+
+void VIA6522::clearPortBFlags()
+{
+	const uint8_t cb2m = (pcr >> 5) & 0x07;
+	uint8_t mask = 0x10;                        // CB1
+	if (cb2m != 1 && cb2m != 3) mask |= 0x08;   // CB2, unless independent
+	if (ifr & mask) {
+		ifr &= (uint8_t)~mask;
+		updateIFR();
+	}
+}
+
+uint8_t VIA6522::readPortA()
+{
+	// With PA latching enabled (ACR0), input bits come from the value
+	// captured at the last CA1 active edge instead of the live pins.
+	const uint8_t in = (acr & 0x01) ? ira_latch : portA_in;
+	return (uint8_t)((ora & ddra) | (in & ~ddra));
 }
 
 uint8_t VIA6522::readPortB()
 {
+	// With PB latching enabled (ACR1), input bits come from the value
+	// captured at the last CB1 active edge instead of the live pins.
+	const uint8_t in = (acr & 0x02) ? irb_latch : portB_in;
 	// Base pins: outputs from ORB where DDRB=1, inputs from external world where DDRB=0
-	uint8_t pins = (orb & ddrb) | (portB_in & ~ddrb);
+	uint8_t pins = (orb & ddrb) | (in & ~ddrb);
 
 	// If PB7 is under Timer 1 control (ACR7=1) and configured as output (DDRB7=1),
 	// override pin 7 with the internal PB7 timer output state.
@@ -290,19 +322,26 @@ uint8_t VIA6522::readReg(uint8_t offset)
 	switch (offset)
 	{
 	case 0x00: // ORB / IRB
-		// Return the composite PB pins (outputs + inputs + PB7 override)
+		// Return the composite PB pins; the access clears CB1/CB2 flags.
+		clearPortBFlags();
 		return readPortB();
 
 	case 0x01: // ORA / IRA
-		// Return the composite PA pins and clear CA1 flag
+		// The access clears CA1/CA2 flags and (in CA2 handshake output
+		// mode) starts the CA2 handshake, same as an ORA write.
+		clearPortAFlags();
+		handleCA2WriteSideEffects();
 		return readPortA();
 
-	case 0x0F: // ORA duplicate
-		// Mirror of ORA
+	case 0x0F: // ORA no-handshake ($F)
+		// Same pins as ORA but with NO flag clears and NO CA2 handshake.
 		return readPortA();
 
-	case 0x02: return ddra;
-	case 0x03: return ddrb;
+	// Real 6522 register map: reg 2 = DDRB, reg 3 = DDRA. (An earlier version
+	// had these swapped internally, with the PET IO glue cross-mapping to
+	// compensate; both now use the datasheet layout.)
+	case 0x02: return ddrb;
+	case 0x03: return ddra;
 
 	case 0x04: // T1 low counter
 	{
@@ -391,13 +430,15 @@ void VIA6522::writeReg(uint8_t offset, uint8_t data)
 		// Update output pins based on DDRB.
 		updatePBOutput();
 
+		// ORB access clears CB1/CB2 flags (except CB2-independent mode).
+		clearPortBFlags();
+
 		// Handle CB2 handshake/pulse behavior for ORB write.
 		handleCB2WriteSideEffects();
 	}
 	break;
 
 	case 0x01: // ORA
-	case 0x0F: // duplicate ORA
 	{
 		uint8_t old_ora = ora;
 		ora = data;
@@ -410,19 +451,19 @@ void VIA6522::writeReg(uint8_t offset, uint8_t data)
 			(unsigned)((pcr >> 1) & 0x07)
 		);
 
+		// ORA access clears CA1/CA2 flags (except CA2-independent mode).
+		clearPortAFlags();
 		handleCA2WriteSideEffects();
 		break;
 	}
 
-	case 0x02: // DDRA
-	{
-		uint8_t old = ddra;
-		(void)old;
-		ddra = data;
+	case 0x0F: // ORA no-handshake ($F)
+		// Updates the output latch but performs NO flag clears and NO CA2
+		// handshake (this is why the PET drives the user port through $E84F).
+		ora = data;
 		break;
-	}
 
-	case 0x03: // DDRB
+	case 0x02: // DDRB (real 6522 layout: reg 2 = DDRB)
 	{
 		uint8_t old = ddrb;
 		(void)old;
@@ -430,6 +471,14 @@ void VIA6522::writeReg(uint8_t offset, uint8_t data)
 
 		// Changing direction affects visible pins.
 		updatePBOutput();
+		break;
+	}
+
+	case 0x03: // DDRA (real 6522 layout: reg 3 = DDRA)
+	{
+		uint8_t old = ddra;
+		(void)old;
+		ddra = data;
 		break;
 	}
 
@@ -450,9 +499,15 @@ void VIA6522::writeReg(uint8_t offset, uint8_t data)
 			updateIFR();
 		}
 
-		// Arm Timer 1.
+		// Arm Timer 1 (re-arms the one-shot interrupt too).
 		t1_enabled = true;
+		t1_oneshot_fired = false;
 		t1_free_running = (acr & 0x40) != 0;
+
+		// With PB7 under T1 control, writing T1C-H drives PB7 LOW: the
+		// one-shot low pulse starts here and ends at timeout (datasheet).
+		if (acr & 0x80)
+			t1_pb7_toggle = false;
 		break;
 	}
 
@@ -462,6 +517,13 @@ void VIA6522::writeReg(uint8_t offset, uint8_t data)
 
 	case 0x07: // T1LH
 		t1_latch = (uint16_t)((t1_latch & 0x00FF) | (uint16_t)(data << 8));
+
+		// Writing T1L-H clears IFR6: the "re-program the next interval
+		// from inside the IRQ handler without reloading" idiom acks here.
+		if (ifr & 0x40) {
+			ifr &= (uint8_t)~0x40;
+			updateIFR();
+		}
 		break;
 
 	case 0x08: // T2LL
@@ -570,6 +632,10 @@ void VIA6522::writeReg(uint8_t offset, uint8_t data)
 
 		acr = data;
 
+		// T2 counting source: ACR5 = 1 -> count PB6 negative edges,
+		// not PHI2 (see setPortBInput / externalT2Pulse).
+		t2_counts_external = (acr & 0x20) != 0;
+
 		// SR mode from ACR bits 4..2
 		uint8_t mode = (uint8_t)((acr >> 2) & 0x07);
 		sr_mode = mode;
@@ -593,6 +659,21 @@ void VIA6522::writeReg(uint8_t offset, uint8_t data)
 		// CB2 mode is PCR bits 7..5 (NOT 5..3).
 		uint8_t cb2_mode = (uint8_t)((pcr >> 5) & 0x07);
 		cb2_is_output = (cb2_mode >= 4);
+
+		// Entering CB2 handshake mode (100): the line idles HIGH until the
+		// first ORB write (it has no per-tick driver, so raise it here).
+		// Skip while the SR is actively driving CB2 (sound path).
+		if (cb2_mode == 4 && !cb2_out &&
+			!(sr_shift_out && (sr_bits_remaining > 0 || sr_bits_left > 0)))
+		{
+			cb2_out = true;
+			logCB2Transition();
+			logCB2Edge();
+		}
+
+		// Entering CA2 handshake mode (100): same idle-high rule.
+		if (((pcr >> 1) & 0x07) == 4)
+			ca2_out = true;
 
 		// Force logic update immediately. Critical for Manual PCR sound toggling.
 		handleCB2Logic();
@@ -707,6 +788,15 @@ void VIA6522::handleCA1Edge()
 
 	if (trigger) {
 		ifr |= 0x02; // IFR1
+
+		// ACR0: the CA1 active edge captures the PA pins into the input latch.
+		if (acr & 0x01)
+			ira_latch = portA_in;
+
+		// CA2 handshake output mode (100): the CA1 active edge releases CA2
+		// back HIGH (it was driven low by the preceding ORA access).
+		if (((pcr >> 1) & 0x07) == 4 && !ca2_out)
+			ca2_out = true;
 	}
 
 	old_ca1 = ca1_in;
@@ -729,6 +819,10 @@ void VIA6522::handleCB1Edge()
 	{
 		// MAME: via_set_int(which, INT_CB1)
 		ifr |= 0x10; // IFR4
+
+		// ACR1: the CB1 active edge captures the PB pins into the input latch.
+		if (acr & 0x02)
+			irb_latch = portB_in;
 
 		// MAME CB2_AUTO_HS: CB1 active edge drives CB2 back HIGH.
 		if (cb2_auto_handshake(pcr))
@@ -772,11 +866,11 @@ void VIA6522::runTimer1()
 
 	if (t1_counter == 0x0000)
 	{
-		// Underflow: set IFR6
-		ifr |= 0x40;
-
 		if (acr & 0x40) // free-run
 		{
+			// Underflow: set IFR6.
+			ifr |= 0x40;
+
 			// Pass through 0xFFFF for one cycle, then reload from latch next cycle.
 			t1_counter = 0xFFFF;
 			t1_reload_pending = true;
@@ -784,10 +878,18 @@ void VIA6522::runTimer1()
 		}
 		else
 		{
-			// One-shot: fire once, keep counting from 0xFFFF, force PB7 high.
+			// One-shot: only the INTERRUPT is one-shot. The counter keeps
+			// running (0xFFFF, FFFE, ... with no latch reload) so software
+			// can read elapsed-time-since-timeout; freezing it here returned
+			// a constant 0xFFFF. PB7 returns high at timeout (end of pulse).
+			// Later 64K rollovers set no new flag (until T1C-H re-arms).
+			if (!t1_oneshot_fired)
+			{
+				ifr |= 0x40;
+				t1_oneshot_fired = true;
+				t1_pb7_toggle = true;
+			}
 			t1_counter = 0xFFFF;
-			t1_enabled = false;
-			t1_pb7_toggle = true;
 		}
 	}
 	else
@@ -803,6 +905,12 @@ void VIA6522::runTimer2()
 		return;
 
 	const bool sr_t2_mode = (sr_mode == 0x01 || sr_mode == 0x04 || sr_mode == 0x05);
+
+	// ACR5 pulse-counting mode: T2 decrements on PB6 negative edges (see
+	// setPortBInput -> externalT2Pulse), NOT on PHI2. SR-under-T2 modes keep
+	// PHI2 counting (SR clocking takes precedence; PET sound path).
+	if (t2_counts_external && !sr_t2_mode)
+		return;
 
 	if (t2_reload_pending)
 	{
@@ -1065,46 +1173,44 @@ void VIA6522::handleCA2Logic()
 	bool neg_edge = (prev && !curr);     // 1 -> 0
 	bool pos_edge = (!prev && curr);     // 0 -> 1
 
+	// Real 6522 CA2 decode (PCR bits 3:1) - NOTE this differs from an earlier
+	// version of this file that had manual (2/3) and independent (6/7) swapped:
+	//   000 input neg edge          001 input neg edge, INDEPENDENT
+	//   010 input pos edge          011 input pos edge, INDEPENDENT
+	//   100 handshake output        101 pulse output
+	//   110 manual output LOW       111 manual output HIGH
 	switch (mode)
 	{
-	case 0: // Input, negative edge, handshake
+	case 0: // Input, negative edge (handshake clearing)
+	case 1: // Input, negative edge, independent interrupt
 		if (neg_edge) {
 			ifr |= 0x01; // IFR0 (CA2)
 		}
 		break;
 
-	case 1: // Input, positive edge, handshake
+	case 2: // Input, positive edge (handshake clearing)
+	case 3: // Input, positive edge, independent interrupt
 		if (pos_edge) {
 			ifr |= 0x01;
 		}
 		break;
 
-	case 2: // Output, manual low
-		ca2_out = false;
+	case 4: // Output, handshake: driven low by ORA access, released high by
+	        // the CA1 active edge (handleCA1Edge). Level HOLDS between - no
+	        // per-tick action (an earlier version forced it high every tick,
+	        // collapsing the handshake to a 1-cycle pulse).
 		break;
 
-	case 3: // Output, manual high
-		ca2_out = true;
-		break;
-
-	case 4: // Output, handshake (DAV on PET)
-	case 5: // Output, pulse low (one-shot)
-		// Pulse timing handled by updateCA2State()
+	case 5: // Output, pulse low (one cycle following an ORA access)
 		updateCA2State(mode);
 		break;
 
-	case 6: // Input, negative edge, independent interrupt
-		if (neg_edge) {
-			ifr |= 0x01;
-		}
-		// Clearing only via IFR write.
+	case 6: // Output, manual LOW
+		ca2_out = false;
 		break;
 
-	case 7: // Input, positive edge, independent interrupt
-		if (pos_edge) {
-			ifr |= 0x01;
-		}
-		// Clearing only via IFR write.
+	case 7: // Output, manual HIGH
+		ca2_out = true;
 		break;
 	}
 
@@ -1240,10 +1346,13 @@ void VIA6522::handleCB2Logic()
 		// Output modes (bit7 = 1, cb2_mode 4..7)
 		switch (mode)
 		{
-		case 4: // handshake output (AUTO_HS)
-		case 5: // pulse output (AUTO_HS)
-			// In AUTO_HS modes, CB2 is driven directly by ORB writes and CB1 edges.
-			// We emulate this via cb2_pulse_count and updateCB2State().
+		case 4: // handshake output: level transitions happen in the ORB-write
+		        // side effect (low) and the CB1 active edge (high). The level
+		        // HOLDS between - forcing it high per tick here collapsed the
+		        // handshake to a 1-cycle pulse.
+			break;
+
+		case 5: // pulse output: one-cycle low after ORB write
 			updateCB2State(mode);
 			logCB2Transition();
 			break;
@@ -1348,44 +1457,30 @@ void VIA6522::updatePBOutput()
 	//LOG_DEBUG("VIA6522: PB pins=%02X (ORB=%02X DDRB=%02X IN=%02X)",	pins, orb, ddrb, portB_in);
 }
 
+// Called on ORA READS and WRITES (the 6522 triggers the CA2 handshake on
+// both). Register $F (ORA no-handshake) deliberately does not call this.
 void VIA6522::handleCA2WriteSideEffects()
 {
-	// CA2 mode is encoded in PCR bits 3..1
+	// CA2 mode is encoded in PCR bits 3..1 (real decode - see handleCA2Logic).
 	uint8_t mode = (pcr >> 1) & 0x07;
 
 	switch (mode)
 	{
-	case 0: // Input, negative edge, handshake
-	case 1: // Input, positive edge, handshake
-	case 6: // Input, negative edge, independent interrupt
-	case 7: // Input, positive edge, independent interrupt
-		// In all input modes, writing ORA has no effect on CA2.
-		break;
-
-	case 2: // Output, manual low
+	case 4: // Output, handshake: drive low, HOLD until the CA1 active edge
 		ca2_out = false;
-		break;
-
-	case 3: // Output, manual high
-		ca2_out = true;
-		break;
-
-	case 4: // Output, handshake (PET DAV mode)
-		ca2_pulse_count = 1;
 		LOG_DEBUG(
-			"VIA6522: CA2 handshake pulse armed (PCR=%02X, mode=%u)",
-			(unsigned)pcr,
-			(unsigned)mode
+			"VIA6522: CA2 handshake asserted low (PCR=%02X)",
+			(unsigned)pcr
 		);
 		break;
 
-	case 5: // Output, pulse low then restore high
+	case 5: // Output, pulse: low for one cycle, then released by updateCA2State
+		ca2_out = false;
 		ca2_pulse_count = 1;
-		LOG_DEBUG(
-			"VIA6522: CA2 manual pulse armed (PCR=%02X, mode=%u)",
-			(unsigned)pcr,
-			(unsigned)mode
-		);
+		break;
+
+	default:
+		// Input modes (0-3) and manual outputs (6/7): ORA access is a no-op.
 		break;
 	}
 }
@@ -1411,10 +1506,15 @@ void VIA6522::handleCB2WriteSideEffects()
 	if (!is_output)
 		return; // input modes: no write-side CB2 behavior
 
-	// MAME-style "AUTO_HS": handshake and pulse outputs both behave the same.
+	// Handshake (100) and pulse (101) both drive CB2 LOW on an ORB write.
+	// The difference is the release: handshake HOLDS low until the next CB1
+	// active edge (handleCB1Edge); pulse releases after one cycle via
+	// cb2_pulse_count / updateCB2State.
 	if (cb2_auto_handshake(pcr))
 	{
-		// ORB write drives CB2 LOW if it is currently HIGH.
+		if (mode == 5)
+			cb2_pulse_count = 1;
+
 		if (cb2_out)
 		{
 			cb2_out = false;
@@ -1427,8 +1527,6 @@ void VIA6522::handleCB2WriteSideEffects()
 	}
 
 	// Fixed output modes (6/7) do not get pulses here, just like MAME.
-	// If you want, you can keep any non-AUTO_HS pulse modes here,
-	// but by 6522 spec and MAME's macros, there are none.
 }
 
 void VIA6522::logCB2Edge()

@@ -160,6 +160,9 @@ private:
     void updatePBOutput();
     void handleCA2WriteSideEffects();
     void handleCB2WriteSideEffects();
+    // ORA/ORB access clears the C-line IFR flags (except independent modes)
+    void clearPortAFlags();
+    void clearPortBFlags();
     void updateCB2State(uint8_t mode);
     inline void driveCB2(bool level);
    
@@ -186,6 +189,7 @@ private:
     bool     t1_reload_pending = false;  // one-cycle 0xFFFF pass after T1 underflow (N+2 timing)
     bool     t2_reload_pending = false;  // one-cycle 0xFFFF pass after T2 underflow (N+2 timing)
     bool     t2_oneshot_fired  = false;  // plain-timer T2 already set IFR5 once
+    bool     t1_oneshot_fired  = false;  // one-shot T1 already set IFR6 (counter keeps running)
 
     uint16_t t2_counter;
     uint16_t t2_latch;
@@ -207,6 +211,10 @@ private:
     // Port inputs
     uint8_t portA_in;
     uint8_t portB_in;
+
+    // Input latches (ACR bits 0/1): captured on the CA1/CB1 active edge
+    uint8_t ira_latch;
+    uint8_t irb_latch;
 
     // CA1/CB1 state
     bool ca1_in, old_ca1;
@@ -231,7 +239,10 @@ private:
     // -------------------------------------------------------------------------
     // CB2 audio edge logging
     // -------------------------------------------------------------------------
-    static const uint32_t CB2_EDGE_MAX = 8192;
+    // Worst case is one edge per PHI2 tick (PHI2-driven SR with an alternating
+    // pattern): ~16640 edges per 60 Hz frame. 8192 silently dropped the tail
+    // of such frames, flat-lining the audio reconstruction.
+    static const uint32_t CB2_EDGE_MAX = 17000;
 
     CB2Edge   cb2_edges[CB2_EDGE_MAX];
     uint32_t  cb2_edge_count = 0;

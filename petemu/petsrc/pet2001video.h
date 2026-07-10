@@ -108,7 +108,10 @@ private:
 
     // Colors
     static constexpr uint32_t RGBA_BLACK   = 0xFF000000u;
-    static constexpr uint32_t RGBA_WHITEISH= 0xFFEFEFFFu; // #EFFEFF + opaque
+    // Little-endian RGBA bytes FF,EF,EF,FF = R255 G239 B239 - a slightly WARM
+    // white. (An older comment claimed #EFFEFF / cool white; the warm value is
+    // what has always rendered and is the accepted look - keep it.)
+    static constexpr uint32_t RGBA_WHITEISH= 0xFFEFEFFFu;
 };
 
 #endif // PET2001VIDEO_H

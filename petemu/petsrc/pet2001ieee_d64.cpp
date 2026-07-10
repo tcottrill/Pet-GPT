@@ -43,6 +43,15 @@ bool PetIEEE::d64_write_sector(int track, int sector, const uint8_t* src) {
 
 bool PetIEEE::d64_flush_image_to_disk() {
 	if (d64Path.empty() || d64.empty()) return false;
+	// The BAM/allocator math in this backend is 35-track. Writing a 40-track
+	// (or other non-standard) image back with 35-track assumptions corrupts
+	// it, so treat those images as WRITE-PROTECTED: reads work normally,
+	// writes fail cleanly (callers set WRITE ERROR / DS$).
+	if (d64.size() != 174848 && d64.size() != 175531) {
+		LOG_ERROR("[D64] image is not 35-track (%zu bytes) - mounted write-protected, not flushed",
+			d64.size());
+		return false;
+	}
 	return write_all_file(std::filesystem::path(d64Path), d64);
 }
 

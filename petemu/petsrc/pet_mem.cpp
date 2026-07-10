@@ -84,9 +84,12 @@ uint8_t PetMem::readByte(uint16_t addr)
 		return rom[addr];
 	}
 
-	// ---------------- RAM (includes video RAM reads) ----------------
-	if (inRange(addr, VIDRAM_ADDR, VIDRAM_END)) {
-		return ram[addr];
+	// ---------------- Screen RAM window ($8000-$8FFF) ----------------
+	// The physical 1 KB screen SRAM ($8000-$83FF, including the 24 bytes past
+	// the 1000 visible ones) is mirrored four times across the 4 KB window on
+	// 40-column PETs. Software stashes data at $83E8+ and probes the mirrors.
+	if ((addr & 0xF000) == 0x8000) {
+		return ram[0x8000 | (addr & 0x03FF)];
 	}
 
 	// ---------------- Base RAM (obey configured size) --------------
@@ -100,13 +103,17 @@ uint8_t PetMem::readByte(uint16_t addr)
 
 void PetMem::writeByte(uint16_t addr, uint8_t val)
 {
-	// ---------------- Screen RAM mirror ----------------
-	if (inRange(addr, VIDRAM_ADDR, VIDRAM_END)) {
-		ram[addr] = val;
-		if (ramMirror_ && addr < ramMirrorSize_) ramMirror_[addr] = val;
+	// ---------------- Screen RAM window ($8000-$8FFF) ----------------
+	// All four mirrors alias the same 1 KB SRAM; only the first 1000 bytes
+	// are visible on screen (the renderer ignores the 24-byte tail).
+	if ((addr & 0xF000) == 0x8000) {
+		const uint16_t eff = (uint16_t)(0x8000 | (addr & 0x03FF));
+		ram[eff] = val;
+		if (ramMirror_ && eff < ramMirrorSize_) ramMirror_[eff] = val;
 
-		const int vOff = static_cast<int>(addr - VIDRAM_ADDR);
-		videoUnit.write(vOff, val);
+		const int vOff = static_cast<int>(eff - VIDRAM_ADDR);
+		if (vOff < 1000)
+			videoUnit.write(vOff, val);
 		return;
 	}
 

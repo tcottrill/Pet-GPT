@@ -200,6 +200,220 @@ static void test_methodB_nonzero_pattern_sounds(){
     CHECK(v.cb2_get_edge_count() >= 8); // still produces sound
 }
 
+// ---------------------------------------------------------------------------
+// Tier-2 datasheet-accuracy tests (2026-07-10 review fixes)
+// ---------------------------------------------------------------------------
+
+// Reading/writing ORA clears IFR1 (CA1) and IFR0 (CA2) in handshake input
+// modes. Reading/writing ORB clears IFR4 (CB1) and IFR3 (CB2) likewise.
+static void test_porta_access_clears_ca_flags(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_PCR, 0x00);            // CA1 neg edge; CA2 mode 000 (input neg, handshake)
+    v.writeReg(R_IFR, 0x7F);            // start clean
+    v.setCA1(true);  v.tick();
+    v.setCA1(false); v.tick();          // CA1 falling edge -> IFR1
+    v.setCA2(true);  v.tick();
+    v.setCA2(false); v.tick();          // CA2 falling edge -> IFR0
+    CHECK((v.getIFR() & 0x02) != 0);
+    CHECK((v.getIFR() & 0x01) != 0);
+    (void)v.readReg(R_ORA);             // ORA read clears both
+    CHECK_EQ(v.getIFR() & 0x03, 0x00);
+    // Same for ORA WRITE
+    v.setCA1(true); v.tick(); v.setCA1(false); v.tick();
+    v.setCA2(true); v.tick(); v.setCA2(false); v.tick();
+    CHECK_EQ(v.getIFR() & 0x03, 0x03);
+    v.writeReg(R_ORA, 0x00);
+    CHECK_EQ(v.getIFR() & 0x03, 0x00);
+}
+
+// In CA2 INDEPENDENT input mode (PCR CA2 mode 001), port access must NOT
+// clear IFR0 (only an explicit IFR write may).
+static void test_porta_independent_ca2_flag_survives(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_PCR, 0x02);            // CA2 mode 001: independent, negative edge
+    v.writeReg(R_IFR, 0x7F);
+    v.setCA2(true);  v.tick();
+    v.setCA2(false); v.tick();          // neg edge -> IFR0
+    CHECK((v.getIFR() & 0x01) != 0);
+    (void)v.readReg(R_ORA);
+    CHECK((v.getIFR() & 0x01) != 0);    // survives ORA access
+    v.writeReg(R_IFR, 0x01);
+    CHECK_EQ(v.getIFR() & 0x01, 0x00);  // explicit IFR write clears
+}
+
+static void test_portb_access_clears_cb_flags(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_PCR, 0x00);            // CB1 neg edge; CB2 mode 000 (input neg, handshake)
+    v.writeReg(R_IFR, 0x7F);
+    v.setCB1(true);  v.tick();
+    v.setCB1(false); v.tick();          // CB1 falling edge -> IFR4
+    v.setCB2(true);  v.tick();
+    v.setCB2(false); v.tick();          // CB2 falling edge -> IFR3
+    CHECK_EQ(v.getIFR() & 0x18, 0x18);
+    (void)v.readReg(R_ORB);             // ORB read clears both
+    CHECK_EQ(v.getIFR() & 0x18, 0x00);
+    v.setCB1(true); v.tick(); v.setCB1(false); v.tick();
+    v.setCB2(true); v.tick(); v.setCB2(false); v.tick();
+    CHECK_EQ(v.getIFR() & 0x18, 0x18);
+    v.writeReg(R_ORB, 0x00);            // ORB write clears both
+    CHECK_EQ(v.getIFR() & 0x18, 0x00);
+    // Independent CB2 (mode 001 = PCR $20): flag survives ORB access
+    v.writeReg(R_PCR, 0x20);
+    v.writeReg(R_IFR, 0x7F);
+    v.setCB2(true); v.tick(); v.setCB2(false); v.tick();
+    CHECK((v.getIFR() & 0x08) != 0);
+    (void)v.readReg(R_ORB);
+    CHECK((v.getIFR() & 0x08) != 0);
+}
+
+// Register $F (ORA no-handshake) must not clear flags or trigger handshake.
+static void test_anh_no_side_effects(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_PCR, 0x00);
+    v.writeReg(R_IFR, 0x7F);
+    v.setCA1(true);  v.tick();
+    v.setCA1(false); v.tick();          // IFR1 set
+    CHECK((v.getIFR() & 0x02) != 0);
+    (void)v.readReg(0x0F);              // ANH read: flags untouched
+    CHECK((v.getIFR() & 0x02) != 0);
+    v.writeReg(0x0F, 0x55);             // ANH write: flags untouched, ORA updated
+    CHECK((v.getIFR() & 0x02) != 0);
+    CHECK_EQ(v.getORA(), 0x55);
+}
+
+// Writing the T1 high-order LATCH (reg 7) clears IFR6 (the IRQ-handler
+// "re-program without reload" idiom acknowledges T1 this way).
+static void test_t1lh_write_clears_ifr6(){
+    VIA6522 v; v.reset();
+    const int N = 30;
+    v.writeReg(R_ACR, 0x40);            // free-run
+    v.writeReg(R_T1CL, N); v.writeReg(R_T1CH, 0);
+    int hit=-1; for(int i=1;i<=N+5;i++){ v.tick(); if(v.getIFR()&0x40){hit=i;break;} }
+    CHECK(hit>0);
+    v.writeReg(R_T1LH, 0x00);           // latch write acks T1
+    CHECK_EQ(v.getIFR() & 0x40, 0x00);
+}
+
+// One-shot T1 keeps counting after timeout (only the IRQ is one-shot).
+static void test_t1_oneshot_keeps_counting(){
+    VIA6522 v; v.reset();
+    const int N = 50;
+    v.writeReg(R_ACR, 0x00);            // one-shot
+    v.writeReg(R_T1CL, N); v.writeReg(R_T1CH, 0);
+    int hit=-1; for(int i=1;i<=N+5;i++){ v.tick(); if(v.getIFR()&0x40){hit=i;break;} }
+    CHECK(hit>0);
+    v.writeReg(R_IFR, 0x40);
+    uint16_t c1 = (uint16_t)(v.readReg(R_T1CL) | (v.readReg(R_T1CH) << 8));
+    tickN(v, 10);
+    uint16_t c2 = (uint16_t)(v.readReg(R_T1CL) | (v.readReg(R_T1CH) << 8));
+    CHECK_EQ((uint16_t)(c1 - c2), 10);  // still decrementing
+    bool refired=false;
+    for(int i=0;i<0x20000;i++){ v.tick(); if(v.getIFR()&0x40){refired=true;break;} }
+    CHECK(!refired);                    // IRQ stays one-shot until re-armed
+}
+
+// ACR7 one-shot: writing T1C-H drives PB7 LOW; timeout drives it HIGH.
+static void test_pb7_oneshot_pulse(){
+    VIA6522 v; v.reset();
+    const int N = 20;
+    v.writeReg(R_DDRB, 0x80);           // PB7 output
+    v.writeReg(R_ACR, 0x80);            // PB7 under T1, one-shot
+    v.writeReg(R_T1CL, N); v.writeReg(R_T1CH, 0);
+    v.tick();
+    CHECK_EQ(v.readReg(R_ORB) & 0x80, 0x00);   // low during the pulse
+    tickN(v, N+3);                              // through underflow
+    CHECK_EQ(v.readReg(R_ORB) & 0x80, 0x80);   // high after timeout
+}
+
+// ACR5: T2 counts PB6 negative edges, not PHI2.
+static void test_t2_pulse_count_mode(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_ACR, 0x20);            // T2 pulse-counting
+    v.writeReg(R_T2CL, 4); v.writeReg(R_T2CH, 0);
+    v.writeReg(R_IFR, 0x20);
+    tickN(v, 200);                      // PHI2 must NOT count it down
+    CHECK_EQ(v.getIFR() & 0x20, 0x00);
+    uint8_t pb = 0xFF;
+    for (int i = 0; i < 5; ++i) {       // 5 PB6 negative edges
+        v.setPortBInput((uint8_t)(pb & ~0x40)); v.tick();
+        v.setPortBInput(pb);             v.tick();
+    }
+    CHECK((v.getIFR() & 0x20) != 0);    // counted down through zero
+}
+
+// CB2 handshake output (mode 100): ORB write drives CB2 low and it STAYS
+// low until the next active CB1 transition.
+static void test_cb2_handshake_holds_until_cb1(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_PCR, 0x80);            // CB2 mode 100; CB1 neg edge
+    v.setCB1(true); v.tick();           // prime CB1 high (no trigger)
+    v.writeReg(R_ORB, 0x00);            // data taken -> CB2 low
+    CHECK_EQ(v.getCB2Output(), false);
+    tickN(v, 20);
+    CHECK_EQ(v.getCB2Output(), false);  // holds low (no auto-release)
+    v.setCB1(false); v.tick();          // CB1 active edge -> release
+    CHECK_EQ(v.getCB2Output(), true);
+}
+
+// CB2 pulse output (mode 101): one-cycle low pulse after ORB write.
+static void test_cb2_pulse_one_cycle(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_PCR, 0xA0);            // CB2 mode 101
+    v.tick();
+    CHECK_EQ(v.getCB2Output(), true);   // idles high
+    v.writeReg(R_ORB, 0x00);
+    CHECK_EQ(v.getCB2Output(), false);  // pulse starts
+    v.tick();
+    CHECK_EQ(v.getCB2Output(), false);  // low for the pulse cycle
+    v.tick();
+    CHECK_EQ(v.getCB2Output(), true);   // released without any CB1 edge
+}
+
+// Real 6522 CA2 decode: modes 110/111 are MANUAL output low/high
+// (the code previously treated 2/3 as manual and 6/7 as independent input).
+static void test_ca2_manual_modes_real_encoding(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_PCR, 0x0C); v.tick();  // CA2 mode 110 -> manual LOW
+    CHECK_EQ(v.getCA2Output(), false);
+    v.writeReg(R_PCR, 0x0E); v.tick();  // CA2 mode 111 -> manual HIGH
+    CHECK_EQ(v.getCA2Output(), true);
+}
+
+// CA2 handshake output (mode 100): ORA READ or WRITE drives CA2 low; it
+// stays low until the next active CA1 transition.
+static void test_ca2_handshake_on_ora_access(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_PCR, 0x08);            // CA2 mode 100; CA1 neg edge
+    v.setCA1(true); v.tick();           // prime CA1 high
+    (void)v.readReg(R_ORA);             // read triggers handshake
+    CHECK_EQ(v.getCA2Output(), false);
+    tickN(v, 20);
+    CHECK_EQ(v.getCA2Output(), false);  // holds
+    v.setCA1(false); v.tick();          // CA1 active edge releases
+    CHECK_EQ(v.getCA2Output(), true);
+    v.setCA1(true); v.tick();
+    v.writeReg(R_ORA, 0x12);            // write also triggers
+    CHECK_EQ(v.getCA2Output(), false);
+    v.setCA1(false); v.tick();
+    CHECK_EQ(v.getCA2Output(), true);
+}
+
+// ACR0: IRA latches on the CA1 active edge; reads return the latched value
+// until the next active edge.
+static void test_input_latching_porta(){
+    VIA6522 v; v.reset();
+    v.writeReg(R_PCR, 0x00);            // CA1 neg edge
+    v.writeReg(R_DDRA, 0x00);           // all inputs
+    v.writeReg(R_ACR, 0x01);            // enable PA latching
+    v.setPortAInput(0xAA);
+    v.setCA1(true);  v.tick();
+    v.setCA1(false); v.tick();          // active edge latches 0xAA
+    v.setPortAInput(0x55);              // pins change afterwards
+    CHECK_EQ(v.readReg(R_ORA), 0xAA);   // latched value, not live pins
+    v.writeReg(R_ACR, 0x00);            // latching off -> live pins again
+    CHECK_EQ(v.readReg(R_ORA), 0x55);
+}
+
 int main(){
     test_reset_defaults();
     test_methodB_resumes_after_methodA();
@@ -213,6 +427,20 @@ int main(){
     test_methodA_pcr_drives_cb2();
     test_demo_methodA_note24();
     test_demo_methodB_note26();
+    // Tier-2 datasheet-accuracy fixes
+    test_porta_access_clears_ca_flags();
+    test_porta_independent_ca2_flag_survives();
+    test_portb_access_clears_cb_flags();
+    test_anh_no_side_effects();
+    test_t1lh_write_clears_ifr6();
+    test_t1_oneshot_keeps_counting();
+    test_pb7_oneshot_pulse();
+    test_t2_pulse_count_mode();
+    test_cb2_handshake_holds_until_cb1();
+    test_cb2_pulse_one_cycle();
+    test_ca2_manual_modes_real_encoding();
+    test_ca2_handshake_on_ora_access();
+    test_input_latching_porta();
     std::printf("\n%s  (%d checks, %d failures)\n", g_fail? "TESTS FAILED":"ALL TESTS PASSED", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

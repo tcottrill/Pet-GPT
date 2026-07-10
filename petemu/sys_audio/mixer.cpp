@@ -1703,6 +1703,7 @@ void stream_stop(int chanid, int /*stream*/)
 
 void stream_update(int chanid, short* data)
 {
+	if (chanid < 0 || chanid >= MAX_CHANNELS || !data) return;
 	std::scoped_lock lock(audioMutex);
 	auto& ch = channel[chanid];
 	if (ch.state == SoundState::Playing && 
@@ -1717,6 +1718,7 @@ void stream_update(int chanid, short* data)
 
 void stream_update(int chanid, unsigned char* data)
 {
+	if (chanid < 0 || chanid >= MAX_CHANNELS || !data) return;
 	std::scoped_lock lock(audioMutex);
 	auto& ch = channel[chanid];
 	if (ch.state == SoundState::Playing &&

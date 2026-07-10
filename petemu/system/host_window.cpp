@@ -207,6 +207,12 @@ static void HostToggleFullscreen()
                      g_savedRect.bottom - g_savedRect.top,
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
         g_fullscreen = false;
+
+        // A scale preset picked WHILE fullscreen updated g_scale/menu/ini but
+        // couldn't resize; apply it now so the restored window matches what
+        // the menu (and the persisted ini) claim.
+        if (g_scale >= 1)
+            HostApplyScale(g_scale);
     }
     HostUpdateViewport();
 }
@@ -314,8 +320,16 @@ static void HostShowPopupMenu(HWND wnd)
         HMENU sub = GetSubMenu(bar, i);
         AppendMenuW(popup, MF_POPUP, (UINT_PTR)sub, name);
     }
+    SetForegroundWindow(wnd);   // required so the popup dismisses on outside clicks
     TrackPopupMenu(popup, TPM_RIGHTBUTTON, pt.x, pt.y, 0, wnd, NULL);
-    DestroyMenu(popup);   // submenus are owned by 'bar'
+
+    // The submenu handles are owned by BOTH menus after AppendMenuW(MF_POPUP):
+    // destroying 'popup' would recursively destroy them, then DestroyMenu(bar)
+    // would operate on dead handles. Detach them from 'popup' first so only
+    // 'bar' destroys the shared submenus.
+    for (int i = GetMenuItemCount(popup) - 1; i >= 0; --i)
+        RemoveMenu(popup, i, MF_BYPOSITION);
+    DestroyMenu(popup);
     DestroyMenu(bar);
 }
 

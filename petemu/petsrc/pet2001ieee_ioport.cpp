@@ -364,11 +364,6 @@ bool PetIEEE::setD64Image(const std::string& path) {
 		LOG_ERROR("IEEE: failed to read D64 image: %s", path.c_str());
 		return false;
 	}
-	// Standard 35-track D64 is 174848 bytes; accept other sizes but warn.
-	if (d64.size() != 174848 && d64.size() != 175531) {
-		LOG_WARN("IEEE: D64 size %zu (non-standard) loaded; proceeding in danger zone", d64.size());
-	}
-
 	const size_t n = d64.size();
 
 	// Standard sizes:
@@ -379,9 +374,12 @@ bool PetIEEE::setD64Image(const std::string& path) {
 	const bool is35 = (n == 174848 || n == 175531);
 	const bool is40 = (n == 196608 || n == 197376);
 
-	if (!is35 && !is40) {
-		LOG_WARN("[IEEE] non-standard D64 size (%zu bytes). Reads/writes will still be attempted; "
-			"BAM/dir math assumes 35 tracks, so use with care.", n);
+	if (!is35) {
+		// The BAM/allocator math here is 35-track, so anything else mounts
+		// WRITE-PROTECTED (enforced in d64_flush_image_to_disk): reads work,
+		// SAVE/SCRATCH/etc. report WRITE ERROR instead of corrupting the file.
+		LOG_WARN("[IEEE] %s D64 (%zu bytes) mounted READ-ONLY (35-track write math only)",
+			is40 ? "40-track" : "non-standard size", n);
 	}
 
 	return true;

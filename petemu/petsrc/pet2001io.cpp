@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // pet2001io.cpp
 // -----------------------------------------------------------------------------
 #include "pet2001io.h"
@@ -236,28 +236,29 @@ uint8_t Pet2001IO::read(uint16_t a)
 	{
 		const uint8_t cra = m_pia2.getPIA_CRA();
 		const uint8_t ddra = m_pia2.getPIA_DDRA();
-		uint8_t pa_in = m_pia2.getPIA_PA_in();
-		const uint8_t pa_out = m_pia2.getPIA_PA_out();
 
 		if (cra & 0x04)
 		{
-			// Clear selected IRQ flags (as prior code did)
-			if (cra & 0xC0)
-			{
-				const uint8_t newcra = (uint8_t)(cra & 0x3F);
-				m_pia2.write(PIA2_CRA, newcra);
-			}
-
 			const uint8_t bus = m_ieee.DIOin();
 
-			// If DAV asserted, the drive is holding data; otherwise allow bus read.
-			if (!m_ieee.DAVin())
-				return bus;
-
+			// Prime the input pins from the IEEE bus, then read through the
+			// PIA proper so the A-side IRQ flags (irq_a1/irq_a2) actually
+			// clear. The old path wrote CRA&0x3F back, which cannot clear
+			// them (readPIA_CRA synthesizes bits 7/6 from the booleans), so
+			// an ATN edge left CRA bit 7 stuck high forever.
+			uint8_t pa_in = m_pia2.getPIA_PA_in();
 			pa_in = (uint8_t)((pa_in & ddra) | (bus & ~ddra));
 			m_pia2.setPIA_PA_in(pa_in);
 
-			return (uint8_t)((pa_in & ~ddra) | (pa_out & ddra));
+			const uint8_t v = m_pia2.readPIA_PA();
+			updateIrq(false);
+
+			// If DAV is released, no talker holds data: present the raw bus
+			// (preserves the long-standing behavior the KERNAL relies on).
+			if (!m_ieee.DAVin())
+				return bus;
+
+			return v;
 		}
 
 		return ddra;
@@ -267,25 +268,22 @@ uint8_t Pet2001IO::read(uint16_t a)
 	{
 		const uint8_t crb = m_pia2.getPIA_CRB();
 		const uint8_t ddrb = m_pia2.getPIA_DDRB();
-		uint8_t pb_in = m_pia2.getPIA_PB_in();
-		const uint8_t pb_out = m_pia2.getPIA_PB_out();
 
 		if (crb & 0x04)
 		{
-			if ((crb & 0x3F) != 0)
-			{
-				const uint8_t newcrb = (uint8_t)(crb & 0x3F);
-				m_pia2.write(PIA2_CRB, newcrb);
-			}
-
 			if (ddrb != 0xFF)
 			{
 				const uint8_t bus = m_ieee.DIOin();
+				uint8_t pb_in = m_pia2.getPIA_PB_in();
 				pb_in = (uint8_t)((pb_in & ddrb) | (bus & ~ddrb));
 				m_pia2.setPIA_PB_in(pb_in);
 			}
 
-			return (uint8_t)((pb_in & ~ddrb) | (pb_out & ddrb));
+			// Read through the PIA proper so irq_b1/irq_b2 clear (the old
+			// CRB write-back could not clear the synthesized flag bits).
+			const uint8_t v = m_pia2.readPIA_PB();
+			updateIrq(false);
+			return v;
 		}
 
 		return ddrb;
@@ -310,7 +308,7 @@ uint8_t Pet2001IO::read(uint16_t a)
 	{
 		// Live-in on inputs: PB7:DAVin, PB6:NRFDin, PB0:NDACin.
 		// PB5 is maintained by setVideoOnSignal logic.
-		const uint8_t ddrb = m_via.readReg(0x03);
+		const uint8_t ddrb = m_via.readReg(0x02);
 		uint8_t pb_in = via_drb_in;
 
 		if ((ddrb & 0x80) == 0) {
@@ -342,8 +340,8 @@ uint8_t Pet2001IO::read(uint16_t a)
 		return val;
 	}
 
-	case VIA_DDRB: return m_via.readReg(0x03);
-	case VIA_DDRA: return m_via.readReg(0x02);
+	case VIA_DDRB: return m_via.readReg(0x02);
+	case VIA_DDRA: return m_via.readReg(0x03);
 
 		// Match each access to its VIA register offset. Reading T1C-L (reg 0x04)
 		// clears the T1 interrupt flag (IFR6) - the Method-A IRQ handler does
@@ -367,7 +365,7 @@ uint8_t Pet2001IO::read(uint16_t a)
 	case VIA_ANH:
 	{
 		refreshSnesData();   // present current SNES DATA bit on PA6
-		const uint8_t ddra = m_via.readReg(0x02);
+		const uint8_t ddra = m_via.readReg(0x03);
 		const uint8_t oraOut = m_via.getPortAOutput();
 		const uint8_t v = (uint8_t)((via_dra_in & ~ddra) | (oraOut & ddra));
 		return v;
@@ -463,7 +461,7 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 		m_via.writeReg(0x00, d8);
 		updateIrq(false);
 
-		const uint8_t ddrb = m_via.readReg(0x03);
+		const uint8_t ddrb = m_via.readReg(0x02);
 		const uint8_t orb = m_via.getPortBOutput();
 
 		if (ddrb & 0x04) {
@@ -485,12 +483,14 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 		updateIrq(false);
 		return;
 
+	// DDR offsets now pass through 1:1 - the VIA core uses the real 6522
+	// register map (reg 2 = DDRB, reg 3 = DDRA); no more cross-mapping.
 	case VIA_DDRB:
-		m_via.writeReg(0x03, d8);
+		m_via.writeReg(0x02, d8);
 		return;
 
 	case VIA_DDRA:
-		m_via.writeReg(0x02, d8);
+		m_via.writeReg(0x03, d8);
 		return;
 
 		// VIA register offset == address low nibble. T1C-H (reg 0x05) is the write
