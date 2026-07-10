@@ -88,6 +88,11 @@ private:
 
     // Bookkeeping
     size_t configuredRamBytes = 0;
+public:
+    // 8032 has 2 KB screen SRAM (mask 0x7FF); 40-col PETs 1 KB (0x3FF).
+    void setScreenWindow(bool is8032) { screenMask_ = is8032 ? 0x07FF : 0x03FF; }
+private:
+    uint16_t screenMask_ = 0x03FF;
 
     inline bool inRange(uint16_t a, uint16_t lo, uint16_t hi) const {
         return (a >= lo) && (a <= hi);

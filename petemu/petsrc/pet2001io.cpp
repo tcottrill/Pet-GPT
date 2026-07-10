@@ -170,6 +170,9 @@ void Pet2001IO::setVideoOnSignal(bool active)
 	// 1. Drive PIA1 CB1
 	m_pia1.setSyncCB1(active);
 
+	// 6545 status bit 7 = vertical retrace (LOW video-on phase = VBLANK)
+	m_crtc.setVerticalRetrace(!active);
+
 	// 2. Drive VIA PB5 (bit 5) input
 	uint8_t pb_in = via_drb_in;
 	if (active) pb_in |= 0x20;
@@ -190,6 +193,10 @@ uint8_t Pet2001IO::read(uint16_t a)
 	const uint8_t addr = (uint8_t)(a & 0xFF);
 
 	switch (addr) {
+	// ---- 6545 CRTC ($E880/$E881, 8032) ----
+	case 0x80: return m_crtc.readStatus();
+	case 0x81: return m_crtc.readData();
+
 		// ---------------- PIA1 ----------------
 	case PIA1_PA:
 	{
@@ -527,6 +534,18 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 
 	case VIA_IFR: m_via.writeReg(0x0D, d8); updateIrq(false); return;
 	case VIA_IER: m_via.writeReg(0x0E, d8); updateIrq(false); return;
+
+	case 0x80:  // 6545 CRTC address (8032)
+		m_crtc.writeAddr(d8);
+		return;
+	case 0x81:  // 6545 CRTC data
+		m_crtc.writeData(d8);
+		if (m_crtc.geometryEpoch() != m_crtcEpoch) {
+			m_crtcEpoch = m_crtc.geometryEpoch();
+			if (m_crtc.cols() > 0)
+				m_video.setColumns(m_crtc.cols() * 2);  // 8032: R1 counts 2-byte units
+		}
+		return;
 
 	case VIA_ANH:
 		m_via.writeReg(0x0F, d8);

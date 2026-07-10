@@ -126,7 +126,8 @@ static void HostUpdateScaleChecks()
 static int g_basic = 2; // 2 or 4 (current system ROM set)
 static void HostUpdateBasicChecks() {
     if (!g_menu) return;
-    CheckMenuRadioItem(g_menu, IDM_BASIC2, IDM_BASIC4,
+    CheckMenuRadioItem(g_menu, IDM_BASIC2, IDM_BASIC8032,
+                       (g_basic == 8) ? IDM_BASIC8032 :
                        (g_basic == 4) ? IDM_BASIC4 : IDM_BASIC2, MF_BYCOMMAND);
 }
 
@@ -381,8 +382,10 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
                         "About", MB_OK | MB_ICONINFORMATION);
             return 0;
         case IDM_BASIC2:
-        case IDM_BASIC4: {
-            int want = (LOWORD(wParam) == IDM_BASIC4) ? 4 : 2;
+        case IDM_BASIC4:
+        case IDM_BASIC8032: {
+            int want = (LOWORD(wParam) == IDM_BASIC8032) ? 8 :
+                       (LOWORD(wParam) == IDM_BASIC4) ? 4 : 2;
             if (want != g_basic && g_app.set_basic) {
                 g_basic = want;
                 g_app.set_basic(g_basic);
@@ -606,6 +609,7 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
 
     // Restore the saved system ROM set (BASIC 2 / 4) and tick the menu.
     g_basic = get_config_int("machine", "basic", 2);
+    if (g_basic != 2 && g_basic != 4 && g_basic != 8) g_basic = 2;
     HostUpdateBasicChecks();
 
     // Restore the saved RAM size and tick the menu (emu_init already applied it).

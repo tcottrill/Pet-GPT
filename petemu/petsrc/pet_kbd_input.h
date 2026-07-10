@@ -60,6 +60,11 @@ bool get_pet_graphics_mode() noexcept;
 /// Toggles graphics mode ON/OFF (same as pressing F12 in the global-path builder).
 void toggle_pet_graphics_mode() noexcept;
 
+/// Business (8032) keyboard matrix: on = VICE-buuk business positions,
+/// off = the graphics/normal matrix. Set by the machine-model switch.
+void set_pet_business_kbd(bool on) noexcept;
+bool get_pet_business_kbd() noexcept;
+
 // -----------------------------------------------------------------------------
 // Core builders
 // -----------------------------------------------------------------------------

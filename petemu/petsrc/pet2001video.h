@@ -51,7 +51,12 @@ public:
     static constexpr int CELL_H = CHAR_H * SCALE;  // 16
     static constexpr int FB_W = COLS * CELL_W;     // 640
     static constexpr int FB_H = ROWS * CELL_H;     // 400
-    static constexpr int VIDRAM_SIZE = COLS * ROWS; // 1000 visible
+    static constexpr int VIDRAM_SIZE = COLS * ROWS; // 1000 visible (40-col default)
+
+    // 8032 mode: 80 columns render as 8px cells (1x horizontal, 2x vertical)
+    // into the SAME 640x400 framebuffer. 40-col = 16px cells (2x2).
+    void setColumns(int cols);
+    int  columns() const { return cols_; }
     static constexpr int BLANK_DELAY_MS = 100;
 
     Pet2001Video();
@@ -94,6 +99,10 @@ private:
 
     // Video state
     std::vector<uint8_t> vidram; // at least VIDRAM_SIZE; we allow larger to match JS pattern
+    int cols_    = COLS;         // runtime columns (40 or 80)
+    int scaleX_  = SCALE;        // horizontal pixel doubling (2 at 40-col, 1 at 80-col)
+    int cellW_   = CELL_W;       // cell width in fb px (16 or 8)
+    int visible_ = VIDRAM_SIZE;  // cols_ * ROWS
     std::vector<uint32_t> fb;    // RGBA8888 framebuffer (FB_W x FB_H)
 
     // Charsets

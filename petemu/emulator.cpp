@@ -368,7 +368,37 @@ static bool load_pet4_romset(PetMachine& pet, const std::string& dir)
 	return true;
 }
 
-static int g_basic_set = 2;  // 2 or 4
+// 8032: BASIC 4 B/C/D + 80-column business editor (60 Hz) + KERNAL 4.
+// After install, flip the machine into 80-column mode (2 KB screen window,
+// 80-col renderer default until the editor ROM programs the CRTC).
+static bool load_pet8032_romset(PetMachine& pet, const std::string& dir)
+{
+	std::vector<uint8_t> basB, basC, basD, edit80, kernalF, char1, char2;
+	if (!readFile(dir + "basic-4-b000.901465-19.bin", basB)) return false;
+	if (!readFile(dir + "basic-4-c000.901465-20.bin", basC)) return false;
+	if (!readFile(dir + "basic-4-d000.901465-21.bin", basD)) return false;
+	if (!readFile(dir + "edit-4-80-b-60Hz.901474-03.bin", edit80)) return false;
+	if (!readFile(dir + "kernal-4.901465-22.bin", kernalF)) return false;
+	if (!readFile(dir + "characters-1.901447-08.bin", char1)) return false;
+	if (!readFile(dir + "characters-2.901447-10.bin", char2)) return false;
+	if (basB.size() != 0x1000 || basC.size() != 0x1000 || basD.size() != 0x1000 ||
+		edit80.size() != 0x0800 || kernalF.size() != 0x1000 ||
+		char1.size() < 0x0400 || char2.size() < 0x0400) {
+		LOG_ERROR("[8032] ROM size mismatch - set not installed"); return false;
+	}
+	if (!pet.loadRom(basB.data(), 0x1000, 0xB000)) return false;
+	if (!pet.loadRom(basC.data(), 0x1000, 0xC000)) return false;
+	if (!pet.loadRom(basD.data(), 0x1000, 0xD000)) return false;
+	if (!pet.loadRom(edit80.data(), 0x0800, 0xE000)) return false;
+	if (!pet.loadRom(kernalF.data(), 0x1000, 0xF000)) return false;
+	g_char_rom1.assign(char1.begin(), char1.begin() + 0x400);
+	g_char_rom2.assign(char2.begin(), char2.begin() + 0x400);
+	pet.setVideoCharsets(g_char_rom1.data(), g_char_rom2.data());
+	LOG_INFO("ROMs installed: 8032 (BASIC4 B/C/D, EDIT-4-80-B 60Hz, KERNAL-4)");
+	return true;
+}
+
+static int g_basic_set = 2;  // 2, 4, or 8 (= 8032 80-column)
 static int g_ram_kb    = 32; // configured RAM size in KB (4/8/16/32)
 
 static bool load_basic_set(int which) {
@@ -377,9 +407,16 @@ static bool load_basic_set(int which) {
 	// down, or stale BASIC-4 bytes stay readable (and write-protected) there
 	// and ROM-detection code misidentifies the machine.
 	if (which == 2 && g_pet) g_pet->bus().clearROM(0xB000, 0x1000);
-	bool ok = (which == 4) ? load_pet4_romset(*g_pet, romdir)
+	bool ok = (which == 8) ? load_pet8032_romset(*g_pet, romdir)
+	        : (which == 4) ? load_pet4_romset(*g_pet, romdir)
 	                       : load_pet2001n_romset(*g_pet, romdir); // BASIC 2 default boot set
 	if (!ok) { LOG_ERROR("[PET] Failed to load BASIC %d ROM set from %s", which, romdir.c_str()); return false; }
+	// Machine geometry follows the ROM set: 8032 = 80 cols + 2 KB screen +
+	// business keyboard matrix; 40-col models the reverse.
+	const bool is8032 = (which == 8);
+	g_pet->bus().setScreenWindow(is8032);
+	g_pet->video().setColumns(is8032 ? 80 : 40);
+	set_pet_business_kbd(is8032);
 	g_basic_set = which;
 	return true;
 }
@@ -616,7 +653,7 @@ int pet_get_disk_mounted() {
 void pet_reset() { if (g_pet) g_pet->reset(); }
 
 void pet_set_basic(int which) {
-	if (which != 2 && which != 4) return;
+	if (which != 2 && which != 4 && which != 8) return;
 	if (!load_basic_set(which)) return;   // PetMachine::loadRom keeps the CPU MEM mirror in sync
 	g_pet->reset();
 	LOG_INFO("[PET] switched to BASIC %d", which);

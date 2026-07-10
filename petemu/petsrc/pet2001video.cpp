@@ -75,7 +75,7 @@ void Pet2001Video::write(int addr, uint8_t value)
     vidram[addr] = value;
 
     // Incremental draw only for visible screen area and when not blank.
-    if (addr < VIDRAM_SIZE && !blank && activeCharset != nullptr) {
+    if (addr < visible_ && !blank && activeCharset != nullptr) {
         drawCharCell(addr, value);
     }
 }
@@ -107,6 +107,18 @@ void Pet2001Video::setVideoBlank(bool flag)
         }
         blankRequested = false;
     }
+}
+
+void Pet2001Video::setColumns(int cols)
+{
+    const int nc = (cols == 80) ? 80 : 40;
+    if (nc == cols_) return;
+    cols_    = nc;
+    scaleX_  = (nc == 80) ? 1 : 2;
+    cellW_   = CHAR_W * scaleX_;
+    visible_ = nc * ROWS;
+    if ((int)vidram.size() < visible_) vidram.resize(visible_, 0x20);
+    redrawScreen();
 }
 
 void Pet2001Video::setCharset(bool useSecond)
@@ -232,11 +244,11 @@ void Pet2001Video::drawCharCell(int addr, uint8_t ch)
     if (activeCharset == nullptr) return;
 
     // Compute row/col from linear address
-    const int col = addr % COLS;
-    const int row = addr / COLS;
+    const int col = addr % cols_;
+    const int row = addr / cols_;
 
     // Black-out entire character cell first
-    fillRect(col * CELL_W, row * CELL_H, CELL_W, CELL_H, RGBA_BLACK);
+    fillRect(col * cellW_, row * CELL_H, cellW_, CELL_H, RGBA_BLACK);
 
     // Foreground color (white-ish)
     const uint32_t fg = RGBA_WHITEISH;
@@ -248,7 +260,7 @@ void Pet2001Video::drawCharCell(int addr, uint8_t ch)
     const uint8_t* base = activeCharset + (glyph * CHAR_H);
 
     // Paint doubled pixels (2x2) for each set bit
-    const int x0 = col * CELL_W;
+    const int x0 = col * cellW_;
     const int y0 = row * CELL_H;
 
     for (int y = 0; y < CHAR_H; ++y) {
@@ -258,13 +270,13 @@ void Pet2001Video::drawCharCell(int addr, uint8_t ch)
         for (int x = 0; x < CHAR_W; ++x) {
             if (bits & 0x80) {
                 // Draw a 2x2 block
-                const int px = x0 + x * SCALE;
+                const int px = x0 + x * scaleX_;
                 const int py = y0 + y * SCALE;
                 // Fill 2x2 (fast-path writes)
-                putPixel(px,     py,     fg);
-                putPixel(px + 1, py,     fg);
-                putPixel(px,     py + 1, fg);
-                putPixel(px + 1, py + 1, fg);
+                for (int dx = 0; dx < scaleX_; ++dx) {
+                    putPixel(px + dx, py,     fg);
+                    putPixel(px + dx, py + 1, fg);
+                }
             }
             bits <<= 1;
         }

@@ -18,6 +18,7 @@
 #define IDM_EJECT         40010   // File > Eject Disk (unmount .d64 -> ./files vdrive)
 #define IDM_BASIC2        40030   // Machine > BASIC 2 (radio)
 #define IDM_BASIC4        40031   // Machine > BASIC 4 (radio)
+#define IDM_BASIC8032     40032   // Machine > 8032 80-column (radio, contiguous with BASIC2/4)
 #define IDM_RAM4          40050   // Machine > Memory > 4K  (radio)
 #define IDM_RAM8          40051   // Machine > Memory > 8K  (radio)
 #define IDM_RAM16         40052   // Machine > Memory > 16K (radio)

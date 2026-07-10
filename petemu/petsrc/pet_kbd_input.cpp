@@ -299,6 +299,68 @@ bool get_pet_graphics_mode() noexcept { return g_pet_graphics_shift_mode; }
 void toggle_pet_graphics_mode() noexcept { g_pet_graphics_shift_mode = !g_pet_graphics_shift_mode; }
 
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Business (8032) keyboard matrix - independent compact path.
+// Positions from the VICE buuk (business UK) keymap. shift: 0 = plain,
+// 1 = press PET LSHIFT (6,0) with the key, 2 = key is unshifted on the PET
+// even though the host typed it shifted (e.g. ':').
+// -----------------------------------------------------------------------------
+static bool g_pet_business_kbd = false;
+void set_pet_business_kbd(bool on) noexcept { g_pet_business_kbd = on; }
+bool get_pet_business_kbd() noexcept { return g_pet_business_kbd; }
+
+struct BizKey { signed char row, col, shift; };
+static std::array<BizKey, 128> make_biz_map() {
+	std::array<BizKey, 128> m;
+	for (auto& k : m) k = { -1, -1, 0 };
+	auto S = [&](unsigned char ch, int r, int c, int sh = 0) { m[ch] = { (signed char)r, (signed char)c, (signed char)sh }; };
+	static const signed char P[26][2] = { {3,0},{6,2},{6,1},{3,1},{5,1},{2,2},{3,2},{2,3},{4,5},{3,3},{2,5},{3,5},{8,3},
+		{7,2},{5,5},{4,6},{5,0},{4,2},{2,1},{5,2},{5,3},{7,1},{4,1},{8,1},{4,3},{7,0} };
+	for (int i = 0; i < 26; ++i) { S((unsigned char)('a' + i), P[i][0], P[i][1], 0); S((unsigned char)('A' + i), P[i][0], P[i][1], 1); }
+	S('0',1,3); S('1',1,0); S('2',0,0); S('3',9,1); S('4',1,1); S('5',0,1); S('6',9,2); S('7',1,2); S('8',0,2); S('9',9,3);
+	S(' ',8,2); S('\r',3,4); S('\n',3,4);
+	S('!',1,0,1); S('@',3,6,0); S('#',9,1,1); S('$',1,1,1); S('%',0,1,1); S('^',1,5,0);
+	S('&',9,2,1); S('*',9,5,1); S('(',0,2,1); S(')',9,3,1); S('-',0,3,0); S('_',3,6,1);
+	S('=',0,3,1); S('+',2,6,1); S('[',5,6,0); S(']',2,4,0); S('\\',4,4,0);
+	S(':',9,5,2); S(';',2,6,0); S('"',0,0,1); S('\'',1,2,1);
+	S(',',7,3,0); S('<',7,3,1); S('.',6,3,0); S('>',6,3,1); S('/',8,6,0); S('?',8,6,1);
+	return m;
+}
+static const std::array<BizKey, 128> g_biz_map = make_biz_map();
+
+static void build_business_rows(std::uint8_t out[10],
+	const unsigned char key_state[256], const BYTE kbState[256], HKL layout)
+{
+	bool runstop = false;
+	for (int vk = 0; vk < 256; ++vk) {
+		if (!key_state[vk]) continue;
+		switch (vk) {   // VK specials first (business positions)
+		case VK_RETURN: case VK_SEPARATOR: pet_press(out, 3, 4); continue;
+		case VK_CAPITAL: pet_press(out, 9, 4); runstop = true; continue; // RUN/STOP
+		case VK_HOME:   pet_press(out, 8, 4); continue;
+		case VK_DELETE: case VK_BACK: pet_press(out, 4, 7); continue;
+		case VK_RIGHT:  pet_press(out, 0, 5); continue;
+		case VK_LEFT:   pet_press(out, 0, 5); pet_press(out, 6, 0); continue;
+		case VK_DOWN:   pet_press(out, 5, 4); continue;
+		case VK_UP:     pet_press(out, 5, 4); pet_press(out, 6, 0); continue;
+		case VK_TAB:    pet_press(out, 4, 0); continue;
+		case VK_ESCAPE: pet_press(out, 2, 0); continue;
+		case VK_SPACE:  pet_press(out, 8, 2); continue;
+		default: break;
+		}
+		unsigned char ch = 0;
+		if (!vk_to_ascii((unsigned)vk, kbState, layout, ch)) continue;
+		if (ch >= 128) continue;
+		const BizKey bk = g_biz_map[ch];
+		if (bk.row < 0) continue;
+		pet_press(out, bk.row, bk.col);
+		if (bk.shift == 1) pet_press(out, 6, 0);   // PET LSHIFT (business (6,0))
+		// shift==2: PET key is unshifted; host shift was consumed by ToUnicodeEx
+	}
+	// BREAK = RUN/STOP + Shift (mirror the graphics-path behavior)
+	if (runstop && ((kbState[VK_SHIFT] | kbState[VK_LSHIFT] | kbState[VK_RSHIFT]) & 0x80))
+		pet_press(out, 6, 0);
+}
 // Core worker used by both public paths (global-keys vs supplied-keys)
 // handleModeToggle: if true, toggles graphics mode on F12 edge (global path).
 // pushAfterBuild  : if true, pushes to g_pet->bus().io().setKeyrows(out).
@@ -355,6 +417,12 @@ static void build_pet_rows_core(std::uint8_t out[10],
 	}
 
 	HKL layout = GetKeyboardLayout(0);
+
+	// ---- Business (8032) keyboard: fully separate compact path ----
+	if (g_pet_business_kbd) {
+		build_business_rows(out, key_state, kbState, layout);
+		return;   // update_keyboard() pushes the rows (pushAfterBuild is vestigial)
+	}
 
 	// Pass 1: handle VK-based specials (includes VK_UP and all OEM fallbacks)
 	bool runstop_down = false;
