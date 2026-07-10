@@ -640,6 +640,9 @@ int  pet_get_monitor()          { return (g_gl && g_gl->getTintEnabled()) ? 1 : 
 void pet_set_speed(int mult) { g_speed_mult = (mult == 2) ? 2 : 1; }
 int  pet_get_speed()         { return g_speed_mult; }
 
+void pet_set_gfx_kbd(int on) { set_pet_graphics_mode(on != 0); }
+int  pet_get_gfx_kbd()       { return get_pet_graphics_mode() ? 1 : 0; }
+
 // Reset to a clean BASIC and run the boot forward until the screen shows the
 // "READY." prompt, the way VICE's autostart detects readiness (scan the screen,
 // don't guess a delay). Needed because right after reset() the CPU has only had

@@ -80,6 +80,12 @@ struct HostApp {
     void (*set_speed)(int mult);
     int  (*get_speed)(void);
 
+    // Graphics keyboard mode: 1 = Shift+letter types PET graphics chars,
+    // 0 = business typing. Can also be toggled by a hotkey inside the
+    // emulator, so the host re-reads get_gfx_kbd when menus open. May be null.
+    void (*set_gfx_kbd)(int on);
+    int  (*get_gfx_kbd)(void);
+
     // Master audio volume, 0..100 (emulator-wide, not per-game). May be null.
     int   (*get_volume)(void);
     void  (*set_volume)(int percent);

@@ -154,6 +154,15 @@ static void HostUpdateSpeedCheck() {
                               MF_BYCOMMAND | (g_speed2x ? MF_CHECKED : MF_UNCHECKED));
 }
 
+// ---- Graphics keyboard mode (Shift+letter = PET graphics chars) ----
+// F12 flips this inside the emulator too, so the check is resynced from
+// get_gfx_kbd() whenever a menu opens (WM_INITMENUPOPUP).
+static int g_gfxKbd = 1;
+static void HostUpdateKbdGfxCheck() {
+    if (g_menu) CheckMenuItem(g_menu, IDM_KBDGFX,
+                              MF_BYCOMMAND | (g_gfxKbd ? MF_CHECKED : MF_UNCHECKED));
+}
+
 // ---- Monitor color for the CRT shader (1 = green phosphor, 0 = B&W) ----
 static int g_monitorGreen = 1;
 static void HostUpdateMonitorChecks() {
@@ -409,6 +418,12 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
             set_config_int("machine", "speed2x", g_speed2x);
             HostUpdateSpeedCheck();
             return 0;
+        case IDM_KBDGFX:
+            g_gfxKbd = !g_gfxKbd;
+            if (g_app.set_gfx_kbd) g_app.set_gfx_kbd(g_gfxKbd);
+            set_config_int("input", "graphics_kbd", g_gfxKbd);
+            HostUpdateKbdGfxCheck();
+            return 0;
         case IDM_MONITOR_GREEN:
         case IDM_MONITOR_BW: {
             int want = (LOWORD(wParam) == IDM_MONITOR_GREEN) ? 1 : 0;
@@ -451,6 +466,12 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         if (g_app.get_disk_mounted) {
             UINT flags = MF_BYCOMMAND | (g_app.get_disk_mounted() ? MF_ENABLED : MF_GRAYED);
             EnableMenuItem((HMENU)wParam, IDM_EJECT, flags);
+        }
+        // F12 flips the graphics-keyboard mode outside the menu; resync the
+        // checkmark from the emulator's live state whenever a menu opens.
+        if (g_app.get_gfx_kbd) {
+            g_gfxKbd = g_app.get_gfx_kbd();
+            HostUpdateKbdGfxCheck();
         }
         return 0;
 
@@ -609,6 +630,11 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     if (g_app.set_speed) g_app.set_speed(g_speed2x ? 2 : 1);
     HostUpdateSpeedCheck();
 
+    // Restore the saved graphics-keyboard mode and tick the menu.
+    g_gfxKbd = get_config_int("input", "graphics_kbd", 1) ? 1 : 0;
+    if (g_app.set_gfx_kbd) g_app.set_gfx_kbd(g_gfxKbd);
+    HostUpdateKbdGfxCheck();
+
     // A -rom on the command line loads that program/disk at startup.
     if (!g_cmd.rom.empty()) HostLoadRomPath(HostResolveRomPath(g_cmd.rom).c_str());
 
@@ -657,6 +683,9 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     set_config_int("video", "crt", g_crt);
     set_config_int("video", "crt_tint", g_monitorGreen);
     set_config_int("machine", "speed2x", g_speed2x);
+    // Save the LIVE mode (F12 may have flipped it since the last menu click).
+    set_config_int("input", "graphics_kbd",
+                   g_app.get_gfx_kbd ? g_app.get_gfx_kbd() : g_gfxKbd);
     if (!g_lastRomDir.empty())
         set_config_string("paths", "lastromdir", win32::Utf16ToUtf8(g_lastRomDir).c_str());
 

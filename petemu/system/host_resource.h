@@ -26,6 +26,7 @@
 #define IDM_MONITOR_GREEN 40041   // View > Monitor > Green phosphor (radio)
 #define IDM_MONITOR_BW    40042   // View > Monitor > Black & white  (radio)
 #define IDM_SPEED2X       40060   // Machine > 2x Speed (checkbox)
+#define IDM_KBDGFX        40061   // Machine > Graphics Keyboard (checkbox, also F12)
 
 #ifndef IDC_STATIC
 #define IDC_STATIC (-1)

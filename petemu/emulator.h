@@ -14,3 +14,5 @@ extern void pet_set_monitor(int green);               // shader tint: 1 = green 
 extern int  pet_get_monitor();                        // 1 if green tint active, else 0
 extern void pet_set_speed(int mult);                  // emulation speed: 1 = authentic, 2 = double
 extern int  pet_get_speed();                          // current speed multiplier
+extern void pet_set_gfx_kbd(int on);                  // 1 = Shift+letter types graphics chars
+extern int  pet_get_gfx_kbd();                        // current graphics-keyboard mode
