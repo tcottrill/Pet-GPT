@@ -368,12 +368,47 @@ void reset_all()
 	reset_audio();
 }
 
+// -----------------------------------------------------------------
+// Live CRT-shader tuning keys (only while CRT mode is on):
+//   F9 = cycle knob, PgUp/PgDn = adjust (Shift = coarse), F8 = dump ini block.
+// Polled with GetAsyncKeyState edge detection; these keys are not mapped to
+// the PET keyboard, so they don't leak into the emulated machine. The current
+// knob value is shown in the window title and logged.
+// -----------------------------------------------------------------
+HWND win_get_window(); // host_window.cpp
+
+static void poll_crt_tuning_keys()
+{
+	if (!g_gl || !g_gl->getCrtEnabled()) return;
+
+	static bool prevF9 = false, prevF8 = false, prevPgUp = false, prevPgDn = false;
+	const bool f9   = (GetAsyncKeyState(VK_F9)    & 0x8000) != 0;
+	const bool f8   = (GetAsyncKeyState(VK_F8)    & 0x8000) != 0;
+	const bool pgUp = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
+	const bool pgDn = (GetAsyncKeyState(VK_NEXT)  & 0x8000) != 0;
+	const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+	const char* status = nullptr;
+	if (f9 && !prevF9)     status = g_gl->tuneCycle();
+	if (pgUp && !prevPgUp) status = g_gl->tuneAdjust(+1, shift);
+	if (pgDn && !prevPgDn) status = g_gl->tuneAdjust(-1, shift);
+	if (f8 && !prevF8)     g_gl->tuneDumpIni();
+	prevF9 = f9; prevF8 = f8; prevPgUp = pgUp; prevPgDn = pgDn;
+
+	if (status) {
+		char title[128];
+		snprintf(title, sizeof(title), "Commodore PET  [CRT %s]", status);
+		SetWindowTextA(win_get_window(), title);
+	}
+}
+
 ///////////////////////  MAIN LOOP /////////////////////////////////////
 bool emu_run_frame()
 {
 	g_pet->io().cb2ResetEdgeLog();
 
 	update_keyboard(g_pet);
+	poll_crt_tuning_keys();
 
 	// Poll the host gamepad and feed the emulated SNES adapter.
 	if (g_snes_enabled) {

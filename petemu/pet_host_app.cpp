@@ -34,7 +34,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     app.set_ram     = PetSetRam;
     app.set_crt     = PetSetCrt;
     app.get_crt     = PetGetCrt;
-    app.about_text  = "Commodore PET Emulator\n\nF11 / Alt+Enter: fullscreen\nF10: CRT (scanlines)\nFile > Load: .prg / .d64";
+    app.about_text  = "Commodore PET Emulator\n\nF11 / Alt+Enter: fullscreen\nF10: CRT (mono monitor)\n"
+                      "CRT tuning: F9 knob, PgUp/PgDn adjust (Shift = coarse), F8 dump ini\n"
+                      "File > Load: .prg / .d64";
     // All vector/overlay/audio-slider hooks remain null.
     return host_run(hInstance, nCmdShow, &app);
 }
