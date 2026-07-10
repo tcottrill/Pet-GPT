@@ -25,6 +25,10 @@ echo === host_view ===
 cl /nologo /std:c++17 /EHsc /I "..\system" "host_view_tests.cpp" "..\system\host_view.cpp" /Fe:"host_view_tests.exe" 1>build_hostview.log 2>&1
 if errorlevel 1 ( echo BUILD FAILED & type build_hostview.log & set FAIL=1 ) else ( "%~dp0host_view_tests.exe" & if errorlevel 1 set FAIL=1 )
 
+echo === MOS 6545 CRTC ===
+cl /nologo /std:c++17 /EHsc /I "..\petsrc" "..\petsrc\mos6545.cpp" "mos6545_tests.cpp" /Fe:"mos6545_tests.exe" 1>build_crtc.log 2>&1
+if errorlevel 1 ( echo BUILD FAILED & type build_crtc.log & set FAIL=1 ) else ( "%~dp0mos6545_tests.exe" & if errorlevel 1 set FAIL=1 )
+
 echo === PRG relink ===
 cl /nologo /std:c++17 /EHsc /I "..\petsrc" "prg_relink_tests.cpp" /Fe:"prg_relink_tests.exe" 1>build_relink.log 2>&1
 if errorlevel 1 ( echo BUILD FAILED & type build_relink.log & set FAIL=1 ) else ( "%~dp0prg_relink_tests.exe" & if errorlevel 1 set FAIL=1 )
