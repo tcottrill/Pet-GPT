@@ -147,6 +147,13 @@ static void HostUpdateCrtCheck() {
                               MF_BYCOMMAND | (g_crt ? MF_CHECKED : MF_UNCHECKED));
 }
 
+// ---- Emulation speed (1 = authentic, 2 = double) ----
+static int g_speed2x = 0;
+static void HostUpdateSpeedCheck() {
+    if (g_menu) CheckMenuItem(g_menu, IDM_SPEED2X,
+                              MF_BYCOMMAND | (g_speed2x ? MF_CHECKED : MF_UNCHECKED));
+}
+
 // ---- Monitor color for the CRT shader (1 = green phosphor, 0 = B&W) ----
 static int g_monitorGreen = 1;
 static void HostUpdateMonitorChecks() {
@@ -396,6 +403,12 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
             set_config_int("video", "crt", g_crt);
             HostUpdateCrtCheck();
             return 0;
+        case IDM_SPEED2X:
+            g_speed2x = !g_speed2x;
+            if (g_app.set_speed) g_app.set_speed(g_speed2x ? 2 : 1);
+            set_config_int("machine", "speed2x", g_speed2x);
+            HostUpdateSpeedCheck();
+            return 0;
         case IDM_MONITOR_GREEN:
         case IDM_MONITOR_BW: {
             int want = (LOWORD(wParam) == IDM_MONITOR_GREEN) ? 1 : 0;
@@ -591,6 +604,11 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     if (g_app.set_monitor) g_app.set_monitor(g_monitorGreen);
     HostUpdateMonitorChecks();
 
+    // Restore the saved speed toggle and tick the menu.
+    g_speed2x = get_config_int("machine", "speed2x", 0) ? 1 : 0;
+    if (g_app.set_speed) g_app.set_speed(g_speed2x ? 2 : 1);
+    HostUpdateSpeedCheck();
+
     // A -rom on the command line loads that program/disk at startup.
     if (!g_cmd.rom.empty()) HostLoadRomPath(HostResolveRomPath(g_cmd.rom).c_str());
 
@@ -638,6 +656,7 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     set_config_int("machine", "ram", g_ram);
     set_config_int("video", "crt", g_crt);
     set_config_int("video", "crt_tint", g_monitorGreen);
+    set_config_int("machine", "speed2x", g_speed2x);
     if (!g_lastRomDir.empty())
         set_config_string("paths", "lastromdir", win32::Utf16ToUtf8(g_lastRomDir).c_str());
 

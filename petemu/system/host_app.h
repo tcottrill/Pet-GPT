@@ -76,6 +76,10 @@ struct HostApp {
     void (*set_monitor)(int green);
     int  (*get_monitor)(void);
 
+    // Emulation speed: 1 = authentic, 2 = double. Any may be null.
+    void (*set_speed)(int mult);
+    int  (*get_speed)(void);
+
     // Master audio volume, 0..100 (emulator-wide, not per-game). May be null.
     int   (*get_volume)(void);
     void  (*set_volume)(int percent);

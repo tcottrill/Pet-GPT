@@ -87,6 +87,11 @@ static Cb2Render g_cb2render;
 static PetMachine* g_pet = nullptr;
 static PetGL* g_gl = nullptr;
 
+// Emulation speed: run N x the authentic cycles per host frame. Retrace IRQ,
+// keyboard scan, and the CB2 audio timebase all derive from cycles, so the
+// whole machine speeds up coherently (sound pitches up, like fast-forward).
+static int g_speed_mult = 1;
+
 // Persistent storage so pointers remain valid after load (in case setVideoCharsets doesn't copy)
 static std::vector<uint8_t> s_charrom_lo; // first 1KB
 static std::vector<uint8_t> s_charrom_hi; // second 1KB
@@ -445,8 +450,8 @@ bool emu_run_frame()
 		g_pet->io().setSnesButtons(focused ? map_joy_to_snes() : 0);
 	}
 
-	// 2) Run ~1/60 sec of CPU afterward
-	const int cycles_per_frame = 1000000 / 60;
+	// 2) Run ~1/60 sec of CPU afterward (x2 when Machine > 2x Speed is on)
+	const int cycles_per_frame = (1000000 / 60) * g_speed_mult;
 	if (g_pet) g_pet->runCycles(cycles_per_frame);
 
 	// 3) Present video
@@ -631,6 +636,9 @@ int  pet_get_crt()       { return (g_gl && g_gl->getCrtEnabled()) ? 1 : 0; }
 
 void pet_set_monitor(int green) { if (g_gl) g_gl->setTintEnabled(green != 0); }
 int  pet_get_monitor()          { return (g_gl && g_gl->getTintEnabled()) ? 1 : 0; }
+
+void pet_set_speed(int mult) { g_speed_mult = (mult == 2) ? 2 : 1; }
+int  pet_get_speed()         { return g_speed_mult; }
 
 // Reset to a clean BASIC and run the boot forward until the screen shows the
 // "READY." prompt, the way VICE's autostart detects readiness (scan the screen,

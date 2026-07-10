@@ -16,6 +16,8 @@ static void   PetSetCrt(int on)              { pet_set_crt(on); }
 static int    PetGetCrt(void)                { return pet_get_crt(); }
 static void   PetSetMonitor(int green)       { pet_set_monitor(green); }
 static int    PetGetMonitor(void)            { return pet_get_monitor(); }
+static void   PetSetSpeed(int mult)          { pet_set_speed(mult); }
+static int    PetGetSpeed(void)              { return pet_get_speed(); }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
@@ -38,6 +40,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     app.get_crt     = PetGetCrt;
     app.set_monitor = PetSetMonitor;
     app.get_monitor = PetGetMonitor;
+    app.set_speed   = PetSetSpeed;
+    app.get_speed   = PetGetSpeed;
     app.about_text  = "Commodore PET Emulator\n\nF11 / Alt+Enter: fullscreen\nF10: CRT (mono monitor)\n"
                       "F12: graphics / business typing mode\n"
                       "View > Monitor: green phosphor / black & white\n"

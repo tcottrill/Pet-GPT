@@ -25,6 +25,7 @@
 #define IDM_CRT           40040   // View > CRT (mono monitor shader) toggle
 #define IDM_MONITOR_GREEN 40041   // View > Monitor > Green phosphor (radio)
 #define IDM_MONITOR_BW    40042   // View > Monitor > Black & white  (radio)
+#define IDM_SPEED2X       40060   // Machine > 2x Speed (checkbox)
 
 #ifndef IDC_STATIC
 #define IDC_STATIC (-1)
