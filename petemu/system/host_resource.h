@@ -22,7 +22,9 @@
 #define IDM_RAM8          40051   // Machine > Memory > 8K  (radio)
 #define IDM_RAM16         40052   // Machine > Memory > 16K (radio)
 #define IDM_RAM32         40053   // Machine > Memory > 32K (radio)
-#define IDM_CRT           40040   // View > CRT (scanlines + tint) toggle
+#define IDM_CRT           40040   // View > CRT (mono monitor shader) toggle
+#define IDM_MONITOR_GREEN 40041   // View > Monitor > Green phosphor (radio)
+#define IDM_MONITOR_BW    40042   // View > Monitor > Black & white  (radio)
 
 #ifndef IDC_STATIC
 #define IDC_STATIC (-1)

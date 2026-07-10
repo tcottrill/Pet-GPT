@@ -8,5 +8,7 @@ extern int  pet_get_disk_mounted();                   // 1 if a .d64 is mounted,
 extern void pet_reset();
 extern void pet_set_basic(int which);                 // 2 or 4: reload ROM set + reset
 extern void pet_set_ram(int kb);                      // 4/8/16/32: resize RAM + reset
-extern void pet_set_crt(int on);                      // CRT look (scanlines+tint) on/off
+extern void pet_set_crt(int on);                      // CRT look (mono monitor shader) on/off
 extern int  pet_get_crt();                            // 1 if CRT look enabled, else 0
+extern void pet_set_monitor(int green);               // shader tint: 1 = green phosphor, 0 = B&W
+extern int  pet_get_monitor();                        // 1 if green tint active, else 0

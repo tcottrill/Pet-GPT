@@ -238,6 +238,9 @@ bool PetGL::init(int winW, int winH, const char* title,
 void PetGL::setCrtEnabled(bool on) { m_crt = on; }
 bool PetGL::getCrtEnabled() const  { return m_crt; }
 
+void PetGL::setTintEnabled(bool on) { m_tintOn = on; }
+bool PetGL::getTintEnabled() const  { return m_tintOn; }
+
 // ---- Live shader tuning -----------------------------------------------------
 // One table drives cycle order, ini names, steps and clamp ranges; knobPtr()
 // maps table index -> member.

@@ -598,6 +598,9 @@ void pet_set_ram(int kb) {
 void pet_set_crt(int on) { if (g_gl) g_gl->setCrtEnabled(on != 0); }
 int  pet_get_crt()       { return (g_gl && g_gl->getCrtEnabled()) ? 1 : 0; }
 
+void pet_set_monitor(int green) { if (g_gl) g_gl->setTintEnabled(green != 0); }
+int  pet_get_monitor()          { return (g_gl && g_gl->getTintEnabled()) ? 1 : 0; }
+
 // Reset to a clean BASIC and run the boot forward until the screen shows the
 // "READY." prompt, the way VICE's autostart detects readiness (scan the screen,
 // don't guess a delay). Needed because right after reset() the CPU has only had

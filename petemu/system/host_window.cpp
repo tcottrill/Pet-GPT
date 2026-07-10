@@ -140,11 +140,19 @@ static void HostUpdateRamChecks() {
     CheckMenuRadioItem(g_menu, IDM_RAM4, IDM_RAM32, active, MF_BYCOMMAND);
 }
 
-// ---- CRT look (scanlines + phosphor tint) toggle ----
+// ---- CRT look (mono monitor shader) toggle ----
 static int g_crt = 0;
 static void HostUpdateCrtCheck() {
     if (g_menu) CheckMenuItem(g_menu, IDM_CRT,
                               MF_BYCOMMAND | (g_crt ? MF_CHECKED : MF_UNCHECKED));
+}
+
+// ---- Monitor color for the CRT shader (1 = green phosphor, 0 = B&W) ----
+static int g_monitorGreen = 1;
+static void HostUpdateMonitorChecks() {
+    if (g_menu) CheckMenuRadioItem(g_menu, IDM_MONITOR_GREEN, IDM_MONITOR_BW,
+                                   g_monitorGreen ? IDM_MONITOR_GREEN : IDM_MONITOR_BW,
+                                   MF_BYCOMMAND);
 }
 
 // Resize the windowed client to base*N, clamped to the monitor work area.
@@ -374,6 +382,17 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
             set_config_int("video", "crt", g_crt);
             HostUpdateCrtCheck();
             return 0;
+        case IDM_MONITOR_GREEN:
+        case IDM_MONITOR_BW: {
+            int want = (LOWORD(wParam) == IDM_MONITOR_GREEN) ? 1 : 0;
+            if (want != g_monitorGreen) {
+                g_monitorGreen = want;
+                if (g_app.set_monitor) g_app.set_monitor(g_monitorGreen);
+                set_config_int("video", "crt_tint", g_monitorGreen);
+                HostUpdateMonitorChecks();
+            }
+            return 0;
+        }
         }
         return 0;
 
@@ -551,6 +570,13 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     if (g_app.set_crt) g_app.set_crt(g_crt);
     HostUpdateCrtCheck();
 
+    // Restore the saved monitor color (crt_tint: 1 = green, 0 = B&W) and tick
+    // the menu. The emulator also read this key in its own init; this keeps
+    // the menu radio and emulator in sync from one source of truth.
+    g_monitorGreen = get_config_int("video", "crt_tint", 1) ? 1 : 0;
+    if (g_app.set_monitor) g_app.set_monitor(g_monitorGreen);
+    HostUpdateMonitorChecks();
+
     // A -rom on the command line loads that program/disk at startup.
     if (!g_cmd.rom.empty()) HostLoadRomPath(HostResolveRomPath(g_cmd.rom).c_str());
 
@@ -597,6 +623,7 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     set_config_int("machine", "basic", g_basic);
     set_config_int("machine", "ram", g_ram);
     set_config_int("video", "crt", g_crt);
+    set_config_int("video", "crt_tint", g_monitorGreen);
     if (!g_lastRomDir.empty())
         set_config_string("paths", "lastromdir", win32::Utf16ToUtf8(g_lastRomDir).c_str());
 

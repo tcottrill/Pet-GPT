@@ -71,6 +71,11 @@ struct HostApp {
     void (*set_crt)(int on);
     int  (*get_crt)(void);
 
+    // Monitor color for the CRT shader: 1 = green phosphor tint, 0 = black &
+    // white (no tint). Any may be null.
+    void (*set_monitor)(int green);
+    int  (*get_monitor)(void);
+
     // Master audio volume, 0..100 (emulator-wide, not per-game). May be null.
     int   (*get_volume)(void);
     void  (*set_volume)(int percent);

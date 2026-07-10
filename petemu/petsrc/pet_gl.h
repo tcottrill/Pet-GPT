@@ -30,6 +30,10 @@ public:
     void setCrtEnabled(bool on);
     bool getCrtEnabled() const;
 
+    // Monitor color for the shader: true = green phosphor tint, false = B&W.
+    void setTintEnabled(bool on);
+    bool getTintEnabled() const;
+
     // ---- Live shader tuning (F9 / PgUp / PgDn / F8 in the host) ----
     // Cycle which knob is selected; returns its status string ("mono_blur_h=0.80").
     const char* tuneCycle();
