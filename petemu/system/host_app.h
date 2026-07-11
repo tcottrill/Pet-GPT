@@ -80,6 +80,13 @@ struct HostApp {
     void (*set_speed)(int mult);
     int  (*get_speed)(void);
 
+    // CRT shader knobs (View > CRT Monitor). idx = knob index (see
+    // host_resource.h); dir = +1/-1. text returns "Current: 0.80" for the
+    // menu display. Any may be null.
+    void        (*shader_adjust)(int idx, int dir);
+    const char* (*shader_text)(int idx);
+    void        (*shader_defaults)(void);
+
     // Graphics keyboard mode: 1 = Shift+letter types PET graphics chars,
     // 0 = business typing. Can also be toggled by a hotkey inside the
     // emulator, so the host re-reads get_gfx_kbd when menus open. May be null.

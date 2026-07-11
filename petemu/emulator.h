@@ -16,3 +16,6 @@ extern void pet_set_speed(int mult);                  // emulation speed: 1 = au
 extern int  pet_get_speed();                          // current speed multiplier
 extern void pet_set_gfx_kbd(int on);                  // 1 = Shift+letter types graphics chars
 extern int  pet_get_gfx_kbd();                        // current graphics-keyboard mode
+extern void pet_shader_adjust(int idx, int dir);      // CRT shader knob nudge (menu)
+extern const char* pet_shader_text(int idx);          // "Current: 0.80" for menu display
+extern void pet_shader_defaults();                    // restore all shader knobs

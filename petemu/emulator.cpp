@@ -427,39 +427,6 @@ void reset_all()
 	reset_audio();
 }
 
-// -----------------------------------------------------------------
-// Live CRT-shader tuning keys (only while CRT mode is on):
-//   F9 = cycle knob, PgUp/PgDn = adjust (Shift = coarse), F8 = dump ini block.
-// Polled with GetAsyncKeyState edge detection; these keys are not mapped to
-// the PET keyboard, so they don't leak into the emulated machine. The current
-// knob value is shown in the window title and logged.
-// -----------------------------------------------------------------
-HWND win_get_window(); // host_window.cpp
-
-static void poll_crt_tuning_keys()
-{
-	if (!g_gl || !g_gl->getCrtEnabled()) return;
-
-	static bool prevF9 = false, prevF8 = false, prevPgUp = false, prevPgDn = false;
-	const bool f9   = (GetAsyncKeyState(VK_F9)    & 0x8000) != 0;
-	const bool f8   = (GetAsyncKeyState(VK_F8)    & 0x8000) != 0;
-	const bool pgUp = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
-	const bool pgDn = (GetAsyncKeyState(VK_NEXT)  & 0x8000) != 0;
-	const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-
-	const char* status = nullptr;
-	if (f9 && !prevF9)     status = g_gl->tuneCycle();
-	if (pgUp && !prevPgUp) status = g_gl->tuneAdjust(+1, shift);
-	if (pgDn && !prevPgDn) status = g_gl->tuneAdjust(-1, shift);
-	if (f8 && !prevF8)     g_gl->tuneDumpIni();
-	prevF9 = f9; prevF8 = f8; prevPgUp = pgUp; prevPgDn = pgDn;
-
-	if (status) {
-		char title[128];
-		snprintf(title, sizeof(title), "Commodore PET  [CRT %s]", status);
-		SetWindowTextA(win_get_window(), title);
-	}
-}
 
 ///////////////////////  MAIN LOOP /////////////////////////////////////
 bool emu_run_frame()
@@ -470,10 +437,10 @@ bool emu_run_frame()
 	// foreground. RawInput uses RIDEV_INPUTSINK (so releases are tracked even
 	// unfocused), but without this gate everything typed into OTHER apps was
 	// also typed into BASIC (and CapsLock fired RUN/STOP).
+	HWND win_get_window(); // host_window.cpp
 	const bool focused = (GetForegroundWindow() == win_get_window());
 	if (focused) {
 		update_keyboard(g_pet);
-		poll_crt_tuning_keys();
 	}
 	else {
 		uint8_t idle[10];
@@ -679,6 +646,11 @@ int  pet_get_speed()         { return g_speed_mult; }
 
 void pet_set_gfx_kbd(int on) { set_pet_graphics_mode(on != 0); }
 int  pet_get_gfx_kbd()       { return get_pet_graphics_mode() ? 1 : 0; }
+
+// View > CRT Monitor shader knobs (menu-driven; live apply + ini save in PetGL)
+void        pet_shader_adjust(int idx, int dir) { if (g_gl) g_gl->adjustKnob(idx, dir); }
+const char* pet_shader_text(int idx)            { return g_gl ? g_gl->knobText(idx) : ""; }
+void        pet_shader_defaults(void)           { if (g_gl) g_gl->restoreKnobDefaults(); }
 
 // Reset to a clean BASIC and run the boot forward until the screen shows the
 // "READY." prompt, the way VICE's autostart detects readiness (scan the screen,

@@ -427,6 +427,22 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
             set_config_int("input", "graphics_kbd", g_gfxKbd);
             HostUpdateKbdGfxCheck();
             return 0;
+        case IDM_CRT_DEFAULTS:
+            if (g_app.shader_defaults) g_app.shader_defaults();
+            return 0;
+        default: {
+            // CRT-shader knob Increase/Decrease ranges (7 knobs each way)
+            const UINT id = LOWORD(wParam);
+            if (id >= IDM_KNOBUP0 && id <= IDM_KNOBUP0 + 6) {
+                if (g_app.shader_adjust) g_app.shader_adjust((int)(id - IDM_KNOBUP0), +1);
+                return 0;
+            }
+            if (id >= IDM_KNOBDN0 && id <= IDM_KNOBDN0 + 6) {
+                if (g_app.shader_adjust) g_app.shader_adjust((int)(id - IDM_KNOBDN0), -1);
+                return 0;
+            }
+            break;
+        }
         case IDM_MONITOR_GREEN:
         case IDM_MONITOR_BW: {
             int want = (LOWORD(wParam) == IDM_MONITOR_GREEN) ? 1 : 0;
@@ -469,6 +485,13 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         if (g_app.get_disk_mounted) {
             UINT flags = MF_BYCOMMAND | (g_app.get_disk_mounted() ? MF_ENABLED : MF_GRAYED);
             EnableMenuItem((HMENU)wParam, IDM_EJECT, flags);
+        }
+        // Refresh the CRT-shader knob value labels ("Current: 0.80").
+        if (g_app.shader_text) {
+            for (int i = 0; i < 7; ++i) {
+                ModifyMenuA(g_menu, IDM_KNOBVAL0 + i, MF_BYCOMMAND | MF_STRING | MF_GRAYED,
+                            IDM_KNOBVAL0 + i, g_app.shader_text(i));
+            }
         }
         // F12 flips the graphics-keyboard mode outside the menu; resync the
         // checkmark from the emulator's live state whenever a menu opens.

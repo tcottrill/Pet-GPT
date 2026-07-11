@@ -29,6 +29,33 @@
 #define IDM_SPEED2X       40060   // Machine > 2x Speed (checkbox)
 #define IDM_KBDGFX        40061   // Machine > Graphics Keyboard (checkbox, also F12)
 
+// View > CRT Monitor: shader knob controls. Value items are grayed labels
+// refreshed on WM_INITMENUPOPUP; Up/Dn adjust live and save to pet.ini.
+// Knob index order matches pet_gl.cpp k_knobs: 0 blur_h, 1 blur_v,
+// 2 halation, 3 halation_radius, 4 scanline, 5 contrast, 6 brightness.
+#define IDM_CRT_DEFAULTS  40070   // Restore Defaults
+#define IDM_KNOBVAL0      40071   // ..40077 (7 value-display items)
+#define IDM_KNOBUP0       40081   // ..40087
+#define IDM_KNOBDN0       40091   // ..40097
+#define IDM_KNOBVAL1 40072
+#define IDM_KNOBVAL2 40073
+#define IDM_KNOBVAL3 40074
+#define IDM_KNOBVAL4 40075
+#define IDM_KNOBVAL5 40076
+#define IDM_KNOBVAL6 40077
+#define IDM_KNOBUP1 40082
+#define IDM_KNOBUP2 40083
+#define IDM_KNOBUP3 40084
+#define IDM_KNOBUP4 40085
+#define IDM_KNOBUP5 40086
+#define IDM_KNOBUP6 40087
+#define IDM_KNOBDN1 40092
+#define IDM_KNOBDN2 40093
+#define IDM_KNOBDN3 40094
+#define IDM_KNOBDN4 40095
+#define IDM_KNOBDN5 40096
+#define IDM_KNOBDN6 40097
+
 #ifndef IDC_STATIC
 #define IDC_STATIC (-1)
 #endif

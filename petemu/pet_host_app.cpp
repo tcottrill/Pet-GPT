@@ -19,6 +19,9 @@ static int    PetGetMonitor(void)            { return pet_get_monitor(); }
 static void   PetSetSpeed(int mult)          { pet_set_speed(mult); }
 static int    PetGetSpeed(void)              { return pet_get_speed(); }
 static void   PetSetGfxKbd(int on)           { pet_set_gfx_kbd(on); }
+static void   PetShaderAdjust(int i, int d)  { pet_shader_adjust(i, d); }
+static const char* PetShaderText(int i)      { return pet_shader_text(i); }
+static void   PetShaderDefaults(void)        { pet_shader_defaults(); }
 static int    PetGetGfxKbd(void)             { return pet_get_gfx_kbd(); }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
@@ -45,11 +48,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     app.set_speed   = PetSetSpeed;
     app.get_speed   = PetGetSpeed;
     app.set_gfx_kbd = PetSetGfxKbd;
+    app.shader_adjust   = PetShaderAdjust;
+    app.shader_text     = PetShaderText;
+    app.shader_defaults = PetShaderDefaults;
     app.get_gfx_kbd = PetGetGfxKbd;
-    app.about_text  = "Commodore PET Emulator\n\nF11 / Alt+Enter: fullscreen\nF10: CRT (mono monitor)\n"
+    app.about_text  = "Commodore PET Emulator\n\nF11 / Alt+Enter: fullscreen\n"
                       "F12: graphics / business typing mode\n"
-                      "View > Monitor: green phosphor / black & white\n"
-                      "CRT tuning: F9 knob, PgUp/PgDn adjust (Shift = coarse), F8 dump ini\n"
+                      "View > CRT Monitor: shader, monitor color, and tuning\n"
                       "File > Load: .prg / .d64";
     // All vector/overlay/audio-slider hooks remain null.
     return host_run(hInstance, nCmdShow, &app);

@@ -260,14 +260,15 @@ bool PetGL::getTintEnabled() const  { return m_tintOn; }
 // ---- Live shader tuning -----------------------------------------------------
 // One table drives cycle order, ini names, steps and clamp ranges; knobPtr()
 // maps table index -> member.
-static const struct { const char* name; float step, lo, hi; } k_knobs[] = {
-    { "mono_blur_h",          0.05f, 0.0f, 2.5f  },
-    { "mono_blur_v",          0.05f, 0.0f, 1.0f  },
-    { "mono_halation",        0.02f, 0.0f, 1.0f  },
-    { "mono_halation_radius", 0.5f,  1.0f, 16.0f },
-    { "mono_scanline",        0.02f, 0.0f, 1.0f  },
-    { "mono_contrast",        0.05f, 1.0f, 3.0f  },
-    { "mono_brightness",      0.01f, 0.0f, 0.25f },
+static const struct { const char* name; float step, lo, hi, def; } k_knobs[] = {
+    // name                   step   lo    hi     default (= the accepted look)
+    { "mono_blur_h",          0.05f, 0.0f, 2.5f,  0.80f },
+    { "mono_blur_v",          0.05f, 0.0f, 1.0f,  0.35f },
+    { "mono_halation",        0.02f, 0.0f, 1.0f,  0.15f },
+    { "mono_halation_radius", 0.5f,  1.0f, 16.0f, 4.00f },
+    { "mono_scanline",        0.02f, 0.0f, 1.0f,  0.00f },
+    { "mono_contrast",        0.05f, 1.0f, 3.0f,  1.00f },
+    { "mono_brightness",      0.01f, 0.0f, 0.25f, 0.00f },
 };
 static const int k_knobCount = (int)(sizeof(k_knobs) / sizeof(k_knobs[0]));
 
@@ -293,34 +294,32 @@ void PetGL::clampKnobs()
     }
 }
 
-const char* PetGL::tuneStatus()
+const char* PetGL::knobText(int idx)
 {
-    std::snprintf(m_tuneBuf, sizeof(m_tuneBuf), "%s=%.2f",
-        k_knobs[m_tuneSel].name, *knobPtr(m_tuneSel));
+    if (idx < 0 || idx >= k_knobCount) return "";
+    std::snprintf(m_tuneBuf, sizeof(m_tuneBuf), "Current: %.2f", *knobPtr(idx));
     return m_tuneBuf;
 }
 
-const char* PetGL::tuneCycle()
+void PetGL::adjustKnob(int idx, int dir)
 {
-    m_tuneSel = (m_tuneSel + 1) % k_knobCount;
-    LOG_INFO("[CRT] tuning %s", tuneStatus());
-    return tuneStatus();
-}
-
-const char* PetGL::tuneAdjust(int dir, bool coarse)
-{
-    float* v = knobPtr(m_tuneSel);
-    *v += (float)dir * k_knobs[m_tuneSel].step * (coarse ? 5.0f : 1.0f);
+    if (idx < 0 || idx >= k_knobCount) return;
+    float* v = knobPtr(idx);
+    *v += (float)dir * k_knobs[idx].step;
     clampKnobs();
-    LOG_INFO("[CRT] %s", tuneStatus());
-    return tuneStatus();
+    // Live apply happens on the next draw (uniforms are set every frame);
+    // persist immediately so the setting survives however the app exits.
+    set_config_float("video", k_knobs[idx].name, *v);
+    LOG_INFO("[CRT] %s=%.2f", k_knobs[idx].name, *v);
 }
 
-void PetGL::tuneDumpIni()
+void PetGL::restoreKnobDefaults()
 {
-    LOG_INFO("[CRT] current mono monitor settings (paste into pet.ini [video]):");
-    for (int i = 0; i < k_knobCount; ++i)
-        LOG_INFO("%s=%.2f", k_knobs[i].name, *knobPtr(i));
+    for (int i = 0; i < k_knobCount; ++i) {
+        *knobPtr(i) = k_knobs[i].def;
+        set_config_float("video", k_knobs[i].name, k_knobs[i].def);
+    }
+    LOG_INFO("[CRT] shader knobs restored to defaults");
 }
 
 PetGL* PetGL::create(int winW, int winH, const char* title,

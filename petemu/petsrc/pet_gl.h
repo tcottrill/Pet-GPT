@@ -34,15 +34,17 @@ public:
     void setTintEnabled(bool on);
     bool getTintEnabled() const;
 
-    // ---- Live shader tuning (F9 / PgUp / PgDn / F8 in the host) ----
-    // Cycle which knob is selected; returns its status string ("mono_blur_h=0.80").
-    const char* tuneCycle();
-    // Nudge the selected knob (dir = +1/-1, coarse = bigger step); returns status.
-    const char* tuneAdjust(int dir, bool coarse);
-    // Current "name=value" of the selected knob.
-    const char* tuneStatus();
-    // Log all knobs as a paste-ready [video] ini block.
-    void tuneDumpIni();
+    // ---- Menu-driven shader knobs (View > CRT Monitor) ----
+    // Knob index order matches k_knobs in pet_gl.cpp:
+    // 0 blur_h, 1 blur_v, 2 halation, 3 halation_radius, 4 scanline,
+    // 5 contrast, 6 brightness.
+    static constexpr int kKnobCount = 7;
+    // "Current: 0.80" display text for menu value items.
+    const char* knobText(int idx);
+    // Nudge a knob one step up/down, apply live, and save it to pet.ini.
+    void adjustKnob(int idx, int dir);
+    // Reset all knobs to the built-in defaults and save them to pet.ini.
+    void restoreKnobDefaults();
 
 
 private:
