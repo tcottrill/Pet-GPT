@@ -13,6 +13,7 @@
 #include "via6522.h"
 #include "pia6520.h"
 #include "snes_adapter.h"
+#include "mos6545.h"
 
 // -----------------------------------------------------------------------------
 // Pet2001IO
@@ -106,6 +107,7 @@ public:
 
 	// VIA CA2 helpers
 	bool getViaCA2Output() const { return m_via.getCA2Output(); }
+	Mos6545& crtc() { return m_crtc; }
 	void setViaCA2Input(bool level) { m_via.setCA2(level); }
 
 	// IEEE data preloading
@@ -131,6 +133,8 @@ private:
 	PIA6520 m_pia2;
 	VIA6522 m_via;
 	SnesAdapter m_snes;
+	Mos6545     m_crtc;          // 6545 CRTC at $E880/$E881 (8032; harmless otherwise)
+	uint32_t    m_crtcEpoch = 0; // last applied geometry epoch
 
 	// Keyboard matrix rows (active-low)
 	uint8_t keyrow_[10] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
@@ -146,10 +150,16 @@ private:
 	// -------------------------------------------------------------------------
 	// Video Timing State
 	// -------------------------------------------------------------------------
-	// Total cycles per frame: 25 rows * 8 lines * 64 cycles = 12,800 active
-	// + 3,840 V-Blank = 16,640 total.
+	// 40-col discrete video board: 25 rows * 8 lines * 64 cycles = 12,800
+	// active + 3,840 V-Blank (60 lines) = 16,640 total (60.096 Hz).
+	// In 80-column mode the CRTC register file drives the timing instead
+	// (refreshFrameTiming, re-evaluated once per frame at the wrap).
 	static constexpr uint32_t kCyclesPerFrame = 16640;
 	static constexpr uint32_t kVBlankEnd = 3840;
 
+	void refreshFrameTiming();
+
 	uint32_t m_videoCycle = 0;
+	uint32_t m_frameCycles = kCyclesPerFrame; // current frame length
+	uint32_t m_vblankEnd   = kVBlankEnd;      // current V-blank length
 };

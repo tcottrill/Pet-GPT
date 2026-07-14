@@ -180,6 +180,12 @@
     <ClInclude Include="system\host_window.h">
       <Filter>Source Files\system</Filter>
     </ClInclude>
+    <ClInclude Include="petsrc\mos6545.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
+    <ClInclude Include="petsrc\pet_roms.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="emulator.cpp">
@@ -280,6 +286,12 @@
     </ClCompile>
     <ClCompile Include="system\path_helper.cpp">
       <Filter>Source Files\system</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\mos6545.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet_roms.cpp">
+      <Filter>Source Files\petsrc</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

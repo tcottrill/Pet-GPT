@@ -317,13 +317,16 @@ static void RawInput_ProcessInternal(const RAWINPUT& input)
 	{
 		int mods = GetModifierFlags();
 
-		// 
+		//
 		// Explicitly accumulate all WM_INPUT deltas per frame.
 		m_mouseStateRaw.dx += input.data.mouse.lLastX;
 		m_mouseStateRaw.dy += input.data.mouse.lLastY;
 
-		m_mouseStateRaw.x += m_mouseStateRaw.dx;
-		m_mouseStateRaw.y += m_mouseStateRaw.dy;
+		// Absolute position advances by THIS event's delta only. Adding the
+		// per-frame accumulator (dx/dy) here compounded earlier events again
+		// on every message, so x/y grew quadratically within a frame.
+		m_mouseStateRaw.x += input.data.mouse.lLastX;
+		m_mouseStateRaw.y += input.data.mouse.lLastY;
 
 		if (g_cursorPositionCallback)
 			g_cursorPositionCallback((double)m_mouseStateRaw.x, (double)m_mouseStateRaw.y);
@@ -454,13 +457,14 @@ int isKeyHeld(INT vkCode) { return lastkey[vkCode]; }
 // Description:
 //   Returns true if the specified key is currently pressed.
 // -----------------------------------------------------------------------------
-bool IsKeyDown(INT vkCode) { return key[vkCode & 0xff] & 0x80 ? TRUE : FALSE; }
+// NOTE: the writer stores 1 (not 0x80), so test for non-zero.
+bool IsKeyDown(INT vkCode) { return key[vkCode & 0xff] != 0; }
 // -----------------------------------------------------------------------------
 // IsKeyUp
 // Description:
 //   Returns true if the specified key is currently released.
 // -----------------------------------------------------------------------------
-bool IsKeyUp(INT vkCode) { return  key[vkCode & 0xff] & 0x80 ? FALSE : TRUE; }
+bool IsKeyUp(INT vkCode) { return key[vkCode & 0xff] == 0; }
 
 //summed mouse state checks/sets;
 //use as convenience, ie. keeping track of movements without needing to maintain separate data set

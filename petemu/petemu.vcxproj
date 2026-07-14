@@ -144,7 +144,9 @@
     <ClInclude Include="petsrc\pet_kbd_input.h" />
     <ClInclude Include="petsrc\pet_machine.h" />
     <ClInclude Include="petsrc\pet_mem.h" />
+    <ClInclude Include="petsrc\pet_roms.h" />
     <ClInclude Include="petsrc\pia6520.h" />
+    <ClInclude Include="petsrc\mos6545.h" />
     <ClInclude Include="petsrc\via6522.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="sys_audio\audio_3d.h" />
@@ -192,7 +194,9 @@
     <ClCompile Include="petsrc\pet_kbd_input.cpp" />
     <ClCompile Include="petsrc\pet_machine.cpp" />
     <ClCompile Include="petsrc\pet_mem.cpp" />
+    <ClCompile Include="petsrc\pet_roms.cpp" />
     <ClCompile Include="petsrc\pia6520.cpp" />
+    <ClCompile Include="petsrc\mos6545.cpp" />
     <ClCompile Include="petsrc\via6522.cpp" />
     <ClCompile Include="sys_general\iniFile.cpp" />
     <ClCompile Include="sys_audio\audio_3d.cpp" />

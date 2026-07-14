@@ -32,8 +32,20 @@ HRESULT XAudio2Backend::Init(int rateHz, int fps)
 	HRESULT hrCI = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 	if (hrCI == S_OK || hrCI == S_FALSE) m_com_init_local = true;
 
-	HR(XAudio2Create(&m_xaudio2, 0, XAUDIO2_DEFAULT_PROCESSOR));
-	HR(m_xaudio2->CreateMasteringVoice(&m_master, XAUDIO2_DEFAULT_CHANNELS, rateHz, 0, 0));
+	hr = XAudio2Create(&m_xaudio2, 0, XAUDIO2_DEFAULT_PROCESSOR);
+	if (FAILED(hr) || !m_xaudio2) {
+		LOG_INFO("XAudio2Create failed: %#X - running without audio", hr);
+		Shutdown();
+		return FAILED(hr) ? hr : E_FAIL;
+	}
+	hr = m_xaudio2->CreateMasteringVoice(&m_master, XAUDIO2_DEFAULT_CHANNELS, rateHz, 0, 0);
+	if (FAILED(hr) || !m_master) {
+		// No audio endpoint (RDP session, disabled/removed device): run silent
+		// instead of dereferencing a null mastering voice below.
+		LOG_INFO("CreateMasteringVoice failed: %#X - running without audio", hr);
+		Shutdown();
+		return FAILED(hr) ? hr : E_FAIL;
+	}
 
 	// Capture the actual output layout. With XAUDIO2_DEFAULT_CHANNELS the
 	// channel count comes from the OS-configured endpoint (a stereo endpoint

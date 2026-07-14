@@ -69,11 +69,12 @@ struct D64DirEntry {
 // Small, in-memory DB reflecting BAM + directory for quick updates
 struct D64Catalog {
 	bool valid = false;
-	std::vector<D64BamTrack> bam;      // 1-based index [1..35]
+	std::vector<D64BamTrack> bam;      // 1-based index [1..tracks]
 	std::vector<D64DirEntry> entries;  // visible directory entries
 	uint8_t dirFirstT = 18;            // 18/1 normally
 	uint8_t dirFirstS = 1;
 	bool is40 = false;                  // not used for write in this version
+	int  tracks = 35;                   // 35 (1541/.d64) or 70 (1571/.d71)
 };
 
 enum : int {
@@ -197,7 +198,22 @@ private:
 	// per-SA SEQ write state
 	std::array<std::vector<uint8_t>, 16> seq_write_buf_;
 	std::array<std::string, 16>          seq_write_name_;
-	std::array<bool, 16>                  seq_write_active_;
+	std::array<bool, 16>                  seq_write_active_{}; // value-init: all false
+	std::array<uint8_t, 16>              seq_write_type_{};    // 0x81 SEQ / 0x82 PRG / 0x83 USR
+
+	// Direct-access ('#') buffer channels: DOS block commands U1/U2/B-P.
+	// Used by block-level software (e.g. the Zork interpreters) instead of
+	// named files: OPEN n,8,sa,"#" then U1 reads a raw sector into the
+	// channel buffer, B-P positions within it, U2 writes it back.
+	std::array<std::array<uint8_t, 256>, 16> da_buf_{};
+	std::array<bool, 16>    da_active_{};
+	std::array<uint8_t, 16> da_ptr_{};   // B-P position (also PRINT# write cursor)
+
+	void open_direct_access_channel(uint8_t sa);
+	bool cmd_block_u(const std::string& up);   // U1/UA read, U2/UB write, UI/UJ
+	bool cmd_buffer_pointer(const std::string& up); // B-P
+	bool cmd_block_alloc_free(const std::string& up, bool alloc); // B-A / B-F
+	static bool parse_ints_after(const std::string& s, size_t pos, int* out, int want);
 
 	struct Stream {
 		std::vector<uint8_t> data;  // raw SEQ bytes (no PRG header)
@@ -260,9 +276,10 @@ private:
 	// Host folder backend
 	std::string hostRoot;           // "./files" or empty
 
-	// D64 backend (read-only)
+	// D64/D71 backend
 	std::string d64Path;
 	std::vector<uint8_t> d64;       // entire image; empty if not mounted
+	int d64_tracks_ = 35;           // 35 (.d64/1541) or 70 (.d71/1571); set at mount
 
 	// Core helpers
 	void dataIn(uint8_t d8);
@@ -284,17 +301,24 @@ private:
 	bool buildDirectoryPRG_Folder(std::vector<uint8_t>& out, uint16_t startAddr = 0x0401, const std::string& match = "");
 	bool loadHostPRG_Folder(const std::string& petName, std::vector<uint8_t>& payload, uint16_t& loadAddr);
 
-	// D64 helpers (read-only 1541, 35-track images: 174848 bytes)
+	// D64/D71 helpers (1541 35-track / 1571 70-track, read-write)
 	bool buildDirectoryPRG_D64(std::vector<uint8_t>& out, uint16_t startAddr = 0x0401, const std::string& match = "");
 	bool loadHostPRG_D64(const std::string& petName, std::vector<uint8_t>& payload, uint16_t& loadAddr);
 
-	// D64 sequential (SEQ) loader for OPEN/INPUT#
-	bool openD64SEQ_for_read(const std::string& petName, uint8_t sa);
+	// D64 named-file reader for OPEN/INPUT#/GET#. typeFilter: 0 = any data
+	// type (SEQ/PRG/USR), 1 = SEQ, 2 = PRG, 3 = USR (from the ",S"/",P"/",U"
+	// suffix of the OPEN text). Name may contain CBM wildcards (* ?).
+	bool openD64SEQ_for_read(const std::string& petName, uint8_t sa, uint8_t typeFilter = 0);
 
 	static std::string strip_drive_prefix(const std::string& n); // drop "0:" if present
 
-	// D64 low-level
-	static int d64_sectors_per_track(int track);                      // 1..35
+	// D64/D71 low-level
+	static int d64_sectors_per_track(int track);                      // 1..70 (side-1 mirrors side-0 zones)
+	int  d64_num_tracks() const { return d64_tracks_; }               // 35 (.d64) or 70 (.d71)
+	bool d64_double_sided() const { return d64_tracks_ > 35; }
+	// 1571 split-BAM constants: side-1 free counts live in 18/0, bitmaps in 53/0.
+	static constexpr int D71_BAM2_TRACK = 53;
+	static constexpr int D71_SIDE1_COUNT_OFF = 0xDD;  // 18/0: 35 count bytes for tracks 36..70
 	size_t d64_sector_offset(int track, int sector) const;            // returns byte offset into d64 vector
 	bool d64_read_sector(int track, int sector, uint8_t* dst) const;  // 256 bytes
 
@@ -384,7 +408,10 @@ private:
 	// On CLOSE of SA: if SEQ,S,W was open, commit to D64 and tear down
 	bool close_seq_write_channel(uint8_t sa);
 
-	bool open_seq_write_channel(uint8_t sa, const std::string& rawName);
+	// Arm a SEQ/PRG/USR write (or append) channel. type: 0x81/0x82/0x83.
+	// append pre-loads the existing file so the commit extends it.
+	bool open_seq_write_channel(uint8_t sa, const std::string& rawName,
+	                            uint8_t type = 0x81, bool append = false);
 
 	// D64 scratch helpers
 	int  d64_scratch_patterns(const std::vector<std::string>& patterns);

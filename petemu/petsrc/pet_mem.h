@@ -20,8 +20,9 @@ static constexpr uint16_t PIA2_END = 0xE823;
 static constexpr uint16_t VIA_BASE = 0xE840;  // 16 bytes: E840..E84F
 static constexpr uint16_t VIA_END = 0xE84F;
 
-static constexpr uint16_t VIDRAM_ADDR = 0x8000;  // 1 KB screen RAM (40x25)
-static constexpr uint16_t VIDRAM_END = 0x83E7;  // 1000 bytes (0..999)
+static constexpr uint16_t VIDRAM_ADDR = 0x8000;  // 1 KB screen SRAM (40x25 = 1000 visible)
+static constexpr uint16_t VIDRAM_END = 0x83E7;  // last VISIBLE byte; the SRAM runs to $83FF
+// The whole $8000-$8FFF window mirrors the 1 KB SRAM 4x (see readByte/writeByte).
 
 // ---------------- Bus / memory + device glue ----------------
 class PetMem {
@@ -87,6 +88,11 @@ private:
 
     // Bookkeeping
     size_t configuredRamBytes = 0;
+public:
+    // 8032 has 2 KB screen SRAM (mask 0x7FF); 40-col PETs 1 KB (0x3FF).
+    void setScreenWindow(bool is8032) { screenMask_ = is8032 ? 0x07FF : 0x03FF; }
+private:
+    uint16_t screenMask_ = 0x03FF;
 
     inline bool inRange(uint16_t a, uint16_t lo, uint16_t hi) const {
         return (a >= lo) && (a <= hi);

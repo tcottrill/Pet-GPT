@@ -10,10 +10,12 @@ using namespace ieee_helpers;
 // Layer: D64 fs helpers
 int PetIEEE::d64_sectors_per_track(int track) {
 	if (track < 1) return 0;
-	if (track <= 17) return 21;
-	if (track <= 24) return 19;
-	if (track <= 30) return 18;
-	if (track <= 35) return 17;
+	// 1571 side 1 (tracks 36..70) mirrors side 0's speed-zone geometry.
+	int z = (track >= 36 && track <= 70) ? (track - 35) : track;
+	if (z <= 17) return 21;
+	if (z <= 24) return 19;
+	if (z <= 30) return 18;
+	if (z <= 35) return 17;
 	return 0;
 }
 
@@ -43,6 +45,17 @@ bool PetIEEE::d64_write_sector(int track, int sector, const uint8_t* src) {
 
 bool PetIEEE::d64_flush_image_to_disk() {
 	if (d64Path.empty() || d64.empty()) return false;
+	// Writable geometries: 35-track (.d64/1541) and 70-track (.d71/1571), with
+	// or without a trailing error map. Any other size (e.g. 40-track) has BAM
+	// math we don't model, so it stays WRITE-PROTECTED: reads work, writes fail
+	// cleanly (callers set WRITE ERROR / DS$).
+	const size_t n = d64.size();
+	const bool writable = (n == 174848 || n == 175531 ||   // 35-track
+	                       n == 349696 || n == 351062);     // 70-track (.d71)
+	if (!writable) {
+		LOG_ERROR("[D64] image geometry not writable (%zu bytes) - mounted write-protected, not flushed", n);
+		return false;
+	}
 	return write_all_file(std::filesystem::path(d64Path), d64);
 }
 
@@ -85,15 +98,23 @@ bool PetIEEE::buildDirectoryPRG_D64(std::vector<uint8_t>& out, uint16_t startAdd
 		return s;
 		};
 
-	// Free blocks: BAM free count per track ($04 + 4*(track-1)).
-	// Track 18 (the directory track) is excluded, matching a real 1541
-	// (a blank disk reports 664, not 683).
+	// Free blocks: BAM free count per track. Track 18 (the directory track) is
+	// excluded, matching a real 1541 (a blank disk reports 664, not 683).
 	int freeBlocks = 0;
 	for (int track = 1; track <= 35; ++track) {
 		if (track == 18) continue;
 		const int off = 0x04 + (track - 1) * 4;
 		if (off >= 256) break;
 		freeBlocks += bam[off];
+	}
+	// 1571 side 1: free counts for tracks 36..70 sit at $DD in 18/0. Track 53
+	// (the side-1 BAM track) is excluded, same convention as track 18 - a blank
+	// .d71 then reports 1328 blocks free.
+	if (d64_double_sided()) {
+		for (int track = 36; track <= 70; ++track) {
+			if (track == D71_BAM2_TRACK) continue;
+			freeBlocks += bam[D71_SIDE1_COUNT_OFF + (track - 36)];
+		}
 	}
 
 	// ----- Compute blocks by walking T/S chain -----
@@ -292,8 +313,10 @@ bool PetIEEE::d64_parse_bam(D64Catalog& out)
 	uint8_t bam[256];
 	if (!d64_read_sector(18, 0, bam)) return false;
 
+	const int nt = d64_num_tracks();
+	out.tracks = nt;
 	out.bam.clear();
-	out.bam.resize(36); // index by track; we support 1..35
+	out.bam.resize(nt + 1); // index by track; 1..nt
 
 	for (int t = 1; t <= 35; ++t) {
 		const int off = 4 + (t - 1) * 4;
@@ -303,6 +326,21 @@ bool PetIEEE::d64_parse_bam(D64Catalog& out)
 		bt.bits[1] = bam[off + 2];
 		bt.bits[2] = bam[off + 3];
 		out.bam[t] = bt;
+	}
+
+	// 1571 side 1: free counts in 18/0 ($DD+), 3-byte bitmaps in 53/0.
+	if (nt > 35) {
+		uint8_t bam2[256];
+		if (!d64_read_sector(D71_BAM2_TRACK, 0, bam2)) return false;
+		for (int t = 36; t <= 70; ++t) {
+			D64BamTrack bt{};
+			bt.freeCount = bam[D71_SIDE1_COUNT_OFF + (t - 36)];
+			const int b = 3 * (t - 36);
+			bt.bits[0] = bam2[b + 0];
+			bt.bits[1] = bam2[b + 1];
+			bt.bits[2] = bam2[b + 2];
+			out.bam[t] = bt;
+		}
 	}
 
 	out.dirFirstT = bam[0x00] ? bam[0x00] : 18;
@@ -391,6 +429,21 @@ bool PetIEEE::d64_write_bam_sector(const D64Catalog& cat)
 		bam[off + 1] = cat.bam[t].bits[0];
 		bam[off + 2] = cat.bam[t].bits[1];
 		bam[off + 3] = cat.bam[t].bits[2];
+	}
+
+	// 1571 side 1: write free counts back into 18/0 ($DD+) and bitmaps into 53/0.
+	if (d64_num_tracks() > 35 && (int)cat.bam.size() > 70) {
+		bam[0x03] = 0x80;  // double-sided flag
+		uint8_t bam2[256];
+		if (!d64_read_sector(D71_BAM2_TRACK, 0, bam2)) return false;
+		for (int t = 36; t <= 70; ++t) {
+			bam[D71_SIDE1_COUNT_OFF + (t - 36)] = cat.bam[t].freeCount;
+			const int b = 3 * (t - 36);
+			bam2[b + 0] = cat.bam[t].bits[0];
+			bam2[b + 1] = cat.bam[t].bits[1];
+			bam2[b + 2] = cat.bam[t].bits[2];
+		}
+		if (!d64_write_sector(D71_BAM2_TRACK, 0, bam2)) return false;
 	}
 	return d64_write_sector(18, 0, bam);
 }
@@ -576,12 +629,14 @@ bool PetIEEE::d64_alloc_next_dir_sector_on_track18(
 // -----------------------------------------------------------------------------
 bool PetIEEE::d64_alloc_block(D64Catalog& cat, int preferredTrack, int interleave, D64Block& out)
 {
+	const int nt = d64_num_tracks();
 	int t = preferredTrack;
-	if (t < 1 || t > 35) t = 17;
-	if (t == 18) t = 17; // never start on DOS track
+	if (t < 1 || t > nt) t = 17;
+	if (t == 18 || t == D71_BAM2_TRACK) t = 17; // never start on a DOS/BAM track
 
 	auto try_track = [&](int tt) -> bool {
-		if (tt == 18) return false; // skip DOS track
+		if (tt == 18) return false;                          // side-0 dir/BAM track
+		if (nt > 35 && tt == D71_BAM2_TRACK) return false;   // side-1 BAM track (.d71)
 		const int ms = d64_sectors_per_track(tt);
 		if (ms <= 0) return false;
 
@@ -614,10 +669,10 @@ bool PetIEEE::d64_alloc_block(D64Catalog& cat, int preferredTrack, int interleav
 	if (try_track(t)) return true;
 
 	// Spiral search outward from preferred track
-	for (int rad = 1; rad <= 35; ++rad) {
+	for (int rad = 1; rad <= nt; ++rad) {
 		for (int sign = -1; sign <= 1; sign += 2) {
 			int tt = t + sign * rad;
-			if (tt < 1 || tt > 35) continue;
+			if (tt < 1 || tt > nt) continue;
 			if (try_track(tt)) return true;
 		}
 	}
@@ -747,33 +802,63 @@ bool PetIEEE::d64_save_file(const std::string& petName,
 	int existingIdx = -1;
 	const bool hasExisting = d64_find_dir_entry(cat, petUp, existingIdx);
 
-	// 1) Allocate and write the NEW chain first (in-memory BAM updates only)
+	// Count the blocks a replaced file would return to the free pool.
+	int oldBlocks = 0;
+	if (hasExisting && existingIdx >= 0 && cat.entries[existingIdx].startT) {
+		int t = cat.entries[existingIdx].startT, s = cat.entries[existingIdx].startS;
+		uint8_t sec[256];
+		for (int g = 0; g < 100000 && t != 0; ++g) {
+			if (!d64_read_sector(t, s, sec)) break;
+			++oldBlocks; const int nt = sec[0], ns = sec[1]; t = nt; s = ns;
+		}
+	}
+
+	// Capacity pre-flight: needed data blocks vs. allocatable free space
+	// (excludes the DOS/BAM tracks the allocator skips) PLUS the blocks a
+	// replaced file will free. Rejecting up front means we never overwrite the
+	// old file's sectors on a save that cannot fit, and lets a replace REUSE the
+	// old blocks instead of demanding room for two copies at once.
+	const int needBlocks = (len < 1) ? 1 : (int)((len + 253) / 254);
+	int allocFree = 0;
+	for (int t = 1; t <= cat.tracks; ++t) {
+		if (t == 18) continue;
+		if (cat.tracks > 35 && t == D71_BAM2_TRACK) continue;
+		allocFree += cat.bam[t].freeCount;
+	}
+	if (needBlocks > allocFree + oldBlocks) {
+		set_status(72, "DISK FULL", 0, 0);
+		return false;
+	}
+
+	// 1) Replacing: free the old chain in-memory FIRST so the new chain can
+	//    reuse those blocks. Nothing is committed until the final BAM write +
+	//    flush, so aborting leaves the on-disk image intact.
+	if (hasExisting && existingIdx >= 0 && cat.entries[existingIdx].startT) {
+		if (!d64_free_chain(cat, cat.entries[existingIdx].startT, cat.entries[existingIdx].startS)) {
+			set_status(25, "WRITE ERROR", 0, 0); return false;
+		}
+	}
+
+	// 2) Allocate and write the NEW chain (capacity was checked above).
 	D64DirEntry newEnt{};
 	if (!d64_write_file_chain(cat, type, petUp, data, len, newEnt)) {
-		// Allocation or data write failed; keep original file untouched.
 		set_status(72, "DISK FULL", 0, 0);
 		return false;
 	}
 
-	// 2) If an old file exists, free its chain in-memory and scratch its dir slot
+	// 3) Remove the old directory entry now that the new chain exists.
 	if (hasExisting && existingIdx >= 0) {
-		const auto& e = cat.entries[existingIdx];
-		if (e.startT) {
-			if (!d64_free_chain(cat, e.startT, e.startS)) { set_status(25, "WRITE ERROR", 0, 0); return false; } // in-memory only
-		}
-		if (!d64_scratch_dir_entry(cat, existingIdx)) { set_status(25, "WRITE ERROR", 0, 0); return false; }     // directory sector write only
+		if (!d64_scratch_dir_entry(cat, existingIdx)) { set_status(25, "WRITE ERROR", 0, 0); return false; }
 	}
 
-	// 3) Append the new directory entry (may grow dir; still no BAM write yet)
+	// 4) Append the new directory entry (may grow dir; still no BAM write yet)
 	int newIdx = -1;
 	if (!d64_append_dir_entry(cat, newEnt, newIdx)) {
-		// We could attempt to free the just-written new chain here,
-		// but safest is to abort before BAM write - nothing committed yet.
 		set_status(72, "DISK FULL", 0, 0);
 		return false;
 	}
 
-	// 4) Sanity log and single commit
+	// 5) Sanity log and single commit
 	d64_log_bam_sanity(cat);
 
 	if (!d64_write_bam_sector(cat) || !d64_flush_image_to_disk()) {
@@ -1037,10 +1122,12 @@ bool PetIEEE::d64_format(const std::string& diskName, const std::string& id)
 	uint8_t cur[256];
 	const bool haveCur = d64_read_sector(18, 0, cur); // for ID preservation
 
+	const bool ds = d64_double_sided();
+
 	uint8_t bam[256] = { 0 };
 	bam[0] = 18; bam[1] = 1;   // first directory sector
 	bam[2] = 0x41;             // DOS version 'A'
-	bam[3] = 0x00;
+	bam[3] = ds ? 0x80 : 0x00; // double-sided flag (1571)
 
 	for (int t = 1; t <= 35; ++t) {
 		const int n = d64_sectors_per_track(t);
@@ -1050,6 +1137,22 @@ bool PetIEEE::d64_format(const std::string& diskName, const std::string& id)
 		if (t == 18) { bits[0] &= (uint8_t)~0x03; freec = n - 2; } // 18/0 BAM + 18/1 dir used
 		const int off = 4 + (t - 1) * 4;
 		bam[off + 0] = (uint8_t)freec; bam[off + 1] = bits[0]; bam[off + 2] = bits[1]; bam[off + 3] = bits[2];
+	}
+
+	// 1571 side 1: all-free bitmaps in 53/0, free counts back into 18/0 ($DD+).
+	// The side-1 BAM sector (53/0) is the only reserved block on side 1.
+	uint8_t bam2[256] = { 0 };
+	if (ds) {
+		for (int t = 36; t <= 70; ++t) {
+			const int n = d64_sectors_per_track(t);
+			uint8_t bits[3] = { 0,0,0 };
+			for (int s = 0; s < n; ++s) bits[s >> 3] |= (uint8_t)(1u << (s & 7));
+			int freec = n;
+			if (t == D71_BAM2_TRACK) { bits[0] &= (uint8_t)~0x01; freec = n - 1; } // 53/0 used
+			bam[D71_SIDE1_COUNT_OFF + (t - 36)] = (uint8_t)freec;
+			const int b = 3 * (t - 36);
+			bam2[b + 0] = bits[0]; bam2[b + 1] = bits[1]; bam2[b + 2] = bits[2];
+		}
 	}
 
 	const std::string pn = to_pet_upper_a0_padded_16(diskName);
@@ -1068,7 +1171,15 @@ bool PetIEEE::d64_format(const std::string& diskName, const std::string& id)
 	uint8_t dir[256] = { 0 };
 	dir[0] = 0x00; dir[1] = 0xFF;       // single empty directory sector
 
-	if (!d64_write_sector(18, 0, bam) || !d64_write_sector(18, 1, dir) || !d64_flush_image_to_disk()) {
+	if (!d64_write_sector(18, 0, bam) || !d64_write_sector(18, 1, dir)) {
+		set_status(25, "WRITE ERROR", 0, 0);
+		return false;
+	}
+	if (ds && !d64_write_sector(D71_BAM2_TRACK, 0, bam2)) {
+		set_status(25, "WRITE ERROR", 0, 0);
+		return false;
+	}
+	if (!d64_flush_image_to_disk()) {
 		set_status(25, "WRITE ERROR", 0, 0);
 		return false;
 	}
@@ -1087,8 +1198,9 @@ bool PetIEEE::d64_validate()
 	D64Catalog cat{};
 	if (!d64_parse_bam(cat) || !d64_parse_directory(cat)) { set_status(74, "DRIVE NOT READY", 0, 0); return false; }
 
-	// Start from an all-free BAM (valid sectors only).
-	for (int t = 1; t <= 35; ++t) {
+	// Start from an all-free BAM (valid sectors only), covering both sides.
+	const int nt = d64_num_tracks();
+	for (int t = 1; t <= nt; ++t) {
 		D64BamTrack bt{};
 		const int n = d64_sectors_per_track(t);
 		for (int s = 0; s < n; ++s) set_bit_24(bt.bits, s, true);
@@ -1109,6 +1221,7 @@ bool PetIEEE::d64_validate()
 
 	// System blocks: BAM (18/0) and the directory chain (18/1 -> ...).
 	d64_bam_set_used(cat, 18, 0, true);
+	if (nt > 35) d64_bam_set_used(cat, D71_BAM2_TRACK, 0, true); // side-1 BAM (.d71)
 	mark_chain(cat.dirFirstT ? cat.dirFirstT : 18, cat.dirFirstS ? cat.dirFirstS : 1);
 
 	// Each closed file marks its chain; unclosed ("splat") files are removed.

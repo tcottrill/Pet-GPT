@@ -1,4 +1,4 @@
-﻿#include "framework.h"
+#include "framework.h"
 #include "glew.h"
 #include "wglew.h"
 #include "sys_log.h"
@@ -23,6 +23,7 @@
 #include "pet2001ieee.h"
 #include "basic_prg.h"       // basic_relink (rebuild BASIC line links after PRG inject)
 #include "mixer.h"
+#include "pet_roms.h"        // ROM-set loaders (load_pet2_romset, etc.)
 
 #include <iterator> // required for istreambuf_iterator
 #include <filesystem>
@@ -87,9 +88,10 @@ static Cb2Render g_cb2render;
 static PetMachine* g_pet = nullptr;
 static PetGL* g_gl = nullptr;
 
-// Persistent storage so pointers remain valid after load (in case setVideoCharsets doesn't copy)
-static std::vector<uint8_t> s_charrom_lo; // first 1KB
-static std::vector<uint8_t> s_charrom_hi; // second 1KB
+// Emulation speed: run N x the authentic cycles per host frame. Retrace IRQ,
+// keyboard scan, and the CB2 audio timebase all derive from cycles, so the
+// whole machine speeds up coherently (sound pitches up, like fast-forward).
+static int g_speed_mult = 1;
 
 //Audio mixer
 
@@ -155,209 +157,33 @@ static bool ends_with_icase(const std::string& s, const char* suffix) {
 	return true;
 }
 
-static bool readFile(const std::string& path, std::vector<uint8_t>& out)
-{
-	out.clear();
-
-	std::error_code ec;
-	const auto sz = std::filesystem::file_size(std::filesystem::path(path), ec);
-	if (ec || sz == static_cast<uintmax_t>(-1) || sz == 0) {
-		LOG_ERROR("file_size failed or empty: %s", path.c_str());
-		return false;
-	}
-
-	out.resize(static_cast<size_t>(sz));
-
-	std::ifstream f(path, std::ios::binary);
-	if (!f) {
-		LOG_ERROR("Can't open: %s", path.c_str());
-		out.clear();
-		return false;
-	}
-
-	f.read(reinterpret_cast<char*>(out.data()),
-		static_cast<std::streamsize>(out.size()));
-
-	if (!f || f.gcount() != static_cast<std::streamsize>(out.size())) {
-		LOG_ERROR("Short read: %s got=%lld want=%zu",
-			path.c_str(), static_cast<long long>(f.gcount()), out.size());
-		out.clear();
-		return false;
-	}
-
-	LOG_DEBUG("Loaded %s (%zu bytes)", path.c_str(), out.size());
-	return true;
-}
-
-static std::vector<uint8_t> g_char_rom1, g_char_rom2; // keep alive for video
-
-// Load 2001N set by MAME-style names
-static bool load_pet2001n_romset(PetMachine& m, const std::string& dir)
-{
-	auto rd = [](const std::string& p, std::vector<uint8_t>& out)->bool {
-		std::ifstream f(p, std::ios::binary);
-		if (!f) { LOG_ERROR("Can't open %s", p.c_str()); return false; }
-		out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-		if (out.empty()) { LOG_ERROR("Empty file %s", p.c_str()); return false; }
-		LOG_DEBUG("Loaded %s (%zu bytes)", p.c_str(), out.size());
-		return true;
-		};
-
-	// --- CPU ROMs ---
-	std::vector<uint8_t> basicC, basicD, editN, kernal;
-	if (!rd(dir + "901465-01.ud6", basicC)) return false;   // BASIC 2 @ C000
-	if (!rd(dir + "901465-02.ud7", basicD)) return false;   // BASIC 2 @ D000
-	if (!rd(dir + "901447-24.ud8", editN))  return false;   // EDIT (normal) @ E000 (2KB)
-	if (!rd(dir + "901465-03.ud9", kernal)) return false;   // KERNAL @ F000
-
-	// Use PetMachine::loadRom so CPU MEM mirror is kept in sync
-	if (!m.loadRom(basicC.data(), basicC.size(), 0xC000)) return false;
-	if (!m.loadRom(basicD.data(), basicD.size(), 0xD000)) return false;
-	if (!m.loadRom(editN.data(), editN.size(), 0xE000)) return false;
-	if (!m.loadRom(kernal.data(), kernal.size(), 0xF000)) return false;
-
-	// --- Character ROMs: accept either 2KB single or 2x1KB split ---
-	s_charrom_lo.clear(); s_charrom_hi.clear();
-
-	// Preferred split files (as per your earlier set)
-	std::vector<uint8_t> char1, char2;
-	bool have_split =
-		rd(dir + "characters-1.901447-08.bin", char1) &&
-		rd(dir + "characters-2.901447-10.bin", char2);
-
-	if (have_split) {
-		if (char1.size() < 0x400 || char2.size() < 0x400) {
-			LOG_ERROR("Character split ROM(s) too small: got %zu / %zu (need >= 1024 each)",
-				char1.size(), char2.size());
-			return false;
-		}
-		s_charrom_lo.assign(char1.begin(), char1.begin() + 0x400);
-		s_charrom_hi.assign(char2.begin(), char2.begin() + 0x400);
-		LOG_INFO("CHAR ROMs: using split files (1KB each): %s , %s",
-			"characters-1.901447-08.bin", "characters-2.901447-10.bin");
-	}
-	else {
-		// Fallback: single 2KB PET char ROM (MAME name)
-		std::vector<uint8_t> chargen2k;
-		if (!rd(dir + "901447-10.uf10", chargen2k)) {
-			LOG_ERROR("No character ROM found (tried split and 2KB single).");
-			return false;
-		}
-		if (chargen2k.size() < 0x800) {
-			LOG_ERROR("Character ROM too small: %zu (need 2048)", chargen2k.size());
-			return false;
-		}
-		// Split 2KB -> two 1KB banks
-		s_charrom_lo.assign(chargen2k.begin(), chargen2k.begin() + 0x400);
-		s_charrom_hi.assign(chargen2k.begin() + 0x400, chargen2k.begin() + 0x800);
-		LOG_INFO("CHAR ROM: using 2KB file 901447-10.uf10 (split into two 1KB banks).");
-	}
-
-	// Hand both 1KB banks to the video
-	m.setVideoCharsets(s_charrom_lo.data(), s_charrom_hi.data());
-
-	LOG_INFO("ROMs installed: BASIC@C000/D000, EDIT(N)@E000, KERNAL@F000, CHAR(2x1KB)");
-	return true;
-}
-
-// Original "set-2" loader retained; now calls PetMachine::loadRom(...)
-static bool load_pet2_romset(PetMachine& pet, const std::string& dir, bool editorN)
-{
-	std::vector<uint8_t> basicC, basicD, editE, kernalF, char1, char2;
-	const std::string path_basicC = dir + "basic-2-c000.901465-01.bin";
-	const std::string path_basicD = dir + "basic-2-d000.901465-02.bin";
-	const std::string path_edit = dir + (editorN ? "edit-2-n.901447-24.bin"
-		: "edit-2-b.901474-01.bin");
-	const std::string path_kernal = dir + "kernal-2.901465-03.bin";
-	const std::string path_ch1 = dir + "characters-1.901447-08.bin";
-	const std::string path_ch2 = dir + "characters-2.901447-10.bin";
-
-	LOG_INFO("Loading PET ROMs from %s (editor=%s)",
-		dir.c_str(), editorN ? "N (4KB)" : "B (2KB)");
-
-	if (!readFile(path_basicC, basicC)) return false;
-	if (!readFile(path_basicD, basicD)) return false;
-	if (!readFile(path_edit, editE)) return false;
-	if (!readFile(path_kernal, kernalF)) return false;
-	if (!readFile(path_ch1, char1)) return false;
-	if (!readFile(path_ch2, char2)) return false;
-
-	if (basicC.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", path_basicC.c_str(), basicC.size());
-	if (basicD.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", path_basicD.c_str(), basicD.size());
-	if (!(editE.size() == 0x0800 || editE.size() == 0x1000))
-		LOG_ERROR("%s size=%zu (expected 2048 or 4096)", path_edit.c_str(), editE.size());
-	if (kernalF.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", path_kernal.c_str(), kernalF.size());
-	if (char1.size() < 0x0400)    LOG_ERROR("%s size=%zu (expected >=1024)", path_ch1.c_str(), char1.size());
-	if (char2.size() < 0x0400)    LOG_ERROR("%s size=%zu (expected >=1024)", path_ch2.c_str(), char2.size());
-
-	if (!pet.loadRom(basicC.data(), std::min<size_t>(basicC.size(), 0x1000), 0xC000)) { LOG_ERROR("load BASIC C000 failed"); return false; }
-	if (!pet.loadRom(basicD.data(), std::min<size_t>(basicD.size(), 0x1000), 0xD000)) { LOG_ERROR("load BASIC D000 failed"); return false; }
-	if (!pet.loadRom(editE.data(), std::min<size_t>(editE.size(), 0x1000), 0xE000)) { LOG_ERROR("load EDIT E000 failed");  return false; }
-	if (!pet.loadRom(kernalF.data(), std::min<size_t>(kernalF.size(), 0x1000), 0xF000)) { LOG_ERROR("load KERNAL F000 failed"); return false; }
-
-	// Char ROMs: take first 1KB of each
-	g_char_rom1.assign(char1.begin(), char1.begin() + std::min<size_t>(char1.size(), 0x400));
-	g_char_rom2.assign(char2.begin(), char2.begin() + std::min<size_t>(char2.size(), 0x400));
-	pet.setVideoCharsets(g_char_rom1.data(), g_char_rom2.data());
-
-	LOG_INFO("ROMs installed: BASIC@C000/D000, EDIT@E000, KERNAL@F000, CHARS(1KBx2)");
-	return true;
-}
-
-// Load BASIC 4 (PET 40-col, "N" editor) split set by the filenames you provided.
-// Maps: BASIC @ B000/C000/D000 (3x4KB), EDIT-4-N @ E000 (2KB), KERNAL-4 @ F000 (4KB).
-static bool load_pet4_romset(PetMachine& pet, const std::string& dir)
-{
-	std::vector<uint8_t> basB, basC, basD, editN, kernalF, char1, char2;
-
-	const std::string p_basB = dir + "basic-4-b000.901465-23.bin"; // 4096 bytes -> $B000
-	const std::string p_basC = dir + "basic-4-c000.901465-20.bin"; // 4096 bytes -> $C000
-	const std::string p_basD = dir + "basic-4-d000.901465-21.bin"; // 4096 bytes -> $D000
-	const std::string p_edit = dir + "edit-4-n.901447-29.bin";     // 2048 bytes -> $E000
-	const std::string p_kern = dir + "kernal-4.901465-22.bin";     // 4096 bytes -> $F000
-	const std::string p_ch1 = dir + "characters-1.901447-08.bin"; // >=1024 (use first 1KB)
-	const std::string p_ch2 = dir + "characters-2.901447-10.bin"; // >=1024 (use first 1KB)
-
-	if (!readFile(p_basB, basB)) return false;
-	if (!readFile(p_basC, basC)) return false;
-	if (!readFile(p_basD, basD)) return false;
-	if (!readFile(p_edit, editN)) return false;
-	if (!readFile(p_kern, kernalF)) return false;
-	if (!readFile(p_ch1, char1)) return false;
-	if (!readFile(p_ch2, char2)) return false;
-
-	if (basB.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", p_basB.c_str(), basB.size());
-	if (basC.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", p_basC.c_str(), basC.size());
-	if (basD.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", p_basD.c_str(), basD.size());
-	if (editN.size() != 0x0800) LOG_ERROR("%s size=%zu (expected 2048)", p_edit.c_str(), editN.size());
-	if (kernalF.size() != 0x1000) LOG_ERROR("%s size=%zu (expected 4096)", p_kern.c_str(), kernalF.size());
-	if (char1.size() < 0x0400)    LOG_ERROR("%s size=%zu (expected >=1024)", p_ch1.c_str(), char1.size());
-	if (char2.size() < 0x0400)    LOG_ERROR("%s size=%zu (expected >=1024)", p_ch2.c_str(), char2.size());
-
-	// Install ROMs into the bus overlay + CPU MEM mirror
-	if (!pet.loadRom(basB.data(), std::min<size_t>(basB.size(), 0x1000), 0xB000)) { LOG_ERROR("load BASIC B000 failed"); return false; }
-	if (!pet.loadRom(basC.data(), std::min<size_t>(basC.size(), 0x1000), 0xC000)) { LOG_ERROR("load BASIC C000 failed"); return false; }
-	if (!pet.loadRom(basD.data(), std::min<size_t>(basD.size(), 0x1000), 0xD000)) { LOG_ERROR("load BASIC D000 failed"); return false; }
-	if (!pet.loadRom(editN.data(), std::min<size_t>(editN.size(), 0x0800), 0xE000)) { LOG_ERROR("load EDIT E000 failed");  return false; }
-	if (!pet.loadRom(kernalF.data(), std::min<size_t>(kernalF.size(), 0x1000), 0xF000)) { LOG_ERROR("load KERNAL F000 failed"); return false; }
-
-	// Characters: take first 1KB from each file (like BASIC 2 path)
-	g_char_rom1.assign(char1.begin(), char1.begin() + 0x400);
-	g_char_rom2.assign(char2.begin(), char2.begin() + 0x400);
-	pet.setVideoCharsets(g_char_rom1.data(), g_char_rom2.data());
-
-	LOG_INFO("ROMs installed: BASIC@B000/C000/D000, EDIT-4-N@E000, KERNAL-4@F000, CHARS(1KBx2)");
-	return true;
-}
-
-static int g_basic_set = 2;  // 2 or 4
+static int g_basic_set = 2;  // 2, 4, or 8 (= 8032 80-column)
 static int g_ram_kb    = 32; // configured RAM size in KB (4/8/16/32)
 
 static bool load_basic_set(int which) {
-	const std::string romdir = "./roms/";
-	bool ok = (which == 4) ? load_pet4_romset(*g_pet, romdir)
-	                       : load_pet2001n_romset(*g_pet, romdir); // BASIC 2 default boot set
+	if (!g_pet) {
+		LOG_ERROR("[PET] load_basic_set: g_pet is null");
+		return false;
+	}
+	// Each ROM set lives in its own self-contained subfolder (own copy of the
+	// shared character ROMs too), so a set can be swapped or archived as a unit.
+	const std::string romdir = (which == 8) ? "./roms/8032/"
+	                          : (which == 4) ? "./roms/basic4/"
+	                                         : "./roms/basic2/";
+	// BASIC 4 maps $B000-$BFFF; BASIC 2 does not. Unmap it when switching
+	// down, or stale BASIC-4 bytes stay readable (and write-protected) there
+	// and ROM-detection code misidentifies the machine.
+	if (which == 2) g_pet->bus().clearROM(0xB000, 0x1000);
+	bool ok = (which == 8) ? load_pet8032_romset(*g_pet, romdir)
+	        : (which == 4) ? load_pet4_romset(*g_pet, romdir)
+	                       : load_pet2_romset(*g_pet, romdir, true); // BASIC 2, "N" editor; zimmers.net-native filenames
 	if (!ok) { LOG_ERROR("[PET] Failed to load BASIC %d ROM set from %s", which, romdir.c_str()); return false; }
+	// Machine geometry follows the ROM set: 8032 = 80 cols + 2 KB screen +
+	// business keyboard matrix; 40-col models the reverse.
+	const bool is8032 = (which == 8);
+	g_pet->bus().setScreenWindow(is8032);
+	g_pet->video().setColumns(is8032 ? 80 : 40);
+	set_pet_business_kbd(is8032);
 	g_basic_set = which;
 	return true;
 }
@@ -368,22 +194,40 @@ void reset_all()
 	reset_audio();
 }
 
+
 ///////////////////////  MAIN LOOP /////////////////////////////////////
 bool emu_run_frame()
 {
 	g_pet->io().cb2ResetEdgeLog();
 
-	update_keyboard(g_pet);
+	// Only feed host input to the PET while the emulator window is in the
+	// foreground. RawInput uses RIDEV_INPUTSINK (so releases are tracked even
+	// unfocused), but without this gate everything typed into OTHER apps was
+	// also typed into BASIC (and CapsLock fired RUN/STOP).
+	HWND win_get_window(); // host_window.cpp
+	const bool focused = (GetForegroundWindow() == win_get_window());
+	if (focused) {
+		update_keyboard(g_pet);
+	}
+	else {
+		uint8_t idle[10];
+		memset(idle, 0xFF, sizeof(idle));   // active-low: all released
+		g_pet->io().setKeyrows(idle);
+	}
 
 	// Poll the host gamepad and feed the emulated SNES adapter.
 	if (g_snes_enabled) {
 		poll_joystick();
-		g_pet->io().setSnesButtons(map_joy_to_snes());
+		g_pet->io().setSnesButtons(focused ? map_joy_to_snes() : 0);
 	}
 
-	// 2) Run ~1/60 sec of CPU afterward
-	const int cycles_per_frame = 1000000 / 60;
+	// 2) Run ~1/60 sec of CPU afterward (x2 when Machine > 2x Speed is on)
+	const int cycles_per_frame = (1000000 / 60) * g_speed_mult;
 	if (g_pet) g_pet->runCycles(cycles_per_frame);
+
+	// Service the video blank timer in emulated time (PIA1 CA2 blanking:
+	// the screen goes dark 100 emulated ms after software requests it).
+	if (g_pet) g_pet->video().update(cycles_per_frame / 1000);
 
 	// 3) Present video
 	if (g_gl && g_pet) {
@@ -404,10 +248,12 @@ bool emu_run_frame()
 	// audio time-base matches game time exactly.
 	const double frameCycles = (double)g_pet->io().cb2GetTickCounter();
 
-	g_cb2render.render(edges, edgeCount, frameStartLevel, stream_data, (int)frameCount, frameCycles);
+	if (stream_data) {
+		g_cb2render.render(edges, edgeCount, frameStartLevel, stream_data, (int)frameCount, frameCycles);
 
-	// Send to sound driver
-	stream_update(1, stream_data); // 1 channel
+		// Send to sound driver
+		stream_update(1, stream_data); // 1 channel
+	}
 
 	mixer_update();
 
@@ -470,13 +316,13 @@ void emu_init(int argc, char** argv)
 	if (!diskArg.empty()) {
 		const std::string hostPath = filesRoot + "/" + diskArg;
 
-		if (ends_with_icase(diskArg, ".d64")) {
-			// Mount a read-only D64 image
+		if (ends_with_icase(diskArg, ".d64") || ends_with_icase(diskArg, ".d71")) {
+			// Mount a disk image (.d64 = 1541, .d71 = 1571 double-sided)
 			if (!g_pet->bus().io().setIeeeD64Image(hostPath)) {
-				LOG_ERROR("[IEEE] Failed to mount D64: %s", hostPath.c_str());
+				LOG_ERROR("[IEEE] Failed to mount disk image: %s", hostPath.c_str());
 			}
 			else {
-				LOG_INFO("[IEEE] D64 mounted: %s", hostPath.c_str());
+				LOG_INFO("[IEEE] Disk image mounted: %s", hostPath.c_str());
 			}
 		}
 		else {
@@ -545,7 +391,7 @@ int pet_get_disk_mounted() {
 void pet_reset() { if (g_pet) g_pet->reset(); }
 
 void pet_set_basic(int which) {
-	if (which != 2 && which != 4) return;
+	if (which != 2 && which != 4 && which != 8) return;
 	if (!load_basic_set(which)) return;   // PetMachine::loadRom keeps the CPU MEM mirror in sync
 	g_pet->reset();
 	LOG_INFO("[PET] switched to BASIC %d", which);
@@ -563,6 +409,29 @@ void pet_set_ram(int kb) {
 void pet_set_crt(int on) { if (g_gl) g_gl->setCrtEnabled(on != 0); }
 int  pet_get_crt()       { return (g_gl && g_gl->getCrtEnabled()) ? 1 : 0; }
 
+void pet_set_monitor(int green) { if (g_gl) g_gl->setTintEnabled(green != 0); }
+int  pet_get_monitor()          { return (g_gl && g_gl->getTintEnabled()) ? 1 : 0; }
+
+void pet_set_speed(int mult) { g_speed_mult = (mult == 2) ? 2 : 1; }
+int  pet_get_speed()         { return g_speed_mult; }
+
+void pet_set_gfx_kbd(int on) { set_pet_graphics_mode(on != 0); }
+int  pet_get_gfx_kbd()       { return get_pet_graphics_mode() ? 1 : 0; }
+
+// SNES user-port adapter (gamepad input on the user port). Machine menu toggle.
+void pet_set_snes(int on) {
+	g_snes_enabled = (on != 0);
+	if (g_pet) g_pet->io().setSnesEnabled(g_snes_enabled);
+	LOG_INFO("[PET] SNES adapter %s", g_snes_enabled ? "enabled" : "disabled");
+}
+int  pet_get_snes()          { return g_snes_enabled ? 1 : 0; }
+
+// View > CRT Monitor Settings dialog (live apply + ini save in PetGL)
+float pet_shader_get(int idx)              { return g_gl ? g_gl->getKnob(idx) : 0.0f; }
+void  pet_shader_set(int idx, float v)     { if (g_gl) g_gl->setKnob(idx, v); }
+void  pet_shader_range(int idx, float* lo, float* hi, float* st) { if (g_gl) g_gl->knobRange(idx, lo, hi, st); }
+void  pet_shader_defaults(void)            { if (g_gl) g_gl->restoreKnobDefaults(); }
+
 // Reset to a clean BASIC and run the boot forward until the screen shows the
 // "READY." prompt, the way VICE's autostart detects readiness (scan the screen,
 // don't guess a delay). Needed because right after reset() the CPU has only had
@@ -574,6 +443,14 @@ static bool reset_and_wait_for_ready()
 {
 	if (!g_pet) return false;
 	g_pet->reset();
+
+	// Reset preserves screen RAM (like real hardware), so the pre-reset
+	// "READY." prompt is still sitting in $8000 and the scan below would
+	// match it on frame 1 - before cold-start has run - and the subsequent
+	// NEW would wipe the injected program. Blank the screen bytes first
+	// (the KERNAL clears the screen during cold start anyway).
+	for (uint16_t a = VIDRAM_ADDR; a <= VIDRAM_END; ++a)
+		g_pet->bus().writeByte(a, 0x20);
 
 	static const uint8_t READY[6] = { 0x12, 0x05, 0x01, 0x04, 0x19, 0x2E }; // "READY." screen codes
 	const int cyclesPerFrame = 1000000 / 60;
@@ -606,19 +483,37 @@ void pet_load_software(const char* utf8_path) {
 	std::string ext; { size_t d = p.find_last_of('.'); if (d != std::string::npos) ext = p.substr(d + 1); }
 	std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return (char)tolower(c); });
 
-	if (ext == "d64") {
+	if (ext == "d64" || ext == "d71") {
 		if (g_pet->bus().io().setIeeeD64Image(p))
-			LOG_INFO("[PET] mounted D64 '%s'", p.c_str());
+			LOG_INFO("[PET] mounted %s '%s'", ext.c_str(), p.c_str());
 		else
-			LOG_ERROR("[PET] failed to mount D64 '%s'", p.c_str());
+			LOG_ERROR("[PET] failed to mount %s '%s'", ext.c_str(), p.c_str());
 		return;
 	}
 	// .prg: deposit the program directly into PET RAM at its own load address
 	// (equivalent to LOAD"name",8,1). The CPU executes from the same RAM buffer
 	// PetMem::writeByte() stores into, so the bytes are visible immediately.
 	std::vector<uint8_t> file;
-	if (!ieee_helpers::read_all_file(p, file) || file.size() < 2) {
-		LOG_ERROR("[PET] failed to read PRG '%s'", p.c_str());
+	if (!ieee_helpers::read_all_file(p, file) || file.size() <= 2) {
+		// <= 2: a load address with zero payload is a truncated/corrupt PRG;
+		// injecting it would leave BASIC with VARTAB==TXTTAB and garbage links.
+		LOG_ERROR("[PET] failed to read PRG '%s' (missing or empty)", p.c_str());
+		return;
+	}
+
+	auto& mem = g_pet->bus();
+	const uint16_t loadAddr = (uint16_t)file[0] | ((uint16_t)file[1] << 8);
+	const size_t   nbytes   = file.size() - 2;
+	const uint32_t endAddr  = (uint32_t)loadAddr + (uint32_t)nbytes;   // exclusive
+
+	// Reject rather than truncate: a partial load "succeeds" and then fails
+	// bizarrely at run time (writeByte drops the tail, VARTAB points past RAM,
+	// the first variable store corrupts BASIC state). Checked BEFORE the
+	// reset below so a bad file leaves the running session untouched.
+	if (endAddr > mem.ramConfiguredBytes()) {
+		LOG_ERROR("[PET] PRG '%s' needs RAM to $%04X but only %zuK is configured - "
+		          "not loaded (Machine > Memory to raise it)",
+		          p.c_str(), (unsigned)endAddr, mem.ramConfiguredBytes() / 1024);
 		return;
 	}
 
@@ -627,15 +522,6 @@ void pet_load_software(const char* utf8_path) {
 	// across reset, and we wait for the READY prompt so cold-start doesn't wipe
 	// the program we're about to inject.
 	reset_and_wait_for_ready();
-
-	auto& mem = g_pet->bus();
-	const uint16_t loadAddr = (uint16_t)file[0] | ((uint16_t)file[1] << 8);
-	const size_t   nbytes   = file.size() - 2;
-	const uint32_t endAddr  = (uint32_t)loadAddr + (uint32_t)nbytes;   // exclusive
-
-	if (endAddr > mem.ramConfiguredBytes())
-		LOG_WARN("[PET] PRG '%s' ends at $%04X, past configured RAM ($%04zX); "
-		         "trailing bytes not loaded", p.c_str(), (unsigned)endAddr, mem.ramConfiguredBytes());
 
 	for (size_t i = 0; i < nbytes; ++i) {
 		const uint32_t a = (uint32_t)loadAddr + (uint32_t)i;
@@ -681,6 +567,8 @@ void emu_end()
 	remove_joystick();
 	stream_stop(1, 1);
 	mixer_end();
+	std::free(stream_data);
+	stream_data = nullptr;
 	delete g_pet;
 	g_pet = nullptr;
 }

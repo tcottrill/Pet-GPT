@@ -16,7 +16,7 @@
 //   - CLR/HOME  = VK_HOME (Shift+Home also asserts Shift in the matrix)
 //   - OEM punctuation fallbacks for: ' " = + , < . > - _ / ?
 //   - L/R modifiers mirrored into aggregate VKs for ToUnicodeEx
-//   - F11 toggles "graphics mode":
+//   - F12 toggles "graphics mode":
 //         * ON  (default): Shift+letter also asserts PET Shift so ROM yields
 //                            PETSCII graphics for the letter.
 //         * OFF (business): letters do not assert PET Shift; punctuation still can.
@@ -43,7 +43,7 @@ static constexpr int PET_KBD_COLS = 8;
 static constexpr int PET_KBD_ROWS_BYTES = PET_KBD_ROWS;
 
 // -----------------------------------------------------------------------------
-// Graphics-mode control (same mode that F11 toggles in the .cpp).
+// Graphics-mode control (same mode that F12 toggles in the .cpp).
 // -----------------------------------------------------------------------------
 
 /// Enable/disable **graphics mode**.
@@ -57,8 +57,13 @@ void set_pet_graphics_mode(bool enable) noexcept;
 /// Returns current graphics mode (true = graphics mode ON).
 bool get_pet_graphics_mode() noexcept;
 
-/// Toggles graphics mode ON/OFF (same as pressing F11 in the global-path builder).
+/// Toggles graphics mode ON/OFF (same as pressing F12 in the global-path builder).
 void toggle_pet_graphics_mode() noexcept;
+
+/// Business (8032) keyboard matrix: on = VICE-buuk business positions,
+/// off = the graphics/normal matrix. Set by the machine-model switch.
+void set_pet_business_kbd(bool on) noexcept;
+bool get_pet_business_kbd() noexcept;
 
 // -----------------------------------------------------------------------------
 // Core builders
@@ -84,7 +89,7 @@ void toggle_pet_graphics_mode() noexcept;
 // -----------------------------------------------------------------------------
 
 /// Builds the PET matrix from the **global** `key[256]`, **pushes it** to
-/// `g_pet->bus().io().setKeyrows(...)`, and also handles the runtime F11 toggle.
+/// `g_pet->bus().io().setKeyrows(...)`, and also handles the runtime F12 toggle.
 /// This mirrors the behavior of the legacy single entry point.
 /// @param out_rows Buffer of 10 bytes (one per row) which will be filled and then pushed.
 void build_pet_rows_from_vk(std::uint8_t out[PET_KBD_ROWS_BYTES]);

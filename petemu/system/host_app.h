@@ -71,6 +71,33 @@ struct HostApp {
     void (*set_crt)(int on);
     int  (*get_crt)(void);
 
+    // Monitor color for the CRT shader: 1 = green phosphor tint, 0 = black &
+    // white (no tint). Any may be null.
+    void (*set_monitor)(int green);
+    int  (*get_monitor)(void);
+
+    // Emulation speed: 1 = authentic, 2 = double. Any may be null.
+    void (*set_speed)(int mult);
+    int  (*get_speed)(void);
+
+    // CRT shader knobs (View > CRT Monitor Settings dialog). idx = knob index
+    // 0..6 (see host_resource.h). set clamps and persists. Any may be null.
+    float (*shader_get)(int idx);
+    void  (*shader_set)(int idx, float v);
+    void  (*shader_range)(int idx, float* lo, float* hi, float* step);
+    void  (*shader_defaults)(void);
+
+    // Graphics keyboard mode: 1 = Shift+letter types PET graphics chars,
+    // 0 = business typing. Can also be toggled by a hotkey inside the
+    // emulator, so the host re-reads get_gfx_kbd when menus open. May be null.
+    void (*set_gfx_kbd)(int on);
+    int  (*get_gfx_kbd)(void);
+
+    // SNES user-port adapter (gamepad input): 1 = enabled, 0 = disabled.
+    // Machine-menu checkbox; persisted to [input] snes_adapter. May be null.
+    void (*set_snes)(int on);
+    int  (*get_snes)(void);
+
     // Master audio volume, 0..100 (emulator-wide, not per-game). May be null.
     int   (*get_volume)(void);
     void  (*set_volume)(int percent);

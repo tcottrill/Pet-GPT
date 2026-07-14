@@ -25,10 +25,26 @@ public:
     // You should call this once per emu frame.
     void present(const uint32_t* rgba, int srcW, int srcH);
 
-    // CRT look (phosphor-green tint + tiled scanline multiply). Defaults from
-    // pet.ini at init; can be toggled live.
+    // CRT look (mono-monitor shader: horizontal softness + halation + tint).
+    // Defaults from pet.ini at init; can be toggled live.
     void setCrtEnabled(bool on);
     bool getCrtEnabled() const;
+
+    // Monitor color for the shader: true = green phosphor tint, false = B&W.
+    void setTintEnabled(bool on);
+    bool getTintEnabled() const;
+
+    // ---- Menu-driven shader knobs (View > CRT Monitor) ----
+    // Knob index order matches k_knobs in pet_gl.cpp:
+    // 0 blur_h, 1 blur_v, 2 halation, 3 halation_radius, 4 scanline,
+    // 5 contrast, 6 brightness.
+    static constexpr int kKnobCount = 7;
+    // Value access for the settings dialog: set clamps + saves to pet.ini.
+    float getKnob(int idx) const;
+    void  setKnob(int idx, float v);
+    void  knobRange(int idx, float* lo, float* hi, float* step) const;
+    // Reset all knobs to the built-in defaults and save them to pet.ini.
+    void restoreKnobDefaults();
 
 
 private:
@@ -36,6 +52,8 @@ private:
     bool init(int winW, int winH, const char* title, std::function<void(int,int,int,int)> onKey);
     void updateTexture(const uint32_t* rgba, int w, int h);
     void draw();
+    void clampKnobs();
+    float* knobPtr(int idx);
 
   
     // GL resource ids
@@ -53,29 +71,36 @@ private:
     int uTintOnLoc = -1;
     int uTintLoc = -1;
 
-    // ---- CRT look (scanlines + phosphor tint) ----
-    unsigned scanProg = 0;          // grille pass program (procedural, dot-locked)
-    unsigned scanTex  = 0;          // (legacy texture; unused by the procedural grille)
-    int uScanSrcSizeLoc = -1;       // PET framebuffer size (px)
-    int uScanPitchLoc   = -1;       // grille line spacing (framebuffer px)
-    int uScanThickLoc   = -1;       // grille dark-line width (framebuffer px)
-    int uScanDimLoc     = -1;       // grille dark-line brightness (0..1)
+    // ---- CRT look: mono-monitor shader (softness + halation + tint) ----
+    unsigned crtProg = 0;           // single-pass mono monitor shader
+    int uCrtTexLoc      = -1;
+    int uCrtSrcSizeLoc  = -1;       // PET framebuffer size (px)
+    int uCrtBlurHLoc    = -1;       // horizontal spot sigma (source px)
+    int uCrtBlurVLoc    = -1;       // vertical spot sigma (source px)
+    int uCrtHalationLoc = -1;       // glow strength (0..1)
+    int uCrtHalRadLoc   = -1;       // glow radius (source px)
+    int uCrtScanLoc     = -1;       // beam ripple strength (0..1, default 0)
+    int uCrtContrastLoc = -1;       // video gain (fat text via saturation)
+    int uCrtBrightLoc   = -1;       // black-level lift
+    int uCrtTintOnLoc   = -1;
+    int uCrtTintLoc     = -1;
 
-    bool  m_crt         = false;            // master CRT toggle (currently = green phosphor tint)
+    bool  m_crt         = false;            // master CRT toggle
     bool  m_tintOn      = true;             // apply phosphor tint when CRT on
-    // Scanline/grille overlay is DISABLED for now (PET was a mono green-phosphor
-    // screen, no shadow mask). The procedural scanline shader below is kept,
-    // unused, as a starting point for a proper VICE-style CRT shader later.
-    bool  m_scanlines   = false;
     float m_tint[3]     = {0.30f, 1.0f, 0.40f}; // PET-ish phosphor green
-    float m_scanStrength = 0.55f;           // scanline dark-gap brightness: lower = stronger
-    float m_grillePitch     = 2.0f;         // scanline spacing, framebuffer rows (2 = 1/raster line)
-    float m_grilleThickness = 2.5f;         // scanline dark-line thickness, SCREEN pixels (fixed)
 
-    // PNG scanline texture (loaded via stb_image; 0 = use procedural)
-    int  m_scanTexW    = 0;
-    int  m_scanTexH    = 0;
-    bool m_scanFromFile = false;
+    // Tunable knobs (pet.ini [video] mono_*; live-adjustable via tune API)
+    float m_blurH     = 0.8f;   // 0..3   horizontal softness, PET px
+    float m_blurV     = 0.35f;  // 0..2   vertical softness, PET px
+    float m_halation  = 0.15f;  // 0..1   glow strength
+    float m_halRadius = 4.0f;   // 1..16  glow radius, PET px
+    float m_scanline  = 0.0f;   // 0..1   beam ripple (off by default)
+    float m_contrast  = 1.0f;   // 1..3   video gain: overdrive = fatter strokes
+    float m_bright    = 0.0f;   // 0..0.25 black-level lift (background glow)
+
+    int  m_tuneSel = 0;         // selected knob for live tuning
+    char m_tuneBuf[64] = {0};   // status string storage
+    bool m_texMipFilter = false; // current texture filter state (avoid redundant sets)
 };
 
 #endif // PET_GL_H

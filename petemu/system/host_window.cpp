@@ -19,6 +19,7 @@
 // emulator via HostApp; contains no machine-specific code.
 #include <windows.h>
 #include <commdlg.h>
+#include <commctrl.h>  // trackbar + up-down controls (CRT settings dialog)
 #include <shellapi.h>  // DragAcceptFiles / DragQueryFile (drag-drop ROM/disk)
 #include <stdlib.h>    // __argc, __argv
 #include <cstdio>      // swprintf_s
@@ -42,6 +43,7 @@
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 
 // ---- Globals expected by the rest of the codebase (moved from winmain.cpp) ----
@@ -126,7 +128,8 @@ static void HostUpdateScaleChecks()
 static int g_basic = 2; // 2 or 4 (current system ROM set)
 static void HostUpdateBasicChecks() {
     if (!g_menu) return;
-    CheckMenuRadioItem(g_menu, IDM_BASIC2, IDM_BASIC4,
+    CheckMenuRadioItem(g_menu, IDM_BASIC2, IDM_BASIC8032,
+                       (g_basic == 8) ? IDM_BASIC8032 :
                        (g_basic == 4) ? IDM_BASIC4 : IDM_BASIC2, MF_BYCOMMAND);
 }
 
@@ -140,13 +143,167 @@ static void HostUpdateRamChecks() {
     CheckMenuRadioItem(g_menu, IDM_RAM4, IDM_RAM32, active, MF_BYCOMMAND);
 }
 
-// ---- CRT look (scanlines + phosphor tint) toggle ----
+// ---- CRT look (mono monitor shader) toggle ----
 static int g_crt = 0;
 static void HostUpdateCrtCheck() {
     if (g_menu) CheckMenuItem(g_menu, IDM_CRT,
                               MF_BYCOMMAND | (g_crt ? MF_CHECKED : MF_UNCHECKED));
 }
 
+// ---- Emulation speed (1 = authentic, 2 = double) ----
+static int g_speed2x = 0;
+static void HostUpdateSpeedCheck() {
+    if (g_menu) CheckMenuItem(g_menu, IDM_SPEED2X,
+                              MF_BYCOMMAND | (g_speed2x ? MF_CHECKED : MF_UNCHECKED));
+}
+
+// ---- Graphics keyboard mode (Shift+letter = PET graphics chars) ----
+// F12 flips this inside the emulator too, so the check is resynced from
+// get_gfx_kbd() whenever a menu opens (WM_INITMENUPOPUP).
+static int g_gfxKbd = 1;
+static void HostUpdateKbdGfxCheck() {
+    if (g_menu) CheckMenuItem(g_menu, IDM_KBDGFX,
+                              MF_BYCOMMAND | (g_gfxKbd ? MF_CHECKED : MF_UNCHECKED));
+}
+
+// ---- SNES user-port adapter enable (Machine > SNES Adapter) ----
+static int g_snesEnabled = 1;
+static void HostUpdateSnesCheck() {
+    if (g_menu) CheckMenuItem(g_menu, IDM_SNES,
+                              MF_BYCOMMAND | (g_snesEnabled ? MF_CHECKED : MF_UNCHECKED));
+}
+
+// ---- Monitor color for the CRT shader (1 = green phosphor, 0 = B&W) ----
+static int g_monitorGreen = 1;
+static void HostUpdateMonitorChecks() {
+    if (g_menu) CheckMenuRadioItem(g_menu, IDM_MONITOR_GREEN, IDM_MONITOR_BW,
+                                   g_monitorGreen ? IDM_MONITOR_GREEN : IDM_MONITOR_BW,
+                                   MF_BYCOMMAND);
+}
+
+// ---- CRT Monitor Settings dialog (modeless; slider + edit/spin per knob) ----
+// Values flow one way: control event -> g_app.shader_set (clamps + saves ini)
+// -> re-read via shader_get to refresh the row. The emulator applies uniforms
+// every frame, so changes are visible live while the dialog is open.
+static HWND g_dlgCrt = nullptr;
+
+static void CrtDlgSyncRow(HWND dlg, int i)
+{
+    float lo, hi, st; g_app.shader_range(i, &lo, &hi, &st);
+    const float v = g_app.shader_get(i);
+    const int pos = (st > 0) ? (int)((v - lo) / st + 0.5f) : 0;
+    SendDlgItemMessage(dlg, IDC_KNOB_SLIDER0 + i, TBM_SETPOS, TRUE, pos);
+    char buf[32]; sprintf_s(buf, "%.2f", v);
+    SetDlgItemTextA(dlg, IDC_KNOB_EDIT0 + i, buf);
+}
+
+static void CrtDlgSyncAll(HWND dlg)
+{
+    for (int i = 0; i < 7; ++i) CrtDlgSyncRow(dlg, i);
+    CheckDlgButton(dlg, IDC_CRT_ENABLE,
+                   (g_app.get_crt && g_app.get_crt()) ? BST_CHECKED : BST_UNCHECKED);
+    CheckRadioButton(dlg, IDC_MON_GREEN, IDC_MON_BW,
+                     (g_app.get_monitor && g_app.get_monitor()) ? IDC_MON_GREEN : IDC_MON_BW);
+}
+
+static INT_PTR CALLBACK CrtDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_INITDIALOG:
+        if (!g_app.shader_range || !g_app.shader_get) { DestroyWindow(dlg); return TRUE; }
+        for (int i = 0; i < 7; ++i) {
+            float lo, hi, st; g_app.shader_range(i, &lo, &hi, &st);
+            const int steps = (st > 0) ? (int)((hi - lo) / st + 0.5f) : 0;
+            SendDlgItemMessage(dlg, IDC_KNOB_SLIDER0 + i, TBM_SETRANGE, TRUE, MAKELPARAM(0, steps));
+        }
+        CrtDlgSyncAll(dlg);
+        return TRUE;
+
+    case WM_HSCROLL: {
+        const int id = GetDlgCtrlID((HWND)lParam);
+        if (id >= IDC_KNOB_SLIDER0 && id < IDC_KNOB_SLIDER0 + 7 && g_app.shader_set) {
+            const int i = id - IDC_KNOB_SLIDER0;
+            float lo, hi, st; g_app.shader_range(i, &lo, &hi, &st);
+            const int pos = (int)SendDlgItemMessage(dlg, id, TBM_GETPOS, 0, 0);
+            g_app.shader_set(i, lo + pos * st);
+            char buf[32]; sprintf_s(buf, "%.2f", g_app.shader_get(i));
+            SetDlgItemTextA(dlg, IDC_KNOB_EDIT0 + i, buf);
+        }
+        return TRUE; }
+
+    case WM_NOTIFY: {
+        const NMHDR* nm = (const NMHDR*)lParam;
+        if (nm->code == UDN_DELTAPOS && g_app.shader_set &&
+            nm->idFrom >= IDC_KNOB_SPIN0 && nm->idFrom < (UINT)(IDC_KNOB_SPIN0 + 7)) {
+            const int i = (int)nm->idFrom - IDC_KNOB_SPIN0;
+            const NMUPDOWN* ud = (const NMUPDOWN*)lParam;
+            float lo, hi, st; g_app.shader_range(i, &lo, &hi, &st);
+            g_app.shader_set(i, g_app.shader_get(i) + (ud->iDelta > 0 ? st : -st));
+            CrtDlgSyncRow(dlg, i);
+            return TRUE;   // we own the value; block the control's internal pos
+        }
+        return FALSE; }
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_CRT_ENABLE: {
+            const int on = (IsDlgButtonChecked(dlg, IDC_CRT_ENABLE) == BST_CHECKED) ? 1 : 0;
+            g_crt = on;
+            if (g_app.set_crt) g_app.set_crt(on);
+            set_config_int("video", "crt", on);
+            return TRUE; }
+        case IDC_MON_GREEN:
+        case IDC_MON_BW: {
+            const int green = (LOWORD(wParam) == IDC_MON_GREEN) ? 1 : 0;
+            g_monitorGreen = green;
+            if (g_app.set_monitor) g_app.set_monitor(green);
+            set_config_int("video", "crt_tint", green);
+            return TRUE; }
+        case IDC_CRT_DEFAULTS:
+            if (g_app.shader_defaults) g_app.shader_defaults();
+            CrtDlgSyncAll(dlg);
+            return TRUE;
+        case IDCANCEL:
+            DestroyWindow(dlg);
+            g_dlgCrt = nullptr;
+            return TRUE;
+        default:
+            // Hand-typed values apply when the edit loses focus (Tab/click away).
+            if (HIWORD(wParam) == EN_KILLFOCUS && g_app.shader_set &&
+                LOWORD(wParam) >= IDC_KNOB_EDIT0 && LOWORD(wParam) < IDC_KNOB_EDIT0 + 7) {
+                const int i = LOWORD(wParam) - IDC_KNOB_EDIT0;
+                char buf[32] = {};
+                GetDlgItemTextA(dlg, LOWORD(wParam), buf, (int)sizeof(buf));
+                g_app.shader_set(i, (float)atof(buf));   // clamped inside
+                CrtDlgSyncRow(dlg, i);
+                return TRUE;
+            }
+            break;
+        }
+        return FALSE;
+
+    case WM_CLOSE:
+        DestroyWindow(dlg);
+        g_dlgCrt = nullptr;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void HostShowCrtSettings(HWND owner)
+{
+    static bool ccInit = false;
+    if (!ccInit) {
+        INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_UPDOWN_CLASS | ICC_BAR_CLASSES };
+        InitCommonControlsEx(&icc);
+        ccInit = true;
+    }
+    if (g_dlgCrt) { SetForegroundWindow(g_dlgCrt); return; }
+    g_dlgCrt = CreateDialogW((HINSTANCE)GetWindowLongPtr(owner, GWLP_HINSTANCE),
+                             MAKEINTRESOURCEW(IDD_CRTSETTINGS), owner, CrtDlgProc);
+    if (g_dlgCrt) ShowWindow(g_dlgCrt, SW_SHOW);
+    else LOG_ERROR("CRT settings dialog failed to create (err=%lu)", GetLastError());
+}
 // Resize the windowed client to base*N, clamped to the monitor work area.
 static void HostApplyScale(int n)
 {
@@ -199,6 +356,12 @@ static void HostToggleFullscreen()
                      g_savedRect.bottom - g_savedRect.top,
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
         g_fullscreen = false;
+
+        // A scale preset picked WHILE fullscreen updated g_scale/menu/ini but
+        // couldn't resize; apply it now so the restored window matches what
+        // the menu (and the persisted ini) claim.
+        if (g_scale >= 1)
+            HostApplyScale(g_scale);
     }
     HostUpdateViewport();
 }
@@ -306,8 +469,16 @@ static void HostShowPopupMenu(HWND wnd)
         HMENU sub = GetSubMenu(bar, i);
         AppendMenuW(popup, MF_POPUP, (UINT_PTR)sub, name);
     }
+    SetForegroundWindow(wnd);   // required so the popup dismisses on outside clicks
     TrackPopupMenu(popup, TPM_RIGHTBUTTON, pt.x, pt.y, 0, wnd, NULL);
-    DestroyMenu(popup);   // submenus are owned by 'bar'
+
+    // The submenu handles are owned by BOTH menus after AppendMenuW(MF_POPUP):
+    // destroying 'popup' would recursively destroy them, then DestroyMenu(bar)
+    // would operate on dead handles. Detach them from 'popup' first so only
+    // 'bar' destroys the shared submenus.
+    for (int i = GetMenuItemCount(popup) - 1; i >= 0; --i)
+        RemoveMenu(popup, i, MF_BYPOSITION);
+    DestroyMenu(popup);
     DestroyMenu(bar);
 }
 
@@ -343,8 +514,10 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
                         "About", MB_OK | MB_ICONINFORMATION);
             return 0;
         case IDM_BASIC2:
-        case IDM_BASIC4: {
-            int want = (LOWORD(wParam) == IDM_BASIC4) ? 4 : 2;
+        case IDM_BASIC4:
+        case IDM_BASIC8032: {
+            int want = (LOWORD(wParam) == IDM_BASIC8032) ? 8 :
+                       (LOWORD(wParam) == IDM_BASIC4) ? 4 : 2;
             if (want != g_basic && g_app.set_basic) {
                 g_basic = want;
                 g_app.set_basic(g_basic);
@@ -374,6 +547,38 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
             set_config_int("video", "crt", g_crt);
             HostUpdateCrtCheck();
             return 0;
+        case IDM_SPEED2X:
+            g_speed2x = !g_speed2x;
+            if (g_app.set_speed) g_app.set_speed(g_speed2x ? 2 : 1);
+            set_config_int("machine", "speed2x", g_speed2x);
+            HostUpdateSpeedCheck();
+            return 0;
+        case IDM_KBDGFX:
+            g_gfxKbd = !g_gfxKbd;
+            if (g_app.set_gfx_kbd) g_app.set_gfx_kbd(g_gfxKbd);
+            set_config_int("input", "graphics_kbd", g_gfxKbd);
+            HostUpdateKbdGfxCheck();
+            return 0;
+        case IDM_SNES:
+            g_snesEnabled = !g_snesEnabled;
+            if (g_app.set_snes) g_app.set_snes(g_snesEnabled);
+            set_config_bool("input", "snes_adapter", g_snesEnabled != 0);
+            HostUpdateSnesCheck();
+            return 0;
+        case IDM_CRT_SETTINGS:
+            HostShowCrtSettings(wnd);
+            return 0;
+        case IDM_MONITOR_GREEN:
+        case IDM_MONITOR_BW: {
+            int want = (LOWORD(wParam) == IDM_MONITOR_GREEN) ? 1 : 0;
+            if (want != g_monitorGreen) {
+                g_monitorGreen = want;
+                if (g_app.set_monitor) g_app.set_monitor(g_monitorGreen);
+                set_config_int("video", "crt_tint", g_monitorGreen);
+                HostUpdateMonitorChecks();
+            }
+            return 0;
+        }
         }
         return 0;
 
@@ -405,6 +610,12 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         if (g_app.get_disk_mounted) {
             UINT flags = MF_BYCOMMAND | (g_app.get_disk_mounted() ? MF_ENABLED : MF_GRAYED);
             EnableMenuItem((HMENU)wParam, IDM_EJECT, flags);
+        }
+        // F12 flips the graphics-keyboard mode outside the menu; resync the
+        // checkmark from the emulator's live state whenever a menu opens.
+        if (g_app.get_gfx_kbd) {
+            g_gfxKbd = g_app.get_gfx_kbd();
+            HostUpdateKbdGfxCheck();
         }
         return 0;
 
@@ -539,6 +750,7 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
 
     // Restore the saved system ROM set (BASIC 2 / 4) and tick the menu.
     g_basic = get_config_int("machine", "basic", 2);
+    if (g_basic != 2 && g_basic != 4 && g_basic != 8) g_basic = 2;
     HostUpdateBasicChecks();
 
     // Restore the saved RAM size and tick the menu (emu_init already applied it).
@@ -550,6 +762,29 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     g_crt = get_config_int("video", "crt", 0);
     if (g_app.set_crt) g_app.set_crt(g_crt);
     HostUpdateCrtCheck();
+
+    // Restore the saved monitor color (crt_tint: 1 = green, 0 = B&W) and tick
+    // the menu. The emulator also read this key in its own init; this keeps
+    // the menu radio and emulator in sync from one source of truth.
+    g_monitorGreen = get_config_int("video", "crt_tint", 1) ? 1 : 0;
+    if (g_app.set_monitor) g_app.set_monitor(g_monitorGreen);
+    HostUpdateMonitorChecks();
+
+    // Restore the saved speed toggle and tick the menu.
+    g_speed2x = get_config_int("machine", "speed2x", 0) ? 1 : 0;
+    if (g_app.set_speed) g_app.set_speed(g_speed2x ? 2 : 1);
+    HostUpdateSpeedCheck();
+
+    // Restore the saved graphics-keyboard mode and tick the menu.
+    g_gfxKbd = get_config_int("input", "graphics_kbd", 1) ? 1 : 0;
+    if (g_app.set_gfx_kbd) g_app.set_gfx_kbd(g_gfxKbd);
+    HostUpdateKbdGfxCheck();
+
+    // Restore the saved SNES adapter enable and tick the menu. (emu_init also
+    // reads [input] snes_adapter; this keeps the menu checkmark in sync.)
+    g_snesEnabled = get_config_bool("input", "snes_adapter", true) ? 1 : 0;
+    if (g_app.set_snes) g_app.set_snes(g_snesEnabled);
+    HostUpdateSnesCheck();
 
     // A -rom on the command line loads that program/disk at startup.
     if (!g_cmd.rom.empty()) HostLoadRomPath(HostResolveRomPath(g_cmd.rom).c_str());
@@ -565,6 +800,7 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
             if (msg.message == WM_QUIT) {
                 g_running = false;
             } else {
+                if (g_dlgCrt && IsDialogMessage(g_dlgCrt, &msg)) continue;
                 if (!TranslateAccelerator(hWnd, accel, &msg)) {
                     TranslateMessage(&msg);
                     DispatchMessage(&msg);
@@ -597,6 +833,11 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     set_config_int("machine", "basic", g_basic);
     set_config_int("machine", "ram", g_ram);
     set_config_int("video", "crt", g_crt);
+    set_config_int("video", "crt_tint", g_monitorGreen);
+    set_config_int("machine", "speed2x", g_speed2x);
+    // Save the LIVE mode (F12 may have flipped it since the last menu click).
+    set_config_int("input", "graphics_kbd",
+                   g_app.get_gfx_kbd ? g_app.get_gfx_kbd() : g_gfxKbd);
     if (!g_lastRomDir.empty())
         set_config_string("paths", "lastromdir", win32::Utf16ToUtf8(g_lastRomDir).c_str());
 

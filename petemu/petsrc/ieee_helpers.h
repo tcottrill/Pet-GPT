@@ -202,6 +202,15 @@ namespace ieee_helpers {
         // Trim leading spaces (defensive)
         while (!s.empty() && s.front() == ' ') s.erase(0, 1);
 
+        // Save-with-replace: strip a leading '@' and an optional "@:" current-
+        // drive colon (leaving "@0:"/"@1:" for the drive-prefix block below).
+        // Without this, OPEN"@0:NAME,S,W" stored a file literally named
+        // "@0:NAME" instead of replacing NAME - the SEQ twin of the PRG-name bug.
+        if (!s.empty() && s.front() == '@') {
+            s.erase(0, 1);
+            if (!s.empty() && s.front() == ':') s.erase(0, 1);
+        }
+
         // Strip optional drive prefix:
         //   - canonical: "0:" or "1:"
         //   - lenient:   leading '0' or '1' with NO colon if next char is a letter (missing colon case)

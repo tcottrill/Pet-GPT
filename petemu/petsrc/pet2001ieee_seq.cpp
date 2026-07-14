@@ -33,32 +33,48 @@ std::string PetIEEE::to_pet_upper_a0_padded_16(const std::string& ascii)
 	return out;
 }
 
-// --- SEQ,S,W: open on SA ----------------------------------------------------
-bool PetIEEE::open_seq_write_channel(uint8_t sa, const std::string& rawName)
+// --- SEQ/PRG/USR write (or append): open on SA ------------------------------
+bool PetIEEE::open_seq_write_channel(uint8_t sa, const std::string& rawName,
+                                     uint8_t type, bool append)
 {
 	if (!isD64Mounted()) {
-		LOG_WARN("SEQ,S,W open ignored: no D64 mounted");
+		LOG_WARN("write open ignored: no D64 mounted");
 		return false;
 	}
 
 	sa &= 0x0F;
 
-	// Normalize (quotes, 0:, mode suffixes) and upper-case to match your lookups.
+	// Normalize (quotes, 0:, mode suffixes) and upper-case to match lookups.
 	const std::string name = normalize_open_name_for_seq(rawName);
 	if (name.empty()) {
-		LOG_WARN("SEQ,S,W open: empty normalized name from '%s'", rawName.c_str());
+		LOG_WARN("write open: empty normalized name from '%s'", rawName.c_str());
 		return false;
 	}
 
-	// Reset per-SA buffers and mark channel active.
 	seq_write_buf_[sa].clear();
+
+	// Append (",A"): pre-load the existing file so the commit extends it.
+	// openD64SEQ_for_read fills streams[sa]; move those bytes into the write
+	// buffer, then clear the read stream. A missing file appends to empty
+	// (CBM-DOS creates it), matching real drive behavior.
+	if (append) {
+		const uint8_t tf = (uint8_t)(type & 0x0F); // 1 SEQ / 2 PRG / 3 USR
+		if (openD64SEQ_for_read(name, sa, tf)) {
+			seq_write_buf_[sa] = streams[sa].data;
+			LOG_DEBUG("write open (append): SA=%u preloaded %zu bytes",
+				(unsigned)sa, seq_write_buf_[sa].size());
+		}
+	}
+
 	seq_write_name_[sa] = name;
+	seq_write_type_[sa] = type ? type : 0x81;
 	seq_write_active_[sa] = true;
 
 	// This SA is not a talk stream; keep read-stream state isolated.
 	streams[sa].reset();
 
-	LOG_DEBUG("SEQ,S,W open: SA=%u name='%s'", (unsigned)sa, name.c_str());
+	LOG_DEBUG("write open: SA=%u name='%s' type=%02X append=%d",
+		(unsigned)sa, name.c_str(), (unsigned)seq_write_type_[sa], append ? 1 : 0);
 	return true;
 }
 
@@ -84,15 +100,17 @@ bool PetIEEE::close_seq_write_channel(uint8_t sa)
 
 	const std::string& fname = seq_write_name_[sa];
 	const auto& bytes = seq_write_buf_[sa];
+	const uint8_t type = seq_write_type_[sa] ? seq_write_type_[sa] : 0x81;
 
-	LOG_INFO("SEQ,S,W commit: SA=%u name='%s' bytes=%zu",
-		(unsigned)sa, fname.c_str(), bytes.size());
+	LOG_INFO("write commit: SA=%u name='%s' type=%02X bytes=%zu",
+		(unsigned)sa, fname.c_str(), (unsigned)type, bytes.size());
 
-	// 0x81 = SEQ (d64_save_file will set the CLOSED bit and update BAM/dir)
+	// d64_save_file sets the CLOSED bit and updates BAM/dir; if the file
+	// already exists it is replaced (append preloaded the old contents above).
 	const bool ok = d64_save_file(fname,
 		bytes.empty() ? nullptr : bytes.data(),
 		bytes.size(),
-		0x81);
+		type);
 
 	if (!ok) {
 		LOG_ERROR("SEQ,S,W commit failed for '%s' (%zu bytes)", fname.c_str(), bytes.size());
@@ -107,10 +125,14 @@ bool PetIEEE::close_seq_write_channel(uint8_t sa)
 }
 
 // -----------------------------------------------------------------------------
-// Open a SEQ file from D64 for reading on a secondary address
+// Open a named data file (SEQ/PRG/USR) from D64 for reading on a secondary
+// address. typeFilter narrows to one type when the OPEN text carried a
+// ",S"/",P"/",U" suffix; 0 accepts any data type. Wildcards (* ?) match like
+// the LOAD path. For PRG the 2-byte load address is served first, exactly
+// like real DOS when a PRG is read through a data channel.
 // -----------------------------------------------------------------------------
-// Layer: Layer 4 (SEQ reader) opened via Layer 3 named channel
-bool PetIEEE::openD64SEQ_for_read(const std::string& rawName, uint8_t sa)
+// Layer: Layer 4 (named-file reader) opened via Layer 3 named channel
+bool PetIEEE::openD64SEQ_for_read(const std::string& rawName, uint8_t sa, uint8_t typeFilter)
 {
 	if (!isD64Mounted()) return false;
 	if (sa > 0x0F) return false;
@@ -131,10 +153,11 @@ bool PetIEEE::openD64SEQ_for_read(const std::string& rawName, uint8_t sa)
 		for (int i = 0; i < 8; ++i) {
 			const uint8_t* e = sec + 2 + i * 32;
 			const uint8_t ftype = e[0];
-			if ((ftype & 0x80) == 0) continue; // unused
-			if ((ftype & 0x0F) != 1) continue; // SEQ only
+			if ((ftype & 0x80) == 0) continue; // unused/scratched
+			const int ft = ftype & 0x0F;       // 1=SEQ 2=PRG 3=USR
+			if (typeFilter ? (ft != typeFilter) : (ft < 1 || ft > 3)) continue;
 			std::string name = petscii_dirent_to_ascii(e + 3);
-			if (to_upper_ascii(name) == wantU) {
+			if (wild_match(wantU, to_upper_ascii(name))) {
 				startT = e[1];
 				startS = e[2];
 				found = true;

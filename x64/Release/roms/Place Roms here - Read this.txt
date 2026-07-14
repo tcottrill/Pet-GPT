@@ -1,3 +1,33 @@
+<<<<<<< HEAD
+Commodore PET ROM images go in this folder, one subfolder per ROM set:
+
+    roms\basic2\   BASIC 2, "N" editor
+    roms\basic4\   BASIC 4, 40-column
+    roms\8032\     BASIC 4, 80-column / 8032 business set
+
+Easiest way: run download-roms.ps1 (next to PetEmu.exe) and it fetches
+everything and puts it in the right place:
+
+    powershell -ExecutionPolicy Bypass -File download-roms.ps1
+
+Or by hand: download the plain .bin files below from zimmers.net (no
+extraction needed) and drop each into the matching subfolder above.
+https://www.zimmers.net/anonftp/pub/cbm/firmware/computers/pet/
+
+
+roms\basic2\
+------------
+basic-2-c000.901465-01.bin     ($C000)
+basic-2-d000.901465-02.bin     ($D000)
+edit-2-n.901447-24.bin         ($E000)
+kernal-2.901465-03.bin         ($F000)
+characters-1.901447-08.bin
+characters-2.901447-10.bin
+
+
+roms\basic4\ (default set)
+---------------------------
+=======
 Place your Commodore PET ROM .bin files in this folder.
 
 Download them from zimmers.net (plain .bin files - no extraction, just save them here):
@@ -6,6 +36,7 @@ https://www.zimmers.net/anonftp/pub/cbm/firmware/computers/pet/
 
 BASIC 4 (default set)
 ---------------------
+>>>>>>> 35b5023410f3b3428d5f25657cd04dfa2e0e0bbc
 basic-4-b000.901465-23.bin     ($B000)
 basic-4-c000.901465-20.bin     ($C000)
 basic-4-d000.901465-21.bin     ($D000)
@@ -15,11 +46,21 @@ characters-1.901447-08.bin
 characters-2.901447-10.bin
 
 
+<<<<<<< HEAD
+roms\8032\
+----------
+basic-4-b000.901465-19.bin     ($B000)
+basic-4-c000.901465-20.bin     ($C000)
+basic-4-d000.901465-21.bin     ($D000)
+edit-4-80-b-60Hz.901474-03.bin ($E000)
+kernal-4.901465-22.bin         ($F000)
+=======
 BASIC 2 (2001-N set)
 --------------------
 basic-2-c000.901465-01.bin     ($C000)
 basic-2-d000.901465-02.bin     ($D000)
 edit-2-n.901447-24.bin         ($E000)   (or edit-2-b.901474-01.bin)
 kernal-2.901465-03.bin         ($F000)
+>>>>>>> 35b5023410f3b3428d5f25657cd04dfa2e0e0bbc
 characters-1.901447-08.bin
 characters-2.901447-10.bin

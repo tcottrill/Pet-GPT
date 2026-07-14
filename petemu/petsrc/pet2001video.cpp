@@ -55,6 +55,9 @@ void Pet2001Video::reset()
     blank = false;
     blankRequested = false;
     blankCountdownMs = -1;
+    // Hardware reset drives CA2 back to the graphics charset (VIA PCR resets
+    // to 0); without this a reset from text mode kept rendering charset2.
+    if (charset1) activeCharset = charset1;
     // If charsets are set, show empty screen; otherwise still fine.
     redrawScreen();
 }
@@ -72,7 +75,7 @@ void Pet2001Video::write(int addr, uint8_t value)
     vidram[addr] = value;
 
     // Incremental draw only for visible screen area and when not blank.
-    if (addr < VIDRAM_SIZE && !blank && activeCharset != nullptr) {
+    if (addr < visible_ && !blank && activeCharset != nullptr) {
         drawCharCell(addr, value);
     }
 }
@@ -106,6 +109,18 @@ void Pet2001Video::setVideoBlank(bool flag)
     }
 }
 
+void Pet2001Video::setColumns(int cols)
+{
+    const int nc = (cols == 80) ? 80 : 40;
+    if (nc == cols_) return;
+    cols_    = nc;
+    scaleX_  = (nc == 80) ? 1 : 2;
+    cellW_   = CHAR_W * scaleX_;
+    visible_ = nc * ROWS;
+    if ((int)vidram.size() < visible_) vidram.resize(visible_, 0x20);
+    redrawScreen();
+}
+
 void Pet2001Video::setCharset(bool useSecond)
 {
     const uint8_t* newSet = useSecond ? charset2 : charset1;
@@ -119,7 +134,9 @@ void Pet2001Video::setCharset(bool useSecond)
 
 void Pet2001Video::update(int elapsed_ms)
 {
-    // Service pending blanking timer
+    // Service the pending blanking timer only. (This used to also do an
+    // unconditional full redrawScreen() per call -- unnecessary, since every
+    // vidram write already draws its cell incrementally.)
     if (blankCountdownMs >= 0) {
         blankCountdownMs -= std::max(0, elapsed_ms);
         if (blankCountdownMs <= 0) {
@@ -129,7 +146,6 @@ void Pet2001Video::update(int elapsed_ms)
             blankCountdownMs = -1;
         }
     }
-    redrawScreen();
 }
 
 std::string Pet2001Video::save() const
@@ -141,16 +157,18 @@ std::string Pet2001Video::save() const
     //   charset: '1' (charset1) or '2' (charset2)
     //   then VIDRAM_SIZE hex values with commas
 
+    // Serialize the whole vidram (2000 bytes in 80-column mode, not the
+    // 40-col VIDRAM_SIZE constant, which truncated 8032 snapshots).
     char buf[32];
     std::string s;
-    s.reserve(2 + 2 + (VIDRAM_SIZE * 3)); // rough
+    s.reserve(2 + 2 + (vidram.size() * 3)); // rough
 
     s += (blank ? '1' : '0');
     s += ',';
     s += (activeCharset == charset1 ? '1' : '2');
     s += ',';
 
-    for (int i = 0; i < VIDRAM_SIZE; ++i) {
+    for (int i = 0; i < (int)vidram.size(); ++i) {
         std::snprintf(buf, sizeof(buf), "%02x", static_cast<unsigned>(vidram[i]));
         s += buf;
         s += ',';
@@ -163,7 +181,7 @@ void Pet2001Video::load(const std::string& s)
     // Expect the format we produced in save()
     // Split by commas (simple parser)
     std::vector<std::string> parts;
-    parts.reserve(VIDRAM_SIZE + 2);
+    parts.reserve(vidram.size() + 2);
 
     size_t start = 0;
     for (;;) {
@@ -175,7 +193,7 @@ void Pet2001Video::load(const std::string& s)
         }
         parts.emplace_back(s.substr(start, pos - start));
         start = pos + 1;
-        if (parts.size() > (size_t)(VIDRAM_SIZE + 2)) break;
+        if (parts.size() > vidram.size() + 2) break;
     }
 
     if (parts.size() < 2) return;
@@ -188,7 +206,7 @@ void Pet2001Video::load(const std::string& s)
     setCharset(useSecond);
 
     // vidram
-    for (int i = 0; i < VIDRAM_SIZE && (i + 2) < (int)parts.size(); ++i) {
+    for (int i = 0; i < (int)vidram.size() && (i + 2) < (int)parts.size(); ++i) {
         const std::string& hx = parts[i + 2];
         if (hx.empty()) continue;
         uint8_t v = static_cast<uint8_t>(std::strtoul(hx.c_str(), nullptr, 16));
@@ -210,10 +228,13 @@ void Pet2001Video::redrawScreen()
         return;
     }
 
-    // Clear entire screen to black, then paint each visible char cell
+    // Clear entire screen to black, then paint each visible char cell.
+    // visible_ = cols_ * ROWS (2000 in 80-column mode, not VIDRAM_SIZE=1000 --
+    // the constant here used to black out the bottom half of an 8032 screen
+    // on every full redraw).
     std::fill(fb.begin(), fb.end(), RGBA_BLACK);
 
-    for (int addr = 0; addr < VIDRAM_SIZE; ++addr) {
+    for (int addr = 0; addr < visible_; ++addr) {
         drawCharCell(addr, vidram[addr]);
     }
 }
@@ -229,11 +250,11 @@ void Pet2001Video::drawCharCell(int addr, uint8_t ch)
     if (activeCharset == nullptr) return;
 
     // Compute row/col from linear address
-    const int col = addr % COLS;
-    const int row = addr / COLS;
+    const int col = addr % cols_;
+    const int row = addr / cols_;
 
     // Black-out entire character cell first
-    fillRect(col * CELL_W, row * CELL_H, CELL_W, CELL_H, RGBA_BLACK);
+    fillRect(col * cellW_, row * CELL_H, cellW_, CELL_H, RGBA_BLACK);
 
     // Foreground color (white-ish)
     const uint32_t fg = RGBA_WHITEISH;
@@ -245,7 +266,7 @@ void Pet2001Video::drawCharCell(int addr, uint8_t ch)
     const uint8_t* base = activeCharset + (glyph * CHAR_H);
 
     // Paint doubled pixels (2x2) for each set bit
-    const int x0 = col * CELL_W;
+    const int x0 = col * cellW_;
     const int y0 = row * CELL_H;
 
     for (int y = 0; y < CHAR_H; ++y) {
@@ -255,13 +276,13 @@ void Pet2001Video::drawCharCell(int addr, uint8_t ch)
         for (int x = 0; x < CHAR_W; ++x) {
             if (bits & 0x80) {
                 // Draw a 2x2 block
-                const int px = x0 + x * SCALE;
+                const int px = x0 + x * scaleX_;
                 const int py = y0 + y * SCALE;
                 // Fill 2x2 (fast-path writes)
-                putPixel(px,     py,     fg);
-                putPixel(px + 1, py,     fg);
-                putPixel(px,     py + 1, fg);
-                putPixel(px + 1, py + 1, fg);
+                for (int dx = 0; dx < scaleX_; ++dx) {
+                    putPixel(px + dx, py,     fg);
+                    putPixel(px + dx, py + 1, fg);
+                }
             }
             bits <<= 1;
         }

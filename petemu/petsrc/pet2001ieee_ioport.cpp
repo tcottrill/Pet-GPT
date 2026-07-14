@@ -8,6 +8,8 @@
 #include "ieee_helpers.h"
 using namespace ieee_helpers;  // or qualify each helper call explicitly
 
+//#define IEEE_TRACE 1
+
 // This was originally based on Thomas Skibo's code but has moved to a point where I consider it to be
 // it's own source, if you can call it that with AI generated.
 
@@ -151,6 +153,170 @@ void PetIEEE::set_status(uint8_t code, const char* msg, uint8_t track, uint8_t s
 }
 
 // -----------------------------------------------------------------------------
+// Direct-access ('#') channels and DOS block commands (U1/U2/B-P)
+// -----------------------------------------------------------------------------
+
+// Collect `want` decimal integers from s starting at pos; any non-digit run
+// is a separator (handles "U1:8,0,18,00", "U1: 8 0 18 0", "B-P:8,0", ...).
+bool PetIEEE::parse_ints_after(const std::string& s, size_t pos, int* out, int want)
+{
+	int n = 0;
+	while (pos < s.size() && n < want) {
+		if (s[pos] >= '0' && s[pos] <= '9') {
+			int v = 0;
+			while (pos < s.size() && s[pos] >= '0' && s[pos] <= '9')
+				v = v * 10 + (s[pos++] - '0');
+			out[n++] = v;
+		}
+		else ++pos;
+	}
+	return n == want;
+}
+
+// OPEN n,8,sa,"#": arm a direct-access buffer channel on this SA.
+void PetIEEE::open_direct_access_channel(uint8_t sa)
+{
+	da_active_[sa] = true;
+	da_ptr_[sa] = 0;
+	da_buf_[sa].fill(0);
+	streams[sa].reset();
+	streams[sa].name = "#";
+	LOG_INFO("IEEE OPEN '#' direct-access channel SA=%u", (unsigned)sa);
+	set_status(0, "OK", 0, 0);
+}
+
+// U1/UA (block-read), U2/UB (block-write), UI/UJ (soft reset).
+// Format: "U1:<ch>,<drive>,<track>,<sector>" (separators are free-form).
+bool PetIEEE::cmd_block_u(const std::string& up)
+{
+	if (up.size() < 2) { set_status(31, "SYNTAX ERROR", 0, 0); return false; }
+	const char sub = up[1];
+
+	if (sub == 'I' || sub == 'J' || sub == '9' || sub == ':') {
+		// Soft reset: report the DOS power-on message.
+		set_status(73, "CBM DOS V2.6 4040", 0, 0);
+		return true;
+	}
+
+	const bool isRead  = (sub == '1' || sub == 'A');
+	const bool isWrite = (sub == '2' || sub == 'B');
+	if (!isRead && !isWrite) {
+		LOG_WARN("CMD15 U-sub '%c' not implemented", sub);
+		set_status(31, "SYNTAX ERROR", 0, 0);
+		return false;
+	}
+
+	int p[4]; // channel(SA), drive, track, sector
+	if (!parse_ints_after(up, 2, p, 4)) { set_status(30, "SYNTAX ERROR", 0, 0); return false; }
+	const int ch = p[0], track = p[2], sector = p[3];
+
+	if (!isD64Mounted()) { set_status(74, "DRIVE NOT READY", 0, 0); return false; }
+	if (ch < 0 || ch > 15) { set_status(30, "SYNTAX ERROR", 0, 0); return false; }
+	if (track < 1 || track > d64_num_tracks() || sector < 0 || sector >= d64_sectors_per_track(track)) {
+		set_status(66, "ILLEGAL TRACK AND SECTOR", (uint8_t)track, (uint8_t)sector);
+		return false;
+	}
+
+	// Be permissive about the OPEN "#" spelling: software that reached a
+	// U1/U2 clearly means this SA to be a buffer channel.
+	if (!da_active_[ch]) {
+		LOG_WARN("U%c on SA=%d without OPEN \"#\" - arming buffer channel anyway", sub, ch);
+		open_direct_access_channel((uint8_t)ch);
+	}
+
+	if (isRead) {
+		uint8_t sec[256];
+		if (!d64_read_sector(track, sector, sec)) {
+			set_status(66, "ILLEGAL TRACK AND SECTOR", (uint8_t)track, (uint8_t)sector);
+			return false;
+		}
+		std::memcpy(da_buf_[ch].data(), sec, 256);
+		da_ptr_[ch] = 0;
+		// Arm the whole sector on the read stream (GET# serves it, EOI at 255).
+		streams[ch].data.assign(sec, sec + 256);
+		streams[ch].index = 0;
+		LOG_INFO("U1: SA=%d T%d/S%d -> buffer (256 bytes)", ch, track, sector);
+	}
+	else {
+		if (!d64_write_sector(track, sector, da_buf_[ch].data()) ||
+			!d64_flush_image_to_disk()) {
+			set_status(26, "WRITE PROTECT ON", (uint8_t)track, (uint8_t)sector);
+			return false;
+		}
+		LOG_INFO("U2: SA=%d buffer -> T%d/S%d (256 bytes)", ch, track, sector);
+	}
+	set_status(0, "OK", 0, 0);
+	return true;
+}
+
+// B-A:<drive>,<track>,<sector> (allocate) / B-F (free). Software with its own
+// disk layout claims and releases raw blocks in the BAM with these. Per DOS,
+// allocating an in-use block answers 65,NO BLOCK with the NEXT free block's
+// t/s as a hint (00,00 when nothing is free at or after the request).
+bool PetIEEE::cmd_block_alloc_free(const std::string& up, bool alloc)
+{
+	int p[3]; // drive, track, sector
+	if (!parse_ints_after(up, 3, p, 3)) { set_status(30, "SYNTAX ERROR", 0, 0); return false; }
+	const int track = p[1], sector = p[2];
+
+	if (!isD64Mounted()) { set_status(74, "DRIVE NOT READY", 0, 0); return false; }
+	if (track < 1 || track > d64_num_tracks() || sector < 0 || sector >= d64_sectors_per_track(track)) {
+		set_status(66, "ILLEGAL TRACK AND SECTOR", (uint8_t)track, (uint8_t)sector);
+		return false;
+	}
+
+	D64Catalog cat;
+	if (!d64_parse_bam(cat)) { set_status(71, "DIR ERROR", 0, 0); return false; }
+
+	if (alloc) {
+		if (!d64_bam_is_free(cat, track, sector)) {
+			// In use: hint the next free block at or after the request, skipping
+			// the DOS/BAM tracks the allocator reserves (18, and 53 on a .d71).
+			int nt = 0, ns = 0;
+			for (int t2 = track; t2 <= d64_num_tracks() && nt == 0; ++t2) {
+				if (t2 == 18) continue;
+				if (d64_num_tracks() > 35 && t2 == D71_BAM2_TRACK) continue;
+				for (int s2 = (t2 == track ? sector + 1 : 0); s2 < d64_sectors_per_track(t2); ++s2)
+					if (d64_bam_is_free(cat, t2, s2)) { nt = t2; ns = s2; break; }
+			}
+			LOG_INFO("B-A: T%d/S%d in use -> 65,NO BLOCK,%d,%d", track, sector, nt, ns);
+			set_status(65, "NO BLOCK", (uint8_t)nt, (uint8_t)ns);
+			return false;
+		}
+		d64_bam_set_used(cat, track, sector, true);
+		LOG_INFO("B-A: allocated T%d/S%d", track, sector);
+	}
+	else {
+		d64_bam_set_used(cat, track, sector, false);
+		LOG_INFO("B-F: freed T%d/S%d", track, sector);
+	}
+
+	if (!d64_write_bam_sector(cat) || !d64_flush_image_to_disk()) {
+		set_status(26, "WRITE PROTECT ON", (uint8_t)track, (uint8_t)sector);
+		return false;
+	}
+	set_status(0, "OK", 0, 0);
+	return true;
+}
+
+// B-P:<ch>,<pos> - position the buffer pointer within a '#' channel.
+bool PetIEEE::cmd_buffer_pointer(const std::string& up)
+{
+	int p[2];
+	if (!parse_ints_after(up, 3, p, 2)) { set_status(30, "SYNTAX ERROR", 0, 0); return false; }
+	const int ch = p[0], pos = p[1] & 0xFF;
+	if (ch < 0 || ch > 15) { set_status(30, "SYNTAX ERROR", 0, 0); return false; }
+
+	da_ptr_[ch] = (uint8_t)pos;
+	// Reads resume from this offset within the armed sector.
+	if (streams[ch].data.size() == 256)
+		streams[ch].index = (size_t)pos;
+	LOG_DEBUG("B-P: SA=%d pos=%d", ch, pos);
+	set_status(0, "OK", 0, 0);
+	return true;
+}
+
+// -----------------------------------------------------------------------------
 // Command-channel handler (CMD15) - mostly directory / scratch / rename
 // -----------------------------------------------------------------------------
 
@@ -283,6 +449,19 @@ bool PetIEEE::process_command_channel_string(const std::string& rawIn)
 		return true;
 	}
 
+	case 'U': // U1/UA block-read, U2/UB block-write, UI/UJ reset
+		return cmd_block_u(up);
+
+	case 'B': // B-P buffer pointer, B-A allocate, B-F free (B-R/B-W/B-E: no)
+		if (up.size() >= 3 && up[1] == '-') {
+			if (up[2] == 'P') return cmd_buffer_pointer(up);
+			if (up[2] == 'A') return cmd_block_alloc_free(up, true);
+			if (up[2] == 'F') return cmd_block_alloc_free(up, false);
+		}
+		LOG_WARN("CMD15 'B' subcommand not implemented: '%s'", up.c_str());
+		set_status(31, "SYNTAX ERROR", 0, 0);
+		return false;
+
 	case 'I': // INITIALIZE: HLE re-reads the BAM per op, so this is a no-op.
 		LOG_INFO("CMD15 INITIALIZE");
 		set_status(0, "OK", 0, 0);
@@ -338,6 +517,8 @@ void PetIEEE::reset() {
 	last_listen_sa = 0xFF;
 	for (auto& st : streams) st.reset();
 	current_talk_sa = 0xFF;
+	da_active_.fill(false);
+	da_ptr_.fill(0);
 
 	// Tiny built-in default PRG at $0401 (PRINT "HELLO")
 	load_data = {
@@ -364,24 +545,29 @@ bool PetIEEE::setD64Image(const std::string& path) {
 		LOG_ERROR("IEEE: failed to read D64 image: %s", path.c_str());
 		return false;
 	}
-	// Standard 35-track D64 is 174848 bytes; accept other sizes but warn.
-	if (d64.size() != 174848 && d64.size() != 175531) {
-		LOG_WARN("IEEE: D64 size %zu (non-standard) loaded; proceeding in danger zone", d64.size());
-	}
-
 	const size_t n = d64.size();
 
 	// Standard sizes:
-	//  - 174,848  = 35-track, no error map
+	//  - 174,848  = 35-track (1541/.d64), no error map
 	//  - 175,531  = 35-track, 683 error bytes
-	//  - 196,608  = 40-track, no error map (common "extended" images)
-	//  - 197,376  = 40-track, 768 error bytes
+	//  - 349,696  = 70-track (1571/.d71), no error map
+	//  - 351,062  = 70-track, 1366 error bytes
+	//  - 196,608 / 197,376 = 40-track "extended" images (read-only here)
 	const bool is35 = (n == 174848 || n == 175531);
+	const bool is71 = (n == 349696 || n == 351062);
 	const bool is40 = (n == 196608 || n == 197376);
 
-	if (!is35 && !is40) {
-		LOG_WARN("[IEEE] non-standard D64 size (%zu bytes). Reads/writes will still be attempted; "
-			"BAM/dir math assumes 35 tracks, so use with care.", n);
+	d64_tracks_ = is71 ? 70 : 35;   // 40-track & unknown use 35-track read math
+
+	if (is71) {
+		LOG_INFO("[IEEE] .d71 (%zu bytes) mounted read/write (1571 double-sided, 70 tracks)", n);
+	}
+	else if (!is35) {
+		// The BAM/allocator math handles 35- and 70-track images; anything else
+		// mounts WRITE-PROTECTED (enforced in d64_flush_image_to_disk): reads
+		// work, SAVE/SCRATCH/etc. report WRITE ERROR rather than corrupting it.
+		LOG_WARN("[IEEE] %s D64 (%zu bytes) mounted READ-ONLY (unsupported write geometry)",
+			is40 ? "40-track" : "non-standard size", n);
 	}
 
 	return true;
@@ -810,6 +996,7 @@ void PetIEEE::dataIn(uint8_t d8)
 				}
 				(void)close_seq_write_channel(sa);   // commit SEQ if armed
 				streams[sa].reset();                  // close any read stream bound to this SA
+				da_active_[sa] = false;               // release '#' buffer channel
 				// remain in STATE_LISTEN until UNLISTEN arrives
 			}
 			else if (d8 >= 0xF0 && d8 <= 0xFF) {
@@ -854,27 +1041,80 @@ void PetIEEE::dataIn(uint8_t d8)
 						seq_write_active_[sa] = false;
 						seq_write_buf_[sa].clear();
 						seq_write_name_[sa].clear();
+						da_active_[sa] = false;
 						tracef("CLOSE SEQ channel SA=%u", sa);
 					}
 					state = STATE_IDLE;
 					break;
 				}
 
-				// OPEN on SA: detect ",S,W" and arm SEQ writer
+				// OPEN on SA: parse the type/mode parameters and route.
 				tracef("OPEN SA=%u \"%s\"", sa, filename.c_str());
 				std::string up = to_upper_ascii(filename);
-				if (up.find(",S,W") != std::string::npos) {
-					open_seq_write_channel(sa, filename);
+
+				// Direct-access buffer channel: OPEN n,8,sa,"#" (or "#n").
+				{
+					std::string nm = up;
+					if (!nm.empty() && nm.front() == '\"') nm.erase(0, 1);
+					if (!nm.empty() && nm.back() == '\"') nm.pop_back();
+					if (nm.size() >= 2 && (nm[0] == '0' || nm[0] == '1') && nm[1] == ':')
+						nm.erase(0, 2);
+					if (!nm.empty() && nm[0] == '#') {
+						open_direct_access_channel(sa);
+						filename.clear();
+						state = STATE_IDLE;
+						break;
+					}
+				}
+
+				// Parse the comma-separated OPEN parameters after the name. Each
+				// is a TYPE letter (S/P/U) or a MODE letter (R/W/A). On a data
+				// channel the type defaults to SEQ and the mode to READ, so both
+				// "NAME,S,W" and the shorthand "NAME,W" arm the writer.
+				//   typeFilter: for reads (0=any, 1 SEQ, 2 PRG, 3 USR)
+				//   writeType : dir type for writes (0x81/0x82/0x83)
+				uint8_t typeFilter = 0, writeType = 0x81;
+				bool wantWrite = false, wantAppend = false, isRel = false;
+				for (size_t cp = up.find(','); cp != std::string::npos; cp = up.find(',', cp + 1)) {
+					size_t k = cp + 1;
+					while (k < up.size() && up[k] == ' ') ++k;
+					if (k >= up.size()) break;
+					switch (up[k]) {
+					case 'S': typeFilter = 1; writeType = 0x81; break;
+					case 'P': typeFilter = 2; writeType = 0x82; break;
+					case 'U': typeFilter = 3; writeType = 0x83; break;
+					case 'L': isRel = true; break;   // relative file (unsupported)
+					case 'W': wantWrite = true; break;
+					case 'A': wantWrite = true; wantAppend = true; break;
+					case 'R': default: break; // read / modify: no write
+					}
+				}
+
+				// REL (relative) files use side-sector chains this HLE drive does
+				// not model. Reject with a CLEAR reason rather than a bare
+				// FILE NOT FOUND that sends the user hunting for the wrong problem.
+				if (isRel) {
+					LOG_WARN("[IEEE] REL (relative) files are not supported: \"%s\"",
+						filename.c_str());
+					not_found_handler("REL", normalize_open_name_for_seq(filename), 0x0000);
 					filename.clear();
 					state = STATE_IDLE;
 					break;
 				}
 
-				// Else try SEQ READ on this SA (if mounted)
+				if (wantWrite) {
+					open_seq_write_channel(sa, filename, writeType, wantAppend);
+					filename.clear();
+					state = STATE_IDLE;
+					break;
+				}
+
+				// Else try named-file READ on this SA (if mounted)
 				if (isD64Mounted() && sa >= 2 && sa <= 15) {
 					const std::string clean = normalize_open_name_for_seq(filename);
 					tracef("OPEN normalized: \"%s\"", clean.c_str());
-					if (openD64SEQ_for_read(clean, sa)) {
+
+					if (openD64SEQ_for_read(clean, sa, typeFilter)) {
 						const auto& st = streams[sa];
 						tracef("SEQ armed SA=%u, bytes=%zu", sa, st.data.size());
 						if (!st.data.empty()) {
@@ -885,42 +1125,7 @@ void PetIEEE::dataIn(uint8_t d8)
 						set_status(0, "OK", 0, 0);  // SEQ open OK
 					}
 					else {
-						/*
-						tracef("SEQ not found SA=%u \"%s\"", sa, filename.c_str());
-						LOG_WARN("SEQ LOAD FAILED: SA=%u name=\"%s\" isD64=%d",
-							sa, filename.c_str(), isD64Mounted() ? 1 : 0
-						);
-
-						// 62,FILE NOT FOUND,00,00
-						set_status(62, "FILE NOT FOUND", 0, 0);
-
-						// ----------------------------------------------------------
-						// MATCH PRG & DIRECTORY NOT-FOUND BEHAVIOR:
-						//
-						// SEQ READ must STILL provide a valid TALK data stream,
-						// consisting of exactly ONE BYTE plus EOI.
-						//
-						// Otherwise the PET hangs in its GET# / INPUT# loop waiting
-						// for a data byte and an EOI from the drive.
-						// ----------------------------------------------------------
-
-						std::vector<uint8_t> nfPay = buildPrgNotFoundStub();
-
-						// SEQ files do not include a header or load address;
-						// use 0x0000. The PET ignores it for SEQ.
-						uint16_t nfAddr = 0x0000;
-
-						ieeeLoadData(nfAddr, nfPay);
-						state = STATE_LOAD;
-						dav_i = true;
-						eoi_i = true;
-						hs_ = HS_WAIT_NRFD_H;
-						last_nrfd_ = nrfd_o;
-						last_ndac_ = ndac_o;
-
-						hs_debug("ARM (SEQ NOT FOUND stub)");
-						*/
-						not_found_handler("SEQ", clean, 0x0000);
+						   not_found_handler("SEQ", clean, 0x0000);
 					}
 				}
 
@@ -939,6 +1144,14 @@ void PetIEEE::dataIn(uint8_t d8)
 						current_talk_sa, (size_t)data_index,
 						streams[current_talk_sa].data.size(),
 						streams[current_talk_sa].index);
+				}
+				// Error channel (15): once the host has read the whole status
+				// line, real DOS clears it back to "00, OK, 00, 00". Re-arm it so
+				// a second INPUT#15 returns OK (not an empty read of a spent
+				// buffer). Only reset after a COMPLETE read.
+				if (current_talk_sa == 15 &&
+					streams[15].index >= streams[15].data.size()) {
+					set_status(0, "OK", 0, 0);
 				}
 				state = STATE_IDLE;
 				current_talk_sa = 0xFF;
@@ -1028,6 +1241,14 @@ void PetIEEE::dataIn(uint8_t d8)
 					cmd15_buf_.push_back((char)d8);
 					LOG_DEBUG("CMD15 byte: %02X '%c'  buf_size=%zu",
 						d8, dbg_printable(d8), cmd15_buf_.size());
+				}
+				else if (da_active_[sa]) {
+					// PRINT# into a '#' buffer channel: store at the B-P cursor.
+					da_buf_[sa][da_ptr_[sa]] = d8;
+					// Keep the armed read copy coherent for read-after-write.
+					if (streams[sa].data.size() == 256)
+						streams[sa].data[da_ptr_[sa]] = d8;
+					da_ptr_[sa] = (uint8_t)(da_ptr_[sa] + 1); // wraps at 256
 				}
 				else {
 					// SEQ,S,W: latch-style append into that SA buffer

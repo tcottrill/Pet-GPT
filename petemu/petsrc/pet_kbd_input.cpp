@@ -17,13 +17,13 @@
 //   - Mirrors L/R modifiers into aggregate VKs (SHIFT/CONTROL/MENU) for ToUnicodeEx.
 //   - Explicit handling for OEM punctuation (', ", =, +, ,, <, ., >, -, _, /, ?).
 //   - Reflects host L/R Shift as PET Shift matrix keys while held (helps games).
-//   - Graphics mode toggle: F11 switches between "graphics" (default) and "business".
+//   - Graphics mode toggle: F12 switches between "graphics" (default) and "business".
 //
 // Public API in this file (declared in pet_kbd_input.h):
 //   void set_pet_graphics_mode(bool) noexcept;
 //   bool get_pet_graphics_mode() noexcept;
 //   void toggle_pet_graphics_mode() noexcept;
-//   void build_pet_rows_from_vk(uint8_t out[10]);        // fills + pushes, handles F11
+//   void build_pet_rows_from_vk(uint8_t out[10]);        // fills + pushes, handles F12
 
 // -----------------------------------------------------------------------------
 
@@ -199,8 +199,9 @@ static inline bool press_pet_special_from_vk(std::uint8_t out[10], int vk, const
 	const bool sh = ((kbState[VK_SHIFT] | kbState[VK_LSHIFT] | kbState[VK_RSHIFT]) & 0x80) != 0;
 
 	switch (vk) {
-	case VK_SPACE:   row = 9; col = 2; break; // Space
-	case VK_RETURN:  row = 6; col = 5; break; // Return
+	case VK_SPACE:     row = 9; col = 2; break; // Space
+	case VK_RETURN:    row = 6; col = 5; break; // Return
+	case VK_SEPARATOR: row = 6; col = 5; break; // Numpad Enter (RawInput remaps E0 Return here)
 	case VK_CAPITAL: row = 9; col = 4; break; // RUN/STOP (CapsLock)
 	//case VK_HOME:    row = 9; col = 0; break; // CLR/HOME
 	case VK_HOME: row = 0; col = 6; break; // CLR/HOME (graphics keyboard)
@@ -298,26 +299,90 @@ bool get_pet_graphics_mode() noexcept { return g_pet_graphics_shift_mode; }
 void toggle_pet_graphics_mode() noexcept { g_pet_graphics_shift_mode = !g_pet_graphics_shift_mode; }
 
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Business (8032) keyboard matrix - independent compact path.
+// Positions from the VICE buuk (business UK) keymap. shift: 0 = plain,
+// 1 = press PET LSHIFT (6,0) with the key, 2 = key is unshifted on the PET
+// even though the host typed it shifted (e.g. ':').
+// -----------------------------------------------------------------------------
+static bool g_pet_business_kbd = false;
+void set_pet_business_kbd(bool on) noexcept { g_pet_business_kbd = on; }
+bool get_pet_business_kbd() noexcept { return g_pet_business_kbd; }
+
+struct BizKey { signed char row, col, shift; };
+static std::array<BizKey, 128> make_biz_map() {
+	std::array<BizKey, 128> m;
+	for (auto& k : m) k = { -1, -1, 0 };
+	auto S = [&](unsigned char ch, int r, int c, int sh = 0) { m[ch] = { (signed char)r, (signed char)c, (signed char)sh }; };
+	static const signed char P[26][2] = { {3,0},{6,2},{6,1},{3,1},{5,1},{2,2},{3,2},{2,3},{4,5},{3,3},{2,5},{3,5},{8,3},
+		{7,2},{5,5},{4,6},{5,0},{4,2},{2,1},{5,2},{5,3},{7,1},{4,1},{8,1},{4,3},{7,0} };
+	for (int i = 0; i < 26; ++i) { S((unsigned char)('a' + i), P[i][0], P[i][1], 0); S((unsigned char)('A' + i), P[i][0], P[i][1], 1); }
+	S('0',1,3); S('1',1,0); S('2',0,0); S('3',9,1); S('4',1,1); S('5',0,1); S('6',9,2); S('7',1,2); S('8',0,2); S('9',9,3);
+	S(' ',8,2); S('\r',3,4); S('\n',3,4);
+	S('!',1,0,1); S('@',3,6,0); S('#',9,1,1); S('$',1,1,1); S('%',0,1,1); S('^',1,5,0);
+	S('&',9,2,1); S('*',9,5,1); S('(',0,2,1); S(')',9,3,1); S('-',0,3,0); S('_',3,6,1);
+	S('=',0,3,1); S('+',2,6,1); S('[',5,6,0); S(']',2,4,0); S('\\',4,4,0);
+	S(':',9,5,2); S(';',2,6,0); S('"',0,0,1); S('\'',1,2,1);
+	S(',',7,3,0); S('<',7,3,1); S('.',6,3,0); S('>',6,3,1); S('/',8,6,0); S('?',8,6,1);
+	return m;
+}
+static const std::array<BizKey, 128> g_biz_map = make_biz_map();
+
+static void build_business_rows(std::uint8_t out[10],
+	const unsigned char key_state[256], const BYTE kbState[256], HKL layout)
+{
+	bool runstop = false;
+	for (int vk = 0; vk < 256; ++vk) {
+		if (!key_state[vk]) continue;
+		switch (vk) {   // VK specials first (business positions)
+		case VK_RETURN: case VK_SEPARATOR: pet_press(out, 3, 4); continue;
+		case VK_CAPITAL: pet_press(out, 9, 4); runstop = true; continue; // RUN/STOP
+		case VK_HOME:   pet_press(out, 8, 4); continue;
+		case VK_DELETE: case VK_BACK: pet_press(out, 4, 7); continue;
+		case VK_RIGHT:  pet_press(out, 0, 5); continue;
+		case VK_LEFT:   pet_press(out, 0, 5); pet_press(out, 6, 0); continue;
+		case VK_DOWN:   pet_press(out, 5, 4); continue;
+		case VK_UP:     pet_press(out, 5, 4); pet_press(out, 6, 0); continue;
+		case VK_TAB:    pet_press(out, 4, 0); continue;
+		case VK_ESCAPE: pet_press(out, 2, 0); continue;
+		case VK_SPACE:  pet_press(out, 8, 2); continue;
+		default: break;
+		}
+		unsigned char ch = 0;
+		if (!vk_to_ascii((unsigned)vk, kbState, layout, ch)) continue;
+		if (ch >= 128) continue;
+		const BizKey bk = g_biz_map[ch];
+		if (bk.row < 0) continue;
+		pet_press(out, bk.row, bk.col);
+		if (bk.shift == 1) pet_press(out, 6, 0);   // PET LSHIFT (business (6,0))
+		// shift==2: PET key is unshifted; host shift was consumed by ToUnicodeEx
+	}
+	// BREAK = RUN/STOP + Shift (mirror the graphics-path behavior)
+	if (runstop && ((kbState[VK_SHIFT] | kbState[VK_LSHIFT] | kbState[VK_RSHIFT]) & 0x80))
+		pet_press(out, 6, 0);
+}
 // Core worker used by both public paths (global-keys vs supplied-keys)
-// handleF11Toggle: if true, toggles graphics mode on F11 edge (global path).
-// pushAfterBuild : if true, pushes to g_pet->bus().io().setKeyrows(out).
+// handleModeToggle: if true, toggles graphics mode on F12 edge (global path).
+// pushAfterBuild  : if true, pushes to g_pet->bus().io().setKeyrows(out).
 // -----------------------------------------------------------------------------
 static void build_pet_rows_core(std::uint8_t out[10],
 	const unsigned char key_state[256],
-	bool handleF11Toggle,
+	bool handleModeToggle,
 	bool pushAfterBuild)
 {
-	// Optional: toggle graphics/business mode on F11 when using global path
-	static bool prevF11 = false;
-	if (handleF11Toggle) {
-		const bool currF11 = (key_state[VK_F11] != 0);
-		if (currF11 && !prevF11) {
+	// Optional: toggle graphics/business mode on F12 when using global path.
+	// (Was F11, but F11 is the host's fullscreen accelerator - the double
+	// binding silently flipped typing mode on every fullscreen toggle.)
+	static bool prevF12 = false;
+	if (handleModeToggle) {
+		const bool currF12 = (key_state[VK_F12] != 0);
+		if (currF12 && !prevF12) {
 			g_pet_graphics_shift_mode = !g_pet_graphics_shift_mode;
 			OutputDebugStringA(g_pet_graphics_shift_mode
 				? "[PET KBD] Graphics mode: ON (Shift+letter -> PET graphics)\n"
 				: "[PET KBD] Graphics mode: OFF (business typing)\n");
 		}
-		prevF11 = currF11;
+		prevF12 = currF12;
 	}
 
 	// Initialize to idle (all 1s): active-low matrix
@@ -340,7 +405,24 @@ static void build_pet_rows_core(std::uint8_t out[10],
 	mirrorAgg(VK_CONTROL, VK_LCONTROL, VK_RCONTROL);
 	mirrorAgg(VK_MENU, VK_LMENU, VK_RMENU);
 
+	// Plain Ctrl (without Alt) has no PET meaning, but ToUnicodeEx turns
+	// Ctrl+letter into control codes - Ctrl+M gives 0x0D and Ctrl+J 0x0A,
+	// both of which map to PET RETURN (spurious presses). Strip Ctrl from
+	// the translation state unless Alt is also down (AltGr on intl layouts).
+	const bool altDown = (kbState[VK_MENU] & 0x80) != 0;
+	if (!altDown && (kbState[VK_CONTROL] & 0x80)) {
+		kbState[VK_CONTROL] = 0;
+		kbState[VK_LCONTROL] = 0;
+		kbState[VK_RCONTROL] = 0;
+	}
+
 	HKL layout = GetKeyboardLayout(0);
+
+	// ---- Business (8032) keyboard: fully separate compact path ----
+	if (g_pet_business_kbd) {
+		build_business_rows(out, key_state, kbState, layout);
+		return;   // update_keyboard() pushes the rows (pushAfterBuild is vestigial)
+	}
 
 	// Pass 1: handle VK-based specials (includes VK_UP and all OEM fallbacks)
 	bool runstop_down = false;
@@ -458,11 +540,11 @@ static void build_pet_rows_core(std::uint8_t out[10],
 
 // -----------------------------------------------------------------------------
 // Public API: build from globals (key[256]) and push (original single-call behavior).
-// Also handles the F11 graphics-mode toggle.
+// Also handles the F12 graphics-mode toggle.
 // -----------------------------------------------------------------------------
 void build_pet_rows_from_vk(std::uint8_t out[PET_KBD_ROWS_BYTES])
 {
-	build_pet_rows_core(out, ::key /*global*/, /*handleF11Toggle=*/true, /*pushAfterBuild=*/true);
+	build_pet_rows_core(out, ::key /*global*/, /*handleModeToggle=*/true, /*pushAfterBuild=*/true);
 }
 
 void update_keyboard(PetMachine* pet)
