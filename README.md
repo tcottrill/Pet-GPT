@@ -8,7 +8,7 @@
   Note to anyone actually stumbling on this repository, this actually is a halfway decent
   pet emulator, and the hle disk drive handles about 95% of the use cases. I am really happy with
   it and if you give it a couple of minutes I think you will be too. The 6502 core and via6522
-  have been highly debugged and are suitable for using in just about any other C++ project.
+  have been highly debugged and are suitable for using in just about any other C++ project.<br>
   ...
   A modern, modular Commodore PET emulator for Windows — cycle-driven 6502, accurate
   VIA&nbsp;6522 / PIA&nbsp;6520 I/O, full CB2 sound, a mono-monitor CRT shader,
