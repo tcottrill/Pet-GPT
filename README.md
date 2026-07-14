@@ -28,21 +28,11 @@
   <img src="images/pet_menu_lr.gif" alt="Pet-GPT running — menus, CRT look, and BASIC" width="620">
 </p>
 
-<<<<<<< HEAD
 **▶ The _Faulty Robots_ CB2 sound demo running in Pet-GPT (video, with audio):**
 
 https://github.com/user-attachments/assets/0e11d07d-d96a-43b2-86fe-575940d97524
-=======
-<p align="center">
-  
-https://github.com/user-attachments/assets/0e11d07d-d96a-43b2-86fe-575940d97524
 
-    <img src="images/petgpt-robots-poster.png" alt="Faulty Robots CB2 sound demo running in Pet-GPT — click to play" width="480">
-  </a>
-  <br>
-  <a href="images/PetGPT-Robots.mp4">▶ Watch: the Faulty Robots CB2 sound demo running in Pet-GPT</a> <em>(video with audio)</em>
-</p>
->>>>>>> 7265ba1e9ff47aec34f1b8996b3393852bb3cddb
+<sub>If the player above doesn't load (some mirrors strip it), <a href="images/PetGPT-Robots.mp4">click here to watch the video</a>.</sub>
 
 ---
 
