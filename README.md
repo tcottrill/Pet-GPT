@@ -32,8 +32,6 @@
 **▶ The _Faulty Robots_ CB2 sound demo running in Pet-GPT (video, with audio):**
 
 https://github.com/user-attachments/assets/0e11d07d-d96a-43b2-86fe-575940d97524
-
-<sub>If the player above doesn't load (some mirrors strip it), <a href="images/PetGPT-Robots.mp4">click here to watch the video</a>.</sub>
 =======
 <p align="center">
   
