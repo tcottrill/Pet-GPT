@@ -29,7 +29,9 @@
 </p>
 
 <p align="center">
-  <a href="images/PetGPT-Robots.mp4">
+  
+https://github.com/user-attachments/assets/0e11d07d-d96a-43b2-86fe-575940d97524
+
     <img src="images/petgpt-robots-poster.png" alt="Faulty Robots CB2 sound demo running in Pet-GPT — click to play" width="480">
   </a>
   <br>
