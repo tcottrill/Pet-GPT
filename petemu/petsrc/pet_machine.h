@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <memory>
 #include "deftypes.h"
 #include "cpu_6502.h"
 #include "pet_mem.h"
@@ -19,6 +20,10 @@ class PetMachine {
 public:
     PetMachine();
     ~PetMachine() = default;
+    PetMachine(const PetMachine&) = delete;
+    PetMachine& operator=(const PetMachine&) = delete;
+    PetMachine(PetMachine&&) = delete;
+    PetMachine& operator=(PetMachine&&) = delete;
 
     // Provide PET character ROMs to the text renderer (1024 bytes each).
     void setVideoCharsets(const uint8_t* charset1, const uint8_t* charset2);
@@ -59,7 +64,7 @@ private:
     PetMem memory;
 
     // CPU
-    cpu_6502* cpuPtr = nullptr;
+    std::unique_ptr<cpu_6502> cpuPtr;
 
     // --- handlers ---
     static uint8_t  s_read8(UINT32 ofs, MemoryReadByte* h);

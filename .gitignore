@@ -30,3 +30,6 @@ files/
 *.tap
 *.crt
 *.pet
+
+# Local source snapshots (not published)
+backups/

@@ -611,16 +611,12 @@ void VIA6522::writeReg(uint8_t offset, uint8_t data)
 		}
 		else
 		{
-			// Input / PHI2-controlled modes: latch the byte and apply at the next
-			// byte boundary, unless the SR is idle on both clock paths.
-			sr_reload_pending = true;
-			if (sr_bits_left == 0 && sr_bits_remaining == 0)
-			{
-				sr = sr_latch;
-				sr_reload_pending = false;
-				sr_bits_left = 8;
-				sr_bits_remaining = 8;
-			}
+			// An SR write loads and rearms the selected transfer, including
+			// when the unused clock path still has a nonzero bit counter.
+			sr = sr_latch;
+			sr_reload_pending = false;
+			sr_bits_left = 8;
+			sr_bits_remaining = 8;
 		}
 
 		break;
@@ -825,7 +821,7 @@ void VIA6522::handleCB1Edge()
 			irb_latch = portB_in;
 
 		// MAME CB2_AUTO_HS: CB1 active edge drives CB2 back HIGH.
-		if (cb2_auto_handshake(pcr))
+		if (cb2_auto_handshake(pcr) && !cb2_shift_override)
 		{
 			if (!cb2_out)
 			{
@@ -838,6 +834,26 @@ void VIA6522::handleCB1Edge()
 		}
 	}
 
+	// External serial clocks are independent of the PCR interrupt edge.
+	// Input samples on rising edges; output presents MSB on falling edges.
+	// External modes continue clocking, with an interrupt every eight bits.
+	if (sr_bits_remaining > 0 &&
+		((sr_mode == 3 && rising) || (sr_mode == 7 && falling)))
+	{
+		if (sr_mode == 3)
+			sr = (uint8_t)((sr << 1) | (cb2_in ? 1 : 0));
+		else
+		{
+			const bool bit = (sr & 0x80) != 0;
+			driveCB2(bit);
+			sr = (uint8_t)((sr << 1) | (bit ? 1 : 0));
+		}
+		if (--sr_bits_remaining == 0)
+		{
+			ifr |= 0x04;
+			sr_bits_remaining = 8;
+		}
+	}
 	old_cb1 = cb1_in;
 }
 
@@ -940,10 +956,11 @@ void VIA6522::runTimer2()
 
 			if (sr_t2_phase)
 			{
+				const bool shifting = sr_bits_left > 0 || sr_reload_pending;
 				runShiftRegister_T2();
 
 				// Byte-boundary handling.
-				if (sr_bits_left == 0)
+				if (shifting && sr_bits_left == 0)
 				{
 					// Free-run mode 4 recirculates the pattern CONTINUOUSLY: the SR
 					// counter is disabled (no IFR2) and there is NO byte-boundary

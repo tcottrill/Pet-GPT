@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include "via6522.h"
+#include "pia6520.h"
 #include "sys_log.h"
 
 // --- no-op Log stubs so via6522.cpp links without log.cpp / Windows threads ---
@@ -414,7 +415,89 @@ static void test_input_latching_porta(){
     CHECK_EQ(v.readReg(R_ORA), 0x55);
 }
 
+static void test_phi2_sr_restarts(){
+    for (uint8_t mode : {uint8_t(0x08), uint8_t(0x18)}) {
+        VIA6522 v;
+        v.writeReg(R_ACR, mode);
+        v.setCB2(true);
+        v.writeReg(R_SR, 0x55);
+        tickN(v, 8);
+        CHECK(v.getIFR() & 4);
+        v.writeReg(R_SR, 0xAA);
+        CHECK(!(v.getIFR() & 4));
+        tickN(v, 7);
+        CHECK(!(v.getIFR() & 4));
+        v.tick();
+        CHECK(v.getIFR() & 4);
+        CHECK_EQ(v.readReg(R_SR), mode == 0x08 ? 0xFF : 0);
+    }
+}
+
+static void test_t2_sr_completion_is_once_per_byte(){
+    for (uint8_t mode : {uint8_t(0x04), uint8_t(0x14)}) {
+        VIA6522 v;
+        v.writeReg(R_ACR, mode);
+        v.writeReg(R_T2CL, 0);
+        v.writeReg(R_SR, 0x55);
+        tickN(v, 32);
+        CHECK(v.getIFR() & 4);
+        v.writeReg(R_IFR, 4);
+        tickN(v, 64);
+        CHECK(!(v.getIFR() & 4));
+        v.writeReg(R_SR, 0xAA);
+        tickN(v, 32);
+        CHECK(v.getIFR() & 4);
+    }
+}
+
+static void test_external_sr_clocks(){
+    VIA6522 v;
+    v.writeReg(R_ACR, 0x0C); // input: rising CB1, independent of PCR
+    v.writeReg(R_SR, 0);
+    for (int bit = 7; bit >= 0; --bit) {
+        v.setCB2((0xA6 >> bit) & 1);
+        v.setCB1(false); v.tick();
+        CHECK(!(v.getIFR() & 4));
+        v.setCB1(true); v.tick();
+    }
+    CHECK(v.getIFR() & 4);
+    CHECK_EQ(v.readReg(R_SR), 0xA6);
+    v.reset();
+    v.writeReg(R_ACR, 0x1C); // output: falling CB1
+    v.writeReg(R_PCR, 0x90); // opposing CB1 IRQ edge, handshake CB2
+    v.writeReg(R_SR, 0xA6);
+    for (int bit = 7; bit >= 0; --bit) {
+        v.setCB1(true); v.tick();
+        CHECK(!(v.getIFR() & 4));
+        v.setCB1(false); v.tick();
+        CHECK_EQ(v.getCB2Output(), (0xA6 >> bit) & 1);
+    }
+    CHECK(v.getIFR() & 4);
+    v.writeReg(R_IFR, 4);
+    // External output recirculates and continues without another SR write.
+    v.setCB1(true); v.tick();
+    v.setCB1(false); v.tick();
+    CHECK_EQ(v.getCB2Output(), true);
+}
+
+static void test_pia_strobe_idle(){
+    PIA6520 p;
+    p.writePIA_CRA(0x24);
+    CHECK(p.getPIA_CA2_out());
+    p.readPIA_PA();
+    CHECK(!p.getPIA_CA2_out());
+    p.setCA1(true); p.setCA1(false);
+    CHECK(p.getPIA_CA2_out());
+    p.writePIA_CRA(0x34); // manual low -> pulse mode
+    p.writePIA_CRA(0x2C);
+    CHECK(p.getPIA_CA2_out());
+}
+
 int main(){
+    test_phi2_sr_restarts();
+    test_t2_sr_completion_is_once_per_byte();
+    test_external_sr_clocks();
+    test_pia_strobe_idle();
     test_reset_defaults();
     test_methodB_resumes_after_methodA();
     test_methodB_zero_pattern_is_silent();

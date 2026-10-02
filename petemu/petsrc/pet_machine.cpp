@@ -74,7 +74,7 @@ PetMachine::PetMachine()
     // IMPORTANT: mirror PetMem writes into the CPU MEM buffer
    // memory.setRamMirror(ramImage.data(), ramImage.size());
 
-    cpuPtr = new cpu_6502(memory.ramData(), rdTbl.data(), wrTbl.data(), 0xFFFF, 0);
+    cpuPtr = std::make_unique<cpu_6502>(memory.ramData(), rdTbl.data(), wrTbl.data(), 0xFFFF, 0);
 
     // The PET keeps ROM in a separate image served via the read handler (PetMem),
     // NOT in the flat MEM[] array. The new core defaults to fetching opcodes/operands

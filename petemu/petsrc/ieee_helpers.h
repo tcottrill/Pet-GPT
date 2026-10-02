@@ -9,11 +9,58 @@
 #include <filesystem>
 #include <algorithm>
 #include <iterator>
+#include <set>
 
 // If you want the PET-side helper too:
 #include "pet_machine.h"
 
 namespace ieee_helpers {
+
+    // Each physical sector may appear only once in a directory or file chain.
+    class SectorVisits {
+        std::set<std::pair<int, int>> seen_;
+    public:
+        bool visit(int track, int sector) {
+            return track >= 1 && track <= 70 && sector >= 0 && sector < 21 &&
+                seen_.emplace(track, sector).second;
+        }
+    };
+
+    // Disk operations mutate a working image. Restore it on every failure path,
+    // including exceptions; commit only after the host write has succeeded.
+    class ImageTransaction {
+        std::vector<uint8_t>& image_;
+        std::vector<uint8_t> before_;
+        bool committed_ = false;
+    public:
+        explicit ImageTransaction(std::vector<uint8_t>& image) : image_(image), before_(image) {}
+        ImageTransaction(const ImageTransaction&) = delete;
+        ImageTransaction& operator=(const ImageTransaction&) = delete;
+        ~ImageTransaction() { if (!committed_) image_.swap(before_); }
+        void commit() { committed_ = true; }
+    };
+
+    inline bool writable_disk_size(size_t n) {
+        return n == 174848 || n == 175531 || n == 349696 || n == 351062;
+    }
+
+    // The virtual drive is flat. Reject path syntax (including Windows ADS),
+    // then resolve existing links so a symlink cannot escape the mounted root.
+    inline bool host_file_path(const std::string& root, const std::string& name,
+                               std::filesystem::path& out) {
+        if (root.empty() || name.empty() || name == "." || name == ".." ||
+            name.find_first_of("/\\:") != std::string::npos ||
+            name.find('\0') != std::string::npos) return false;
+        std::error_code ec;
+        const auto absoluteRoot = std::filesystem::absolute(root, ec);
+        if (ec) return false;
+        const auto base = std::filesystem::weakly_canonical(absoluteRoot, ec);
+        if (ec) return false;
+        const auto candidate = std::filesystem::weakly_canonical(base / name, ec);
+        if (ec || candidate.parent_path() != base) return false;
+        out = candidate;
+        return true;
+    }
 
     // -----------------------------------------------------------------------------
     // Basic file helpers
@@ -201,6 +248,15 @@ namespace ieee_helpers {
 
         // Trim leading spaces (defensive)
         while (!s.empty() && s.front() == ' ') s.erase(0, 1);
+
+        // Save-with-replace: strip a leading '@' and an optional "@:" current-
+        // drive colon (leaving "@0:"/"@1:" for the drive-prefix block below).
+        // Without this, OPEN"@0:NAME,S,W" stored a file literally named
+        // "@0:NAME" instead of replacing NAME - the SEQ twin of the PRG-name bug.
+        if (!s.empty() && s.front() == '@') {
+            s.erase(0, 1);
+            if (!s.empty() && s.front() == ':') s.erase(0, 1);
+        }
 
         // Strip optional drive prefix:
         //   - canonical: "0:" or "1:"

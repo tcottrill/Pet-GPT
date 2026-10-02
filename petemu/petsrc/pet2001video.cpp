@@ -29,7 +29,7 @@
 #include <cstdlib>
 
 Pet2001Video::Pet2001Video()
-: vidram(VIDRAM_SIZE, 0),
+: vidram(1024, 0),
   fb(FB_W * FB_H, RGBA_BLACK),
   charset1(nullptr),
   charset2(nullptr),
@@ -74,9 +74,13 @@ void Pet2001Video::write(int addr, uint8_t value)
 
     vidram[addr] = value;
 
-    // Incremental draw only for visible screen area and when not blank.
-    if (addr < visible_ && !blank && activeCharset != nullptr) {
-        drawCharCell(addr, value);
+    // Translate physical SRAM to a visible cell, wrapping at the SRAM boundary.
+    const int mask = (cols_ == 80) ? 0x7ff : 0x3ff;
+    const int cell = (addr - screenStart_) & mask;
+    if (!blank && activeCharset != nullptr) {
+        // Larger programmed displays can show the same SRAM byte more than once.
+        for (int visibleCell = cell; visibleCell < visible_; visibleCell += mask + 1)
+            drawCharCell(visibleCell, value);
     }
 }
 
@@ -102,8 +106,8 @@ void Pet2001Video::setVideoBlank(bool flag)
         }
         if (blank) {
             // Leaving blank: redraw everything
-            redrawScreen();
             blank = false;
+            redrawScreen();
         }
         blankRequested = false;
     }
@@ -112,12 +116,42 @@ void Pet2001Video::setVideoBlank(bool flag)
 void Pet2001Video::setColumns(int cols)
 {
     const int nc = (cols == 80) ? 80 : 40;
-    if (nc == cols_) return;
+    // A model switch can keep its width while changing the video hardware.
     cols_    = nc;
+    displayCols_ = nc;
+    scanlines_ = CHAR_H;
+    fbHeight_ = FB_H;
+    fb.resize(FB_W * fbHeight_, RGBA_BLACK);
+    screenStart_ = 0;
     scaleX_  = (nc == 80) ? 1 : 2;
     cellW_   = CHAR_W * scaleX_;
     visible_ = nc * ROWS;
-    if ((int)vidram.size() < visible_) vidram.resize(visible_, 0x20);
+    const int sramSize = (nc == 80) ? 2048 : 1024;
+    if ((int)vidram.size() < sramSize) vidram.resize(sramSize, 0x20);
+    redrawScreen();
+}
+
+void Pet2001Video::setCrtcGeometry(int columns, int rows, int scanlines, uint16_t byteOffset)
+{
+    columns = std::clamp(columns, 0, 510);
+    rows = std::clamp(rows, 0, 127);
+    scanlines = std::clamp(scanlines, 1, 32);
+    const int visible = columns * rows;
+    if (displayCols_ == columns && visible_ == visible &&
+        scanlines_ == scanlines && screenStart_ == byteOffset) return;
+    displayCols_ = columns;
+    visible_ = visible;
+    scanlines_ = scanlines;
+    fbHeight_ = std::max(FB_H, rows * scanlines * SCALE);
+    fb.resize(FB_W * fbHeight_, RGBA_BLACK);
+    screenStart_ = byteOffset;
+    redrawScreen();
+}
+
+void Pet2001Video::setScreenStart(uint16_t byteOffset)
+{
+    if (screenStart_ == byteOffset) return;
+    screenStart_ = byteOffset;
     redrawScreen();
 }
 
@@ -134,7 +168,9 @@ void Pet2001Video::setCharset(bool useSecond)
 
 void Pet2001Video::update(int elapsed_ms)
 {
-    // Service pending blanking timer
+    // Service the pending blanking timer only. (This used to also do an
+    // unconditional full redrawScreen() per call -- unnecessary, since every
+    // vidram write already draws its cell incrementally.)
     if (blankCountdownMs >= 0) {
         blankCountdownMs -= std::max(0, elapsed_ms);
         if (blankCountdownMs <= 0) {
@@ -144,7 +180,6 @@ void Pet2001Video::update(int elapsed_ms)
             blankCountdownMs = -1;
         }
     }
-    redrawScreen();
 }
 
 std::string Pet2001Video::save() const
@@ -156,16 +191,18 @@ std::string Pet2001Video::save() const
     //   charset: '1' (charset1) or '2' (charset2)
     //   then VIDRAM_SIZE hex values with commas
 
+    // Include physical SRAM tails now exposed by CRTC scrolling. Legacy
+    // snapshots with only 1000/2000 cells remain readable by load().
     char buf[32];
     std::string s;
-    s.reserve(2 + 2 + (VIDRAM_SIZE * 3)); // rough
+    s.reserve(2 + 2 + (vidram.size() * 3)); // rough
 
     s += (blank ? '1' : '0');
     s += ',';
     s += (activeCharset == charset1 ? '1' : '2');
     s += ',';
 
-    for (int i = 0; i < VIDRAM_SIZE; ++i) {
+    for (int i = 0; i < (int)vidram.size(); ++i) {
         std::snprintf(buf, sizeof(buf), "%02x", static_cast<unsigned>(vidram[i]));
         s += buf;
         s += ',';
@@ -178,7 +215,7 @@ void Pet2001Video::load(const std::string& s)
     // Expect the format we produced in save()
     // Split by commas (simple parser)
     std::vector<std::string> parts;
-    parts.reserve(VIDRAM_SIZE + 2);
+    parts.reserve(vidram.size() + 2);
 
     size_t start = 0;
     for (;;) {
@@ -190,20 +227,24 @@ void Pet2001Video::load(const std::string& s)
         }
         parts.emplace_back(s.substr(start, pos - start));
         start = pos + 1;
-        if (parts.size() > (size_t)(VIDRAM_SIZE + 2)) break;
+        if (parts.size() > vidram.size() + 2) break;
     }
 
     if (parts.size() < 2) return;
 
     // blank flag
     blank = (!parts[0].empty() && parts[0][0] == '1');
+    // The snapshot format stores the effective blank state, not a pending
+    // transition. Never retain a timer from the state being replaced.
+    blankRequested = blank;
+    blankCountdownMs = -1;
 
     // charset index
     bool useSecond = (!parts[1].empty() && parts[1][0] == '2');
     setCharset(useSecond);
 
     // vidram
-    for (int i = 0; i < VIDRAM_SIZE && (i + 2) < (int)parts.size(); ++i) {
+    for (int i = 0; i < (int)vidram.size() && (i + 2) < (int)parts.size(); ++i) {
         const std::string& hx = parts[i + 2];
         if (hx.empty()) continue;
         uint8_t v = static_cast<uint8_t>(std::strtoul(hx.c_str(), nullptr, 16));
@@ -219,17 +260,19 @@ void Pet2001Video::load(const std::string& s)
 
 void Pet2001Video::redrawScreen()
 {
-    if (activeCharset == nullptr) {
+    if (blank || activeCharset == nullptr) {
         // No charset -> just clear to black
         std::fill(fb.begin(), fb.end(), RGBA_BLACK);
         return;
     }
 
-    // Clear entire screen to black, then paint each visible char cell
+    // Clear entire screen to black, then paint each visible char cell.
+    // Geometry can suppress the display or extend beyond the fixed viewport.
     std::fill(fb.begin(), fb.end(), RGBA_BLACK);
 
-    for (int addr = 0; addr < VIDRAM_SIZE; ++addr) {
-        drawCharCell(addr, vidram[addr]);
+    for (int addr = 0; addr < visible_; ++addr) {
+        const int mask = (cols_ == 80) ? 0x7ff : 0x3ff;
+        drawCharCell(addr, vidram[(screenStart_ + addr) & mask]);
     }
 }
 
@@ -241,14 +284,16 @@ void Pet2001Video::blankScreen()
 
 void Pet2001Video::drawCharCell(int addr, uint8_t ch)
 {
-    if (activeCharset == nullptr) return;
+    if (activeCharset == nullptr || displayCols_ == 0) return;
 
     // Compute row/col from linear address
-    const int col = addr % cols_;
-    const int row = addr / cols_;
+    const int col = addr % displayCols_;
+    const int row = addr / displayCols_;
+    const int cellH = scanlines_ * SCALE;
+    if (col * cellW_ >= FB_W || row * cellH >= fbHeight_) return;
 
     // Black-out entire character cell first
-    fillRect(col * cellW_, row * CELL_H, cellW_, CELL_H, RGBA_BLACK);
+    fillRect(col * cellW_, row * cellH, cellW_, cellH, RGBA_BLACK);
 
     // Foreground color (white-ish)
     const uint32_t fg = RGBA_WHITEISH;
@@ -261,9 +306,9 @@ void Pet2001Video::drawCharCell(int addr, uint8_t ch)
 
     // Paint doubled pixels (2x2) for each set bit
     const int x0 = col * cellW_;
-    const int y0 = row * CELL_H;
+    const int y0 = row * cellH;
 
-    for (int y = 0; y < CHAR_H; ++y) {
+    for (int y = 0; y < std::min(scanlines_, CHAR_H); ++y) {
         uint8_t bits = base[y];
         if (inv) bits ^= 0xFF;
 
@@ -285,7 +330,7 @@ void Pet2001Video::drawCharCell(int addr, uint8_t ch)
 
 inline void Pet2001Video::putPixel(int x, int y, uint32_t rgba)
 {
-    if ((unsigned)x < (unsigned)FB_W && (unsigned)y < (unsigned)FB_H) {
+    if ((unsigned)x < (unsigned)FB_W && (unsigned)y < (unsigned)fbHeight_) {
         fb[y * FB_W + x] = rgba;
     }
 }
@@ -296,7 +341,7 @@ inline void Pet2001Video::fillRect(int x, int y, int w, int h, uint32_t rgba)
     int x1 = std::max(0, x);
     int y1 = std::max(0, y);
     int x2 = std::min(FB_W, x + w);
-    int y2 = std::min(FB_H, y + h);
+    int y2 = std::min(fbHeight_, y + h);
     if (x1 >= x2 || y1 >= y2) return;
 
     const int pitch = FB_W;

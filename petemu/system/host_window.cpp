@@ -19,6 +19,7 @@
 // emulator via HostApp; contains no machine-specific code.
 #include <windows.h>
 #include <commdlg.h>
+#include <commctrl.h>  // trackbar + up-down controls (CRT settings dialog)
 #include <shellapi.h>  // DragAcceptFiles / DragQueryFile (drag-drop ROM/disk)
 #include <stdlib.h>    // __argc, __argv
 #include <cstdio>      // swprintf_s
@@ -42,6 +43,7 @@
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 
 // ---- Globals expected by the rest of the codebase (moved from winmain.cpp) ----
@@ -126,7 +128,9 @@ static void HostUpdateScaleChecks()
 static int g_basic = 2; // 2 or 4 (current system ROM set)
 static void HostUpdateBasicChecks() {
     if (!g_menu) return;
-    CheckMenuRadioItem(g_menu, IDM_BASIC2, IDM_BASIC8032,
+    CheckMenuRadioItem(g_menu, IDM_BASIC2, IDM_BASIC1,
+                       (g_basic == 1) ? IDM_BASIC1 :
+                       (g_basic == 12) ? IDM_BASIC4032 :
                        (g_basic == 8) ? IDM_BASIC8032 :
                        (g_basic == 4) ? IDM_BASIC4 : IDM_BASIC2, MF_BYCOMMAND);
 }
@@ -135,6 +139,8 @@ static void HostUpdateBasicChecks() {
 static int g_ram = 32; // KB
 static void HostUpdateRamChecks() {
     if (!g_menu) return;
+    for (UINT id = IDM_RAM4; id <= IDM_RAM32; ++id)
+        EnableMenuItem(g_menu, id, MF_BYCOMMAND | ((g_basic == 8 && id != IDM_RAM32) || (g_basic == 1 && id != IDM_RAM8) ? MF_GRAYED : MF_ENABLED));
     UINT active = (g_ram == 4)  ? IDM_RAM4  :
                   (g_ram == 8)  ? IDM_RAM8  :
                   (g_ram == 16) ? IDM_RAM16 : IDM_RAM32;
@@ -164,6 +170,13 @@ static void HostUpdateKbdGfxCheck() {
                               MF_BYCOMMAND | (g_gfxKbd ? MF_CHECKED : MF_UNCHECKED));
 }
 
+// ---- SNES user-port adapter enable (Machine > SNES Adapter) ----
+static int g_snesEnabled = 1;
+static void HostUpdateSnesCheck() {
+    if (g_menu) CheckMenuItem(g_menu, IDM_SNES,
+                              MF_BYCOMMAND | (g_snesEnabled ? MF_CHECKED : MF_UNCHECKED));
+}
+
 // ---- Monitor color for the CRT shader (1 = green phosphor, 0 = B&W) ----
 static int g_monitorGreen = 1;
 static void HostUpdateMonitorChecks() {
@@ -172,6 +185,129 @@ static void HostUpdateMonitorChecks() {
                                    MF_BYCOMMAND);
 }
 
+// ---- CRT Monitor Settings dialog (modeless; slider + edit/spin per knob) ----
+// Values flow one way: control event -> g_app.shader_set (clamps + saves ini)
+// -> re-read via shader_get to refresh the row. The emulator applies uniforms
+// every frame, so changes are visible live while the dialog is open.
+static HWND g_dlgCrt = nullptr;
+
+static void CrtDlgSyncRow(HWND dlg, int i)
+{
+    float lo, hi, st; g_app.shader_range(i, &lo, &hi, &st);
+    const float v = g_app.shader_get(i);
+    const int pos = (st > 0) ? (int)((v - lo) / st + 0.5f) : 0;
+    SendDlgItemMessage(dlg, IDC_KNOB_SLIDER0 + i, TBM_SETPOS, TRUE, pos);
+    char buf[32]; sprintf_s(buf, "%.2f", v);
+    SetDlgItemTextA(dlg, IDC_KNOB_EDIT0 + i, buf);
+}
+
+static void CrtDlgSyncAll(HWND dlg)
+{
+    for (int i = 0; i < 7; ++i) CrtDlgSyncRow(dlg, i);
+    CheckDlgButton(dlg, IDC_CRT_ENABLE,
+                   (g_app.get_crt && g_app.get_crt()) ? BST_CHECKED : BST_UNCHECKED);
+    CheckRadioButton(dlg, IDC_MON_GREEN, IDC_MON_BW,
+                     (g_app.get_monitor && g_app.get_monitor()) ? IDC_MON_GREEN : IDC_MON_BW);
+}
+
+static INT_PTR CALLBACK CrtDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_INITDIALOG:
+        if (!g_app.shader_range || !g_app.shader_get) { DestroyWindow(dlg); return TRUE; }
+        for (int i = 0; i < 7; ++i) {
+            float lo, hi, st; g_app.shader_range(i, &lo, &hi, &st);
+            const int steps = (st > 0) ? (int)((hi - lo) / st + 0.5f) : 0;
+            SendDlgItemMessage(dlg, IDC_KNOB_SLIDER0 + i, TBM_SETRANGE, TRUE, MAKELPARAM(0, steps));
+        }
+        CrtDlgSyncAll(dlg);
+        return TRUE;
+
+    case WM_HSCROLL: {
+        const int id = GetDlgCtrlID((HWND)lParam);
+        if (id >= IDC_KNOB_SLIDER0 && id < IDC_KNOB_SLIDER0 + 7 && g_app.shader_set) {
+            const int i = id - IDC_KNOB_SLIDER0;
+            float lo, hi, st; g_app.shader_range(i, &lo, &hi, &st);
+            const int pos = (int)SendDlgItemMessage(dlg, id, TBM_GETPOS, 0, 0);
+            g_app.shader_set(i, lo + pos * st);
+            char buf[32]; sprintf_s(buf, "%.2f", g_app.shader_get(i));
+            SetDlgItemTextA(dlg, IDC_KNOB_EDIT0 + i, buf);
+        }
+        return TRUE; }
+
+    case WM_NOTIFY: {
+        const NMHDR* nm = (const NMHDR*)lParam;
+        if (nm->code == UDN_DELTAPOS && g_app.shader_set &&
+            nm->idFrom >= IDC_KNOB_SPIN0 && nm->idFrom < (UINT)(IDC_KNOB_SPIN0 + 7)) {
+            const int i = (int)nm->idFrom - IDC_KNOB_SPIN0;
+            const NMUPDOWN* ud = (const NMUPDOWN*)lParam;
+            float lo, hi, st; g_app.shader_range(i, &lo, &hi, &st);
+            g_app.shader_set(i, g_app.shader_get(i) + (ud->iDelta > 0 ? st : -st));
+            CrtDlgSyncRow(dlg, i);
+            return TRUE;   // we own the value; block the control's internal pos
+        }
+        return FALSE; }
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_CRT_ENABLE: {
+            const int on = (IsDlgButtonChecked(dlg, IDC_CRT_ENABLE) == BST_CHECKED) ? 1 : 0;
+            g_crt = on;
+            if (g_app.set_crt) g_app.set_crt(on);
+            set_config_int("video", "crt", on);
+            return TRUE; }
+        case IDC_MON_GREEN:
+        case IDC_MON_BW: {
+            const int green = (LOWORD(wParam) == IDC_MON_GREEN) ? 1 : 0;
+            g_monitorGreen = green;
+            if (g_app.set_monitor) g_app.set_monitor(green);
+            set_config_int("video", "crt_tint", green);
+            return TRUE; }
+        case IDC_CRT_DEFAULTS:
+            if (g_app.shader_defaults) g_app.shader_defaults();
+            CrtDlgSyncAll(dlg);
+            return TRUE;
+        case IDCANCEL:
+            DestroyWindow(dlg);
+            g_dlgCrt = nullptr;
+            return TRUE;
+        default:
+            // Hand-typed values apply when the edit loses focus (Tab/click away).
+            if (HIWORD(wParam) == EN_KILLFOCUS && g_app.shader_set &&
+                LOWORD(wParam) >= IDC_KNOB_EDIT0 && LOWORD(wParam) < IDC_KNOB_EDIT0 + 7) {
+                const int i = LOWORD(wParam) - IDC_KNOB_EDIT0;
+                char buf[32] = {};
+                GetDlgItemTextA(dlg, LOWORD(wParam), buf, (int)sizeof(buf));
+                g_app.shader_set(i, (float)atof(buf));   // clamped inside
+                CrtDlgSyncRow(dlg, i);
+                return TRUE;
+            }
+            break;
+        }
+        return FALSE;
+
+    case WM_CLOSE:
+        DestroyWindow(dlg);
+        g_dlgCrt = nullptr;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void HostShowCrtSettings(HWND owner)
+{
+    static bool ccInit = false;
+    if (!ccInit) {
+        INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_UPDOWN_CLASS | ICC_BAR_CLASSES };
+        InitCommonControlsEx(&icc);
+        ccInit = true;
+    }
+    if (g_dlgCrt) { SetForegroundWindow(g_dlgCrt); return; }
+    g_dlgCrt = CreateDialogW((HINSTANCE)GetWindowLongPtr(owner, GWLP_HINSTANCE),
+                             MAKEINTRESOURCEW(IDD_CRTSETTINGS), owner, CrtDlgProc);
+    if (g_dlgCrt) ShowWindow(g_dlgCrt, SW_SHOW);
+    else LOG_ERROR("CRT settings dialog failed to create (err=%lu)", GetLastError());
+}
 // Resize the windowed client to base*N, clamped to the monitor work area.
 static void HostApplyScale(int n)
 {
@@ -381,16 +517,27 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
             MessageBoxA(wnd, g_app.about_text ? g_app.about_text : "",
                         "About", MB_OK | MB_ICONINFORMATION);
             return 0;
+        case IDM_BASIC1:
         case IDM_BASIC2:
         case IDM_BASIC4:
+        case IDM_BASIC4032:
         case IDM_BASIC8032: {
-            int want = (LOWORD(wParam) == IDM_BASIC8032) ? 8 :
+            int want = (LOWORD(wParam) == IDM_BASIC1) ? 1 :
+                       (LOWORD(wParam) == IDM_BASIC4032) ? 12 :
+                       (LOWORD(wParam) == IDM_BASIC8032) ? 8 :
                        (LOWORD(wParam) == IDM_BASIC4) ? 4 : 2;
             if (want != g_basic && g_app.set_basic) {
+                if (!g_app.set_basic(want)) {
+                    MessageBoxA(wnd, "Unable to load model ROMs. Run download-roms.ps1 to install them.",
+                                "PET ROMs missing", MB_OK | MB_ICONERROR);
+                    return 0;
+                }
                 g_basic = want;
-                g_app.set_basic(g_basic);
+                if (g_basic == 8) g_ram = 32;
+                if (g_basic == 1) g_ram = 8;
                 set_config_int("machine", "basic", g_basic);
                 HostUpdateBasicChecks();
+                HostUpdateRamChecks();
             }
             return 0;
         }
@@ -427,22 +574,15 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
             set_config_int("input", "graphics_kbd", g_gfxKbd);
             HostUpdateKbdGfxCheck();
             return 0;
-        case IDM_CRT_DEFAULTS:
-            if (g_app.shader_defaults) g_app.shader_defaults();
+        case IDM_SNES:
+            g_snesEnabled = !g_snesEnabled;
+            if (g_app.set_snes) g_app.set_snes(g_snesEnabled);
+            set_config_bool("input", "snes_adapter", g_snesEnabled != 0);
+            HostUpdateSnesCheck();
             return 0;
-        default: {
-            // CRT-shader knob Increase/Decrease ranges (7 knobs each way)
-            const UINT id = LOWORD(wParam);
-            if (id >= IDM_KNOBUP0 && id <= IDM_KNOBUP0 + 6) {
-                if (g_app.shader_adjust) g_app.shader_adjust((int)(id - IDM_KNOBUP0), +1);
-                return 0;
-            }
-            if (id >= IDM_KNOBDN0 && id <= IDM_KNOBDN0 + 6) {
-                if (g_app.shader_adjust) g_app.shader_adjust((int)(id - IDM_KNOBDN0), -1);
-                return 0;
-            }
-            break;
-        }
+        case IDM_CRT_SETTINGS:
+            HostShowCrtSettings(wnd);
+            return 0;
         case IDM_MONITOR_GREEN:
         case IDM_MONITOR_BW: {
             int want = (LOWORD(wParam) == IDM_MONITOR_GREEN) ? 1 : 0;
@@ -485,13 +625,6 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         if (g_app.get_disk_mounted) {
             UINT flags = MF_BYCOMMAND | (g_app.get_disk_mounted() ? MF_ENABLED : MF_GRAYED);
             EnableMenuItem((HMENU)wParam, IDM_EJECT, flags);
-        }
-        // Refresh the CRT-shader knob value labels ("Current: 0.80").
-        if (g_app.shader_text) {
-            for (int i = 0; i < 7; ++i) {
-                ModifyMenuA(g_menu, IDM_KNOBVAL0 + i, MF_BYCOMMAND | MF_STRING | MF_GRAYED,
-                            IDM_KNOBVAL0 + i, g_app.shader_text(i));
-            }
         }
         // F12 flips the graphics-keyboard mode outside the menu; resync the
         // checkmark from the emulator's live state whenever a menu opens.
@@ -632,12 +765,15 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
 
     // Restore the saved system ROM set (BASIC 2 / 4) and tick the menu.
     g_basic = get_config_int("machine", "basic", 2);
-    if (g_basic != 2 && g_basic != 4 && g_basic != 8) g_basic = 2;
+    if (g_app.get_basic) g_basic = g_app.get_basic();
+    if (g_basic != 1 && g_basic != 2 && g_basic != 4 && g_basic != 8 && g_basic != 12) g_basic = 2;
     HostUpdateBasicChecks();
 
     // Restore the saved RAM size and tick the menu (emu_init already applied it).
     g_ram = get_config_int("machine", "ram", 32);
     if (g_ram != 4 && g_ram != 8 && g_ram != 16 && g_ram != 32) g_ram = 32;
+    if (g_basic == 8) g_ram = 32;
+                if (g_basic == 1) g_ram = 8;
     HostUpdateRamChecks();
 
     // Restore the saved CRT look toggle and tick the menu.
@@ -662,6 +798,12 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     if (g_app.set_gfx_kbd) g_app.set_gfx_kbd(g_gfxKbd);
     HostUpdateKbdGfxCheck();
 
+    // Restore the saved SNES adapter enable and tick the menu. (emu_init also
+    // reads [input] snes_adapter; this keeps the menu checkmark in sync.)
+    g_snesEnabled = get_config_bool("input", "snes_adapter", true) ? 1 : 0;
+    if (g_app.set_snes) g_app.set_snes(g_snesEnabled);
+    HostUpdateSnesCheck();
+
     // A -rom on the command line loads that program/disk at startup.
     if (!g_cmd.rom.empty()) HostLoadRomPath(HostResolveRomPath(g_cmd.rom).c_str());
 
@@ -676,6 +818,7 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
             if (msg.message == WM_QUIT) {
                 g_running = false;
             } else {
+                if (g_dlgCrt && IsDialogMessage(g_dlgCrt, &msg)) continue;
                 if (!TranslateAccelerator(hWnd, accel, &msg)) {
                     TranslateMessage(&msg);
                     DispatchMessage(&msg);
@@ -688,7 +831,7 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
                 // every other case (any window, or a front-end-launched instance) quits.
                 if (g_fullscreen && !g_fromCommandLine) {
                     HostToggleFullscreen(); // leave fullscreen, keep running
-                    key[KEY_ESC] = 0;       // consume so it doesn't re-trigger
+                    RawInput_ReleaseKey(KEY_ESC); // consume so it doesn't re-trigger
                 } else {
                     g_running = false;
                 }

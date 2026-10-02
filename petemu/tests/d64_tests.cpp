@@ -6,12 +6,14 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <set>
 #include <fstream>
 #include <iterator>
 #include <filesystem>
+#include <chrono>
 
 #include "pet2001ieee.h"
 #include "sys_log.h"
@@ -35,6 +37,10 @@ static int g_fail = 0, g_checks = 0;
 
 // --- test seam into PetIEEE privates (declared as friend in the header) ---
 struct PetIEEE_TestAccess {
+    static const std::vector<uint8_t>& image(PetIEEE& e) { return e.d64; }
+    static void image_path(PetIEEE& e, const std::string& p) { e.d64Path = p; }
+    static bool host_load(PetIEEE& e, const std::string& n, std::vector<uint8_t>& b, uint16_t& a) { return e.loadHostPRG_Folder(n,b,a); }
+    static void host_save(PetIEEE& e, const std::string& n) { e.saveFile(n, std::string("\1\4X",3)); }
     static bool save_prg(PetIEEE& e, const std::string& n, const std::vector<uint8_t>& b) { return e.d64_save_prg(n, b); }
     static bool load_prg(PetIEEE& e, const std::string& n, std::vector<uint8_t>& pay, uint16_t& addr) { return e.loadHostPRG_D64(n, pay, addr); }
     static bool parse_bam(PetIEEE& e, D64Catalog& c) { return e.d64_parse_bam(c); }
@@ -47,6 +53,57 @@ struct PetIEEE_TestAccess {
     static bool cmd(PetIEEE& e, const std::string& s) { return e.process_command_channel_string(s); }
     static std::string status(PetIEEE& e) { return e.status15_; }
     static bool write_sector(PetIEEE& e, int t, int s, const uint8_t* src) { return e.d64_write_sector(t, s, src); }
+    // Direct-access ('#') channel internals for the block-command tests
+    static void open_da(PetIEEE& e, uint8_t sa) { e.open_direct_access_channel(sa); }
+    static bool da_active(PetIEEE& e, int sa) { return e.da_active_[sa]; }
+    static uint8_t* da_buf(PetIEEE& e, int sa) { return e.da_buf_[sa].data(); }
+    static uint8_t da_ptr(PetIEEE& e, int sa) { return e.da_ptr_[sa]; }
+    static std::vector<uint8_t>& stream_data(PetIEEE& e, int sa) { return e.streams[sa].data; }
+    static size_t stream_index(PetIEEE& e, int sa) { return e.streams[sa].index; }
+    static bool open_read(PetIEEE& e, const std::string& n, uint8_t sa, uint8_t type) {
+        return e.openD64SEQ_for_read(n, sa, type);
+    }
+    static bool save_typed(PetIEEE& e, const std::string& n, const std::vector<uint8_t>& b, uint8_t t) {
+        return e.d64_save_file(n, b.data(), b.size(), t);
+    }
+    // Drive real IEEE byte sequences through dataIn() so the OPEN-parameter
+    // parsing (the bug site) is exercised end to end. Command bytes go out
+    // under ATN low; payload bytes with ATN high, exactly like the bus glue.
+    static void bus_cmd(PetIEEE& e, uint8_t b) { e.atn = false; e.dataIn(b); }
+    static void bus_data(PetIEEE& e, uint8_t b) { e.atn = true; e.dataIn(b); }
+    // OPEN lfn,8,sa,"name" : LISTEN 8, OPEN-secondary, name text, UNLISTEN.
+    static void open_ch(PetIEEE& e, uint8_t sa, const std::string& name) {
+        bus_cmd(e, 0x28);              // LISTEN device 8
+        bus_cmd(e, (uint8_t)(0xF0 | sa)); // OPEN secondary
+        for (char c : name) bus_data(e, (uint8_t)c);
+        bus_cmd(e, 0x3F);              // UNLISTEN -> finalize OPEN
+    }
+    // PRINT#sa, data : LISTEN 8, data-secondary, bytes, UNLISTEN.
+    static void put_data(PetIEEE& e, uint8_t sa, const std::vector<uint8_t>& b) {
+        bus_cmd(e, 0x28);
+        bus_cmd(e, (uint8_t)(0x60 | sa));
+        for (uint8_t by : b) bus_data(e, by);
+        bus_cmd(e, 0x3F);
+    }
+    // CLOSE sa : LISTEN 8, CLOSE-secondary (commits a write), UNLISTEN.
+    static void close_ch(PetIEEE& e, uint8_t sa) {
+        bus_cmd(e, 0x28);
+        bus_cmd(e, (uint8_t)(0xE0 | sa));
+        bus_cmd(e, 0x3F);
+    }
+    // Simulate the host fully reading the error channel (15) then UNTALK, which
+    // is where DOS clears the status back to "00, OK".
+    static void ch15_full_read_untalk(PetIEEE& e) {
+        e.current_talk_sa = 15;
+        e.state = PetIEEE::STATE_LOAD;
+        e.data_index = 0;
+        e.streams[15].index = e.streams[15].data.size();   // whole line consumed
+        e.atn = false;
+        e.dataIn(0x5F);                                     // UNTALK
+    }
+    static bool bam_free(PetIEEE& e, int t, int s) {
+        D64Catalog c; if (!e.d64_parse_bam(c)) return false; return e.d64_bam_is_free(c, t, s);
+    }
 };
 
 static int status_code(PetIEEE& e) {
@@ -54,8 +111,8 @@ static int status_code(PetIEEE& e) {
     return (s.size() >= 2) ? std::atoi(s.substr(0, 2).c_str()) : -1;
 }
 
-// --- D64 geometry (local copy; mirrors PetIEEE::d64_sectors_per_track) ---
-static int spt(int t) { if (t < 1) return 0; if (t <= 17) return 21; if (t <= 24) return 19; if (t <= 30) return 18; if (t <= 35) return 17; return 0; }
+// --- D64/D71 geometry (local copy; mirrors PetIEEE::d64_sectors_per_track) ---
+static int spt(int t) { if (t < 1) return 0; int z = (t >= 36 && t <= 70) ? t - 35 : t; if (z <= 17) return 21; if (z <= 24) return 19; if (z <= 30) return 18; if (z <= 35) return 17; return 0; }
 static size_t soff(int t, int s) { int tot = 0; for (int i = 1; i < t; ++i) tot += spt(i); return (size_t)((tot + s) * 256); }
 
 // Build a minimally-valid blank 35-track image (BAM + empty directory).
@@ -81,6 +138,46 @@ static std::vector<uint8_t> make_blank_d64() {
     bam[0xA7] = 0xA0; bam[0xA8] = 0xA0; bam[0xA9] = 0xA0; bam[0xAA] = 0xA0;
     uint8_t* dir = img.data() + soff(18, 1);
     dir[0] = 0x00; dir[1] = 0xFF;                              // empty dir sector
+    return img;
+}
+
+// Build a minimally-valid blank 70-track 1571 image (.d71): side-0 BAM in
+// 18/0 with the double-sided flag, side-1 bitmaps in 53/0, side-1 free counts
+// at $DD in 18/0, empty directory at 18/1.
+static std::vector<uint8_t> make_blank_d71() {
+    std::vector<uint8_t> img(349696, 0);
+    uint8_t* bam = img.data() + soff(18, 0);
+    bam[0] = 18; bam[1] = 1; bam[2] = 0x41; bam[3] = 0x80;   // dir link, DOS 'A', DOUBLE-SIDED
+    for (int t = 1; t <= 35; ++t) {
+        const int n = spt(t);
+        uint8_t bits[3] = { 0,0,0 };
+        for (int s = 0; s < n; ++s) bits[s >> 3] |= (uint8_t)(1u << (s & 7));
+        int freec = n;
+        if (t == 18) { bits[0] &= (uint8_t)~0x03; freec = n - 2; }
+        const int o = 4 + (t - 1) * 4;
+        bam[o + 0] = (uint8_t)freec; bam[o + 1] = bits[0]; bam[o + 2] = bits[1]; bam[o + 3] = bits[2];
+    }
+    // Side 1: bitmaps in 53/0, counts at $DD in 18/0. Only 53/0 is reserved.
+    uint8_t* bam2 = img.data() + soff(53, 0);
+    for (int t = 36; t <= 70; ++t) {
+        const int n = spt(t);
+        uint8_t bits[3] = { 0,0,0 };
+        for (int s = 0; s < n; ++s) bits[s >> 3] |= (uint8_t)(1u << (s & 7));
+        int freec = n;
+        if (t == 53) { bits[0] &= (uint8_t)~0x01; freec = n - 1; }
+        bam[0xDD + (t - 36)] = (uint8_t)freec;
+        const int b = 3 * (t - 36);
+        bam2[b + 0] = bits[0]; bam2[b + 1] = bits[1]; bam2[b + 2] = bits[2];
+    }
+    for (int i = 0; i < 16; ++i) bam[0x90 + i] = 0xA0;
+    const char* nm = "D71 DISK"; for (int i = 0; nm[i]; ++i) bam[0x90 + i] = (uint8_t)nm[i];
+    bam[0xA0] = 0xA0; bam[0xA1] = 0xA0;
+    bam[0xA2] = '7'; bam[0xA3] = '1';
+    bam[0xA4] = 0xA0;
+    bam[0xA5] = '2'; bam[0xA6] = 'A';
+    bam[0xA7] = 0xA0; bam[0xA8] = 0xA0; bam[0xA9] = 0xA0; bam[0xAA] = 0xA0;
+    uint8_t* dir = img.data() + soff(18, 1);
+    dir[0] = 0x00; dir[1] = 0xFF;
     return img;
 }
 
@@ -522,7 +619,417 @@ static void test_dir_vdrive_format() {
     std::filesystem::remove_all(dir, ec);
 }
 
-int main() {
+// ---------------------------------------------------------------------------
+// DOS block commands (U1/U2/B-P) on a '#' direct-access channel - the API the
+// Zork interpreters use instead of named files.
+// ---------------------------------------------------------------------------
+static void test_block_commands() {
+    const std::string path = "d64_test_BLOCK.d64";
+    CHECK(write_file(path, make_blank_d64()));
+    PetIEEE e; CHECK(e.setD64Image(path));
+
+    // U1: read the BAM sector (T18/S0) into channel 8's buffer.
+    PetIEEE_TestAccess::open_da(e, 8);
+    CHECK(PetIEEE_TestAccess::cmd(e, "U1:8,0,18,00"));
+    CHECK(status_code(e) == 0);
+    auto& rd = PetIEEE_TestAccess::stream_data(e, 8);
+    CHECK(rd.size() == 256);
+    CHECK(rd[0] == 18 && rd[1] == 1 && rd[2] == 0x41);       // dir link + 'A'
+    CHECK(std::memcmp(PetIEEE_TestAccess::da_buf(e, 8), rd.data(), 256) == 0);
+
+    // U1 without an explicit OPEN "#": channel arms itself (permissive).
+    CHECK(PetIEEE_TestAccess::cmd(e, "U1:5,0,1,0"));
+    CHECK(status_code(e) == 0);
+    CHECK(PetIEEE_TestAccess::da_active(e, 5));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 5).size() == 256);
+
+    // Free-form separators (space-separated variant).
+    CHECK(PetIEEE_TestAccess::cmd(e, "U1: 8 0 18 0"));
+    CHECK(status_code(e) == 0);
+
+    // B-P: repositions the read cursor within the armed sector.
+    CHECK(PetIEEE_TestAccess::cmd(e, "B-P:8,4"));
+    CHECK(status_code(e) == 0);
+    CHECK(PetIEEE_TestAccess::stream_index(e, 8) == 4);
+    CHECK(PetIEEE_TestAccess::da_ptr(e, 8) == 4);
+
+    // U2: modify the buffer and write it to a scratch sector, then verify
+    // the image (and the flushed file) contain the change.
+    uint8_t* buf = PetIEEE_TestAccess::da_buf(e, 8);
+    buf[0] = 0x00; buf[1] = 0xFF; buf[5] = 0xA5;
+    CHECK(PetIEEE_TestAccess::cmd(e, "U2:8,0,1,3"));
+    CHECK(status_code(e) == 0);
+    uint8_t sec[256];
+    CHECK(PetIEEE_TestAccess::read_sector(e, 1, 3, sec));
+    CHECK(sec[1] == 0xFF && sec[5] == 0xA5);
+
+    // Bad geometry -> 66, ILLEGAL TRACK AND SECTOR.
+    CHECK(!PetIEEE_TestAccess::cmd(e, "U1:8,0,36,0"));
+    CHECK(status_code(e) == 66);
+    CHECK(!PetIEEE_TestAccess::cmd(e, "U1:8,0,18,21"));      // T18 has 19 sectors
+    CHECK(status_code(e) == 66);
+
+    // UI: DOS soft reset -> 73 power-on message.
+    CHECK(PetIEEE_TestAccess::cmd(e, "UI"));
+    CHECK(status_code(e) == 73);
+
+    // Unimplemented B- subcommand stays a syntax error.
+    CHECK(!PetIEEE_TestAccess::cmd(e, "B-R:8,0,1,0"));
+
+    std::error_code ec; std::filesystem::remove(path, ec);
+}
+
+// ---------------------------------------------------------------------------
+// Tier-1 DOS additions: typed OPEN-for-read (PRG/USR as data, wildcards) and
+// B-A/B-F block allocate/free.
+// ---------------------------------------------------------------------------
+static void test_typed_open_and_block_alloc() {
+    const std::string path = "d64_test_TIER1.d64";
+    CHECK(write_file(path, make_blank_d64()));
+    PetIEEE e; CHECK(e.setD64Image(path));
+
+    // One file of each data type.
+    std::vector<uint8_t> prg = { 0x01, 0x04, 0xAA, 0xBB, 0xCC };   // load addr + body
+    std::vector<uint8_t> seq = { 'H', 'I', 0x0D };
+    std::vector<uint8_t> usr = { 0x55, 0x66 };
+    CHECK(PetIEEE_TestAccess::save_typed(e, "OVERLAY", prg, 0x82)); // PRG
+    CHECK(PetIEEE_TestAccess::save_typed(e, "NOTES",   seq, 0x81)); // SEQ
+    CHECK(PetIEEE_TestAccess::save_typed(e, "BLOB",    usr, 0x83)); // USR
+
+    // PRG readable as a data file; stream includes the 2-byte load address.
+    CHECK(PetIEEE_TestAccess::open_read(e, "OVERLAY", 2, 2));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 2) == prg);
+    // ...and with no type filter (OPEN without suffix).
+    CHECK(PetIEEE_TestAccess::open_read(e, "OVERLAY", 2, 0));
+    // ...but NOT when the caller demanded SEQ.
+    CHECK(!PetIEEE_TestAccess::open_read(e, "OVERLAY", 2, 1));
+
+    // USR readable (explicit and untyped).
+    CHECK(PetIEEE_TestAccess::open_read(e, "BLOB", 3, 3));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 3) == usr);
+    CHECK(PetIEEE_TestAccess::open_read(e, "BLOB", 3, 0));
+
+    // SEQ still works, and wildcards match like the LOAD path.
+    CHECK(PetIEEE_TestAccess::open_read(e, "NOTES", 4, 1));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 4) == seq);
+    CHECK(PetIEEE_TestAccess::open_read(e, "OVER*", 5, 0));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 5) == prg);
+    CHECK(PetIEEE_TestAccess::open_read(e, "N?TES", 6, 0));
+    CHECK(!PetIEEE_TestAccess::open_read(e, "ZORK*", 7, 0));
+
+    // B-A: allocate a free block, then re-allocating answers 65,NO BLOCK
+    // with the next free block as the hint. B-F releases it again.
+    CHECK(PetIEEE_TestAccess::bam_free(e, 30, 5));
+    CHECK(PetIEEE_TestAccess::cmd(e, "B-A:0,30,5"));
+    CHECK(status_code(e) == 0);
+    CHECK(!PetIEEE_TestAccess::bam_free(e, 30, 5));
+    CHECK(!PetIEEE_TestAccess::cmd(e, "B-A:0,30,5"));
+    CHECK(status_code(e) == 65);
+    CHECK(PetIEEE_TestAccess::status(e).find("65,NO BLOCK,30,06") != std::string::npos);
+    CHECK(PetIEEE_TestAccess::cmd(e, "B-F:0,30,5"));
+    CHECK(status_code(e) == 0);
+    CHECK(PetIEEE_TestAccess::bam_free(e, 30, 5));
+
+    // Geometry validation matches U1/U2.
+    CHECK(!PetIEEE_TestAccess::cmd(e, "B-A:0,36,0"));
+    CHECK(status_code(e) == 66);
+
+    std::error_code ec; std::filesystem::remove(path, ec);
+}
+
+// ---------------------------------------------------------------------------
+// 1571 / .d71 double-sided read-write: geometry, split BAM, block commands and
+// allocation across side 1 (tracks 36-70), and a SEQ save/reload round trip.
+// ---------------------------------------------------------------------------
+static void test_d71_readwrite() {
+    const std::string path = "d64_test_D71.d71";
+    CHECK(write_file(path, make_blank_d71()));
+    PetIEEE e; CHECK(e.setD64Image(path));
+
+    // Blank .d71 reports 1328 blocks free (both sides, tracks 18 and 53 excluded).
+    std::vector<uint8_t> dir;
+    CHECK(PetIEEE_TestAccess::build_dir(e, dir, ""));
+    CHECK(bytes_contain(dir, "1328 BLOCKS FREE"));
+
+    // Block read/write on a side-1 data track (T40) round-trips through flush.
+    PetIEEE_TestAccess::open_da(e, 8);
+    CHECK(PetIEEE_TestAccess::cmd(e, "U1:8,0,40,5"));
+    CHECK(status_code(e) == 0);
+    uint8_t* buf = PetIEEE_TestAccess::da_buf(e, 8);
+    buf[0] = 0xDE; buf[10] = 0xAD; buf[255] = 0xEF;
+    CHECK(PetIEEE_TestAccess::cmd(e, "U2:8,0,40,5"));
+    CHECK(status_code(e) == 0);
+    uint8_t sec[256];
+    CHECK(PetIEEE_TestAccess::read_sector(e, 40, 5, sec));
+    CHECK(sec[0] == 0xDE && sec[10] == 0xAD && sec[255] == 0xEF);
+    // ...and it persisted to the file on disk (split-BAM images stay writable).
+    { auto raw = read_file(path); CHECK(raw.size() == 349696);
+      CHECK(raw[soff(40, 5) + 0] == 0xDE && raw[soff(40, 5) + 10] == 0xAD); }
+
+    // Highest track/sector is legal; one past it is not.
+    CHECK(PetIEEE_TestAccess::cmd(e, "U1:8,0,70,16"));   // T70 has 17 sectors (0..16)
+    CHECK(status_code(e) == 0);
+    CHECK(!PetIEEE_TestAccess::cmd(e, "U1:8,0,70,17"));
+    CHECK(status_code(e) == 66);
+    CHECK(!PetIEEE_TestAccess::cmd(e, "U1:8,0,71,0"));    // no track 71
+    CHECK(status_code(e) == 66);
+
+    // B-A / B-F on a side-1 block update the split BAM (bitmap in 53/0, count
+    // in 18/0) and survive a reparse.
+    CHECK(PetIEEE_TestAccess::bam_free(e, 60, 3));
+    CHECK(PetIEEE_TestAccess::cmd(e, "B-A:0,60,3"));
+    CHECK(status_code(e) == 0);
+    CHECK(!PetIEEE_TestAccess::bam_free(e, 60, 3));
+    CHECK(PetIEEE_TestAccess::cmd(e, "B-F:0,60,3"));
+    CHECK(PetIEEE_TestAccess::bam_free(e, 60, 3));
+
+    // SEQ save + reload round trip (exercises the full write path + split-BAM
+    // commit on a 1571 image).
+    std::vector<uint8_t> payload(600);
+    for (size_t i = 0; i < payload.size(); ++i) payload[i] = (uint8_t)((i * 13 + 7) & 0xFF);
+    CHECK(PetIEEE_TestAccess::save_typed(e, "LOGFILE", payload, 0x81));
+    CHECK(PetIEEE_TestAccess::open_read(e, "LOGFILE", 2, 1));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 2) == payload);
+
+    // Free count drops by the file's block usage after the save.
+    std::vector<uint8_t> dir2;
+    CHECK(PetIEEE_TestAccess::build_dir(e, dir2, ""));
+    CHECK(bytes_contain(dir2, "\"LOGFILE\""));
+    CHECK(!bytes_contain(dir2, "1328 BLOCKS FREE"));   // fewer than blank now
+
+    std::error_code ec; std::filesystem::remove(path, ec);
+}
+
+// ---------------------------------------------------------------------------
+// OPEN-for-write parameter parsing: the shorthand "NAME,W" (write mode, type
+// defaulting to SEQ) must arm the writer, not fall through to a failing read.
+// This was the save/restore bug. Also covers ",S,W", ",P,W", and ",A" append.
+// ---------------------------------------------------------------------------
+static std::vector<uint8_t> vbytes(const char* s) {
+    return std::vector<uint8_t>((const uint8_t*)s, (const uint8_t*)s + std::strlen(s));
+}
+static void test_open_write_modes() {
+    const std::string path = "d64_test_WRITE.d64";
+    CHECK(write_file(path, make_blank_d64()));
+    PetIEEE e; CHECK(e.setD64Image(path));
+
+    // The reported bug: OPEN 3,8,3,"SAVENAME,W" (mode only, no ",S").
+    PetIEEE_TestAccess::open_ch(e, 3, "SAVENAME,W");
+    PetIEEE_TestAccess::put_data(e, 3, vbytes("HELLO SAVE"));
+    PetIEEE_TestAccess::close_ch(e, 3);                   // commits (write was armed)
+    // Restore: OPEN 3,8,3,"SAVENAME" reads it back as SEQ.
+    CHECK(PetIEEE_TestAccess::open_read(e, "SAVENAME", 4, 0));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 4) == vbytes("HELLO SAVE"));
+
+    // Explicit ",S,W" still works and stores type SEQ.
+    PetIEEE_TestAccess::open_ch(e, 5, "NOTES,S,W");
+    PetIEEE_TestAccess::put_data(e, 5, vbytes("SEQDATA"));
+    PetIEEE_TestAccess::close_ch(e, 5);
+    CHECK(PetIEEE_TestAccess::open_read(e, "NOTES", 6, 1)); // typeFilter 1 = SEQ
+    CHECK(PetIEEE_TestAccess::stream_data(e, 6) == vbytes("SEQDATA"));
+
+    // ",P,W" stores a PRG the read path only surfaces under the PRG filter.
+    PetIEEE_TestAccess::open_ch(e, 7, "PROG,P,W");
+    PetIEEE_TestAccess::put_data(e, 7, vbytes("\x01\x08PRGBODY"));
+    PetIEEE_TestAccess::close_ch(e, 7);
+    CHECK(PetIEEE_TestAccess::open_read(e, "PROG", 8, 2));  // PRG
+    CHECK(!PetIEEE_TestAccess::open_read(e, "PROG", 8, 1)); // not SEQ
+
+    // ",A" append extends an existing SEQ file rather than overwriting it.
+    PetIEEE_TestAccess::open_ch(e, 9, "SAVENAME,A");
+    PetIEEE_TestAccess::put_data(e, 9, vbytes("+MORE"));
+    PetIEEE_TestAccess::close_ch(e, 9);
+    CHECK(PetIEEE_TestAccess::open_read(e, "SAVENAME", 10, 0));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 10) == vbytes("HELLO SAVE+MORE"));
+
+    // A plain read open ",R" (and no-mode) must NOT be treated as a write.
+    CHECK(PetIEEE_TestAccess::open_read(e, "SAVENAME", 11, 0)); // still exists, unchanged
+    CHECK(PetIEEE_TestAccess::stream_data(e, 11) == vbytes("HELLO SAVE+MORE"));
+
+    std::error_code ec; std::filesystem::remove(path, ec);
+}
+
+// ---------------------------------------------------------------------------
+// The five review fixes: @-replace SEQ names, REL rejection, replace reclaims
+// old blocks (near-full disk), error-channel reset, B-A hint skips DOS tracks.
+// ---------------------------------------------------------------------------
+static std::vector<uint8_t> payload(size_t n) {
+    std::vector<uint8_t> v(n);
+    for (size_t i = 0; i < n; ++i) v[i] = (uint8_t)((i * 7 + 1) & 0xFF);
+    return v;
+}
+static void test_review_fixes() {
+    const std::string path = "d64_test_REVIEW.d64";
+    CHECK(write_file(path, make_blank_d64()));
+    PetIEEE e; CHECK(e.setD64Image(path));
+
+    // #1 @-replace: "@0:SCORES,S,W" replaces SCORES, not create "@0:SCORES".
+    PetIEEE_TestAccess::open_ch(e, 3, "SCORES,S,W");
+    PetIEEE_TestAccess::put_data(e, 3, vbytes("AAA"));
+    PetIEEE_TestAccess::close_ch(e, 3);
+    PetIEEE_TestAccess::open_ch(e, 3, "@0:SCORES,S,W");
+    PetIEEE_TestAccess::put_data(e, 3, vbytes("BBBB"));
+    PetIEEE_TestAccess::close_ch(e, 3);
+    CHECK(PetIEEE_TestAccess::open_read(e, "SCORES", 4, 0));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 4) == vbytes("BBBB"));
+    CHECK(!PetIEEE_TestAccess::open_read(e, "@0:SCORES", 5, 0)); // no garbage name
+    std::vector<uint8_t> dir; CHECK(PetIEEE_TestAccess::build_dir(e, dir, "SCORES"));
+    CHECK(bytes_contain(dir, "\"SCORES\""));
+
+    // #2 REL open is cleanly rejected (62), not a misleading generic failure.
+    PetIEEE_TestAccess::open_ch(e, 6, "RELDATA,L");
+    CHECK(status_code(e) == 62);
+
+    // #4 error channel resets to "00, OK" after a full read (was: empty re-read).
+    CHECK(status_code(e) == 62);                 // still the REL error
+    PetIEEE_TestAccess::ch15_full_read_untalk(e);
+    CHECK(status_code(e) == 0);                  // cleared to OK
+
+    std::error_code ec; std::filesystem::remove(path, ec);
+
+    // #3 replace on a near-full disk reuses the old file's blocks. Blank .d64
+    // has 664 allocatable blocks. Fill 400, then replace with 500: 500 > the
+    // 264 free, but <= 264 + 400 reclaimed, so it must succeed (old code, which
+    // allocated before freeing, reported DISK FULL here).
+    const std::string p2 = "d64_test_FULL.d64";
+    CHECK(write_file(p2, make_blank_d64()));
+    PetIEEE f; CHECK(f.setD64Image(p2));
+    CHECK(PetIEEE_TestAccess::save_typed(f, "BIG", payload(400 * 254), 0x81));
+    CHECK(PetIEEE_TestAccess::save_typed(f, "BIG", payload(500 * 254), 0x81)); // replace
+    CHECK(PetIEEE_TestAccess::open_read(f, "BIG", 2, 0));
+    CHECK(PetIEEE_TestAccess::stream_data(f, 2).size() == 500u * 254);
+    // A genuinely-too-big save is rejected up front (72) and leaves BIG intact.
+    CHECK(!PetIEEE_TestAccess::save_typed(f, "HUGE", payload(700 * 254), 0x81));
+    CHECK(status_code(f) == 72);
+    CHECK(PetIEEE_TestAccess::open_read(f, "BIG", 3, 0));
+    CHECK(PetIEEE_TestAccess::stream_data(f, 3).size() == 500u * 254); // uncorrupted
+    std::filesystem::remove(p2, ec);
+
+    // #5a B-A's next-free hint skips the DOS track (18). Allocate the last
+    // sector of track 17, then re-allocate it: the hint must jump PAST track 18
+    // to 19/0, not land on a free track-18 sector.
+    const std::string p3 = "d64_test_BAHINT.d64";
+    CHECK(write_file(p3, make_blank_d64()));
+    PetIEEE g; CHECK(g.setD64Image(p3));
+    CHECK(PetIEEE_TestAccess::cmd(g, "B-A:0,17,20"));   // T17 has 21 sectors (0..20)
+    CHECK(status_code(g) == 0);
+    CHECK(!PetIEEE_TestAccess::cmd(g, "B-A:0,17,20"));  // now in use -> hint
+    CHECK(status_code(g) == 65);
+    CHECK(PetIEEE_TestAccess::status(g).find("65,NO BLOCK,19,00") != std::string::npos);
+    std::filesystem::remove(p3, ec);
+}
+
+// Regression fixtures live in a unique directory; guest paths never target user files.
+struct ReviewFixture {
+    std::filesystem::path dir = std::filesystem::path("d64_review_tests_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    ReviewFixture() { std::filesystem::create_directories(dir / "root"); }
+    ~ReviewFixture() { std::error_code ec; std::filesystem::remove_all(dir, ec); }
+};
+
+static void test_directory_entry_offsets() {
+    ReviewFixture f;
+    auto img = make_blank_d64();
+    for (int i=0; i<8; ++i) {
+        auto* entry = img.data() + soff(18,1) + i*32;
+        entry[2] = i == 7 ? 0x84 : 0x82;
+        entry[3] = 1; entry[4] = (uint8_t)i;
+        memset(entry+5,0xA0,16); entry[5] = 'A'+i;
+        entry[0x17] = 42; // REL record length relative to the 32-byte slot.
+        entry[0x1e] = 7; // Intentionally differs from one-sector chain fallback.
+        img[soff(1,i)+1] = 3;
+    }
+    const auto path = (f.dir / "entries.d64").string();
+    CHECK(write_file(path,img)); PetIEEE e; CHECK(e.setD64Image(path));
+    std::vector<uint8_t> out;
+    CHECK(PetIEEE_TestAccess::build_dir(e,out,""));
+    CHECK(bytes_contain(out,"    7 \"A\""));
+    CHECK(bytes_contain(out,"REL,42"));
+}
+
+static void test_host_paths_stay_in_mount() {
+    ReviewFixture f;
+    CHECK(write_file((f.dir / "OUTSIDE.prg").string(), {1,4,99}));
+    CHECK(write_file((f.dir / "root/SOURCE.prg").string(), {1,4,42}));
+    PetIEEE e; e.setHostRoot((f.dir / "root").string());
+    std::vector<uint8_t> data; uint16_t addr=0;
+    CHECK(PetIEEE_TestAccess::host_load(e,"SOURCE",data,addr));
+    CHECK(!PetIEEE_TestAccess::host_load(e,"../OUTSIDE",data,addr));
+    CHECK(!PetIEEE_TestAccess::host_load(e,"..\\OUTSIDE",data,addr));
+    CHECK(!PetIEEE_TestAccess::host_load(e,std::filesystem::absolute(f.dir / "OUTSIDE.prg").string(),data,addr));
+    CHECK(!PetIEEE_TestAccess::cmd(e,"C:../COPY=SOURCE"));
+    CHECK(!std::filesystem::exists(f.dir / "COPY.prg"));
+    CHECK(!PetIEEE_TestAccess::cmd(e,"R:../MOVED=SOURCE"));
+    CHECK(std::filesystem::exists(f.dir / "root/SOURCE.prg"));
+    CHECK(e.scratch_host_patterns({"../OUTSIDE"}) <= 0);
+    CHECK(std::filesystem::exists(f.dir / "OUTSIDE.prg"));
+    PetIEEE_TestAccess::host_save(e,"../SAVED");
+    CHECK(!std::filesystem::exists(f.dir / "SAVED.prg"));
+    CHECK(PetIEEE_TestAccess::cmd(e,"C:COPY=SOURCE"));
+    CHECK(PetIEEE_TestAccess::cmd(e,"R:RENAMED=COPY"));
+    CHECK_EQ(e.scratch_host_patterns({"RENAMED"}),1);
+}
+
+static void test_failed_disk_writes_are_unchanged() {
+    ReviewFixture f;
+    const auto path = (f.dir / "disk.d64").string();
+    CHECK(write_file(path,make_blank_d64()));
+    PetIEEE seed; CHECK(seed.setD64Image(path));
+    CHECK(PetIEEE_TestAccess::save_prg(seed,"OLD",{1,4,42}));
+    const auto original = PetIEEE_TestAccess::image(seed);
+    for (bool unsupported : {true,false}) {
+        auto image = original; if (unsupported) image.resize(196608);
+        CHECK(write_file(path,image));
+        // A directory as the output path guarantees a flush failure without permissions tricks.
+        for (const std::string cmd : {"SAVE", "R:NEW=OLD", "S:OLD", "N:EMPTY,00", "V", "B-A:0,1,0", "U2:8,0,1,0"}) {
+            PetIEEE e; CHECK(e.setD64Image(path));
+            if (!unsupported) PetIEEE_TestAccess::image_path(e,f.dir.string());
+            if (cmd == "SAVE") CHECK(!PetIEEE_TestAccess::save_prg(e,"OLD",{1,4,88}));
+            else CHECK(!PetIEEE_TestAccess::cmd(e,cmd));
+            CHECK(PetIEEE_TestAccess::image(e) == image);
+        }
+    }
+}
+
+static void test_cyclic_disk_chains_are_rejected() {
+    ReviewFixture f;
+    const auto path = (f.dir / "cycle.d64").string();
+    for (bool directory : {true,false}) {
+        auto img = make_blank_d64();
+        auto* dir = img.data()+soff(18,1);
+        if (directory) { dir[0]=18; dir[1]=1; }
+        else {
+            dir[2]=0x82; dir[3]=1; dir[4]=0;
+            memset(dir+5,0xA0,16); dir[5]='X';
+            img[soff(1,0)]=1; img[soff(1,0)+1]=0;
+        }
+        CHECK(write_file(path,img)); PetIEEE e; CHECK(e.setD64Image(path));
+        std::vector<uint8_t> out; uint16_t addr=0;
+        CHECK(!PetIEEE_TestAccess::load_prg(e,"X",out,addr));
+        CHECK(!PetIEEE_TestAccess::open_read(e,"X",2,0));
+        CHECK(!PetIEEE_TestAccess::build_dir(e,out,""));
+        CHECK(!PetIEEE_TestAccess::cmd(e,"V"));
+        CHECK(PetIEEE_TestAccess::image(e) == img);
+        CHECK(!PetIEEE_TestAccess::cmd(e,"S:X"));
+        CHECK(PetIEEE_TestAccess::image(e) == img);
+    }
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--cycles") {
+        test_cyclic_disk_chains_are_rejected();
+        return g_fail ? 1 : 0;
+    }
+    test_directory_entry_offsets();
+    test_host_paths_stay_in_mount();
+    test_failed_disk_writes_are_unchanged();
+    if (argc > 1 && std::string(argv[1]) == "--targeted") return g_fail ? 1 : 0;
+    test_cyclic_disk_chains_are_rejected();
+    test_block_commands();
+    test_typed_open_and_block_alloc();
+    test_d71_readwrite();
+    test_open_write_modes();
+    test_review_fixes();
     test_dir_d64_golden();
     test_dir_vdrive_format();
     test_lastsector_convention_and_roundtrip();

@@ -54,8 +54,13 @@ public:
     static constexpr int VIDRAM_SIZE = COLS * ROWS; // 1000 visible (40-col default)
 
     // 8032 mode: 80 columns render as 8px cells (1x horizontal, 2x vertical)
-    // into the SAME 640x400 framebuffer. 40-col = 16px cells (2x2).
+    // into a 640px-wide framebuffer. Taller CRTC rows expand its height.
+    // 40-col = 16px cells (2x2), with the default 640x400 framebuffer.
     void setColumns(int cols);
+    // Display geometry does not change the machine's SRAM or pixel clock.
+    void setCrtcGeometry(int columns, int rows, int scanlines, uint16_t byteOffset);
+    // Byte offset in screen SRAM; 8032 glue converts CRTC two-byte units.
+    void setScreenStart(uint16_t byteOffset);
     int  columns() const { return cols_; }
     static constexpr int BLANK_DELAY_MS = 100;
 
@@ -67,7 +72,7 @@ public:
     // Reset state and clear screen.
     void reset();
 
-    // Write to "video RAM" (only 0..999 are used for on-screen; others stored).
+    // Write physical screen SRAM (including the tail exposed by CRTC scrolling).
     void write(int addr, uint8_t value);
 
     // Blanking: true = request blanking. This uses a 100ms delayed blank like the JS.
@@ -87,7 +92,7 @@ public:
     const uint32_t* framebuffer() const { return fb.data(); }
     uint32_t*       framebuffer()       { return fb.data(); }
     int fbWidth() const { return FB_W; }
-    int fbHeight() const { return FB_H; }
+    int fbHeight() const { return fbHeight_; }
 
 private:
     // Rendering helpers
@@ -99,11 +104,15 @@ private:
 
     // Video state
     std::vector<uint8_t> vidram; // at least VIDRAM_SIZE; we allow larger to match JS pattern
-    int cols_    = COLS;         // runtime columns (40 or 80)
+    int cols_    = COLS;         // machine configuration (40 or 80)
+    int displayCols_ = COLS;    // displayed characters / row stride
+    int scanlines_ = CHAR_H;    // raster lines per character row
+    int fbHeight_ = FB_H;       // expands for taller CRTC character rows
     int scaleX_  = SCALE;        // horizontal pixel doubling (2 at 40-col, 1 at 80-col)
     int cellW_   = CELL_W;       // cell width in fb px (16 or 8)
-    int visible_ = VIDRAM_SIZE;  // cols_ * ROWS
-    std::vector<uint32_t> fb;    // RGBA8888 framebuffer (FB_W x FB_H)
+    int visible_ = VIDRAM_SIZE;  // displayCols_ * displayed rows
+    uint16_t screenStart_ = 0;
+    std::vector<uint32_t> fb;    // RGBA8888 framebuffer (FB_W x fbHeight_)
 
     // Charsets
     const uint8_t* charset1; // 128 * 8 bytes

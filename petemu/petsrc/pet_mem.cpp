@@ -48,6 +48,10 @@ void PetMem::reset()
 {
 	// Do NOT clear RAM on reset; PET KERNAL init decides cold/warm behavior.
 	videoUnit.reset();
+	// Screen SRAM survives reset. Restore the renderer's copy, including the
+	// non-visible tail that a shifted CRTC display may expose.
+	for (int offset = 0; offset <= screenMask_; ++offset)
+		videoUnit.write(offset, ram[VIDRAM_ADDR + offset]);
 	ieeeUnit.reset();
 	ioUnit.reset();
 	irq_line = false;
@@ -71,25 +75,26 @@ uint8_t PetMem::readByte(uint16_t addr)
 	// ---------------- I/O windows ----------------
 	if (inRange(addr, PIA1_BASE, PIA1_END) ||
 		inRange(addr, PIA2_BASE, PIA2_END) ||
-		inRange(addr, VIA_BASE, VIA_END))
+		inRange(addr, VIA_BASE, VIA_END) ||
+		addr == 0xE880 || addr == 0xE881)   // 6545 CRTC (8032)
 	{
-		// Pet2001IO expects the LOW 8 bits of the register address 
+		// Pet2001IO expects the LOW 8 bits of the register address
 		const uint8_t lo8 = static_cast<uint8_t>(addr & 0xFF);
 		const uint8_t v = ioUnit.read(lo8);
 		return v;
 	}
-		
+
 	// ---------------- ROM over RAM ----------------
 	if (romMask[addr]) {
 		return rom[addr];
 	}
 
 	// ---------------- Screen RAM window ($8000-$8FFF) ----------------
-	// The physical 1 KB screen SRAM ($8000-$83FF, including the 24 bytes past
-	// the 1000 visible ones) is mirrored four times across the 4 KB window on
-	// 40-column PETs. Software stashes data at $83E8+ and probes the mirrors.
+	// The physical screen SRAM is mirrored across the 4 KB window: 1 KB
+	// (mask $03FF) on 40-column PETs, 2 KB (mask $07FF) on the 8032
+	// (setScreenWindow). Software stashes data at $83E8+ and probes mirrors.
 	if ((addr & 0xF000) == 0x8000) {
-		return ram[0x8000 | (addr & 0x03FF)];
+		return ram[0x8000 | (addr & screenMask_)];
 	}
 
 	// ---------------- Base RAM (obey configured size) --------------
@@ -104,23 +109,24 @@ uint8_t PetMem::readByte(uint16_t addr)
 void PetMem::writeByte(uint16_t addr, uint8_t val)
 {
 	// ---------------- Screen RAM window ($8000-$8FFF) ----------------
-	// All four mirrors alias the same 1 KB SRAM; only the first 1000 bytes
-	// are visible on screen (the renderer ignores the 24-byte tail).
+	// The mirrors alias the same SRAM: 1 KB (mask $03FF) on 40-column PETs,
+	// 2 KB (mask $07FF) on the 8032. The renderer ignores offsets past the
+	// visible cells (24-byte tail at 40 cols, 48 bytes at 80).
 	if ((addr & 0xF000) == 0x8000) {
-		const uint16_t eff = (uint16_t)(0x8000 | (addr & 0x03FF));
+		const uint16_t eff = (uint16_t)(0x8000 | (addr & screenMask_));
 		ram[eff] = val;
 		if (ramMirror_ && eff < ramMirrorSize_) ramMirror_[eff] = val;
 
 		const int vOff = static_cast<int>(eff - VIDRAM_ADDR);
-		if (vOff < 1000)
-			videoUnit.write(vOff, val);
+		videoUnit.write(vOff, val);   // out-of-range offsets ignored by video
 		return;
 	}
 
 	// ---------------- I/O windows ----------------
 	if (inRange(addr, PIA1_BASE, PIA1_END) ||
 		inRange(addr, PIA2_BASE, PIA2_END) ||
-		inRange(addr, VIA_BASE, VIA_END)) {
+		inRange(addr, VIA_BASE, VIA_END) ||
+		addr == 0xE880 || addr == 0xE881) {   // 6545 CRTC (8032)
 		const uint8_t lo8 = static_cast<uint8_t>(addr & 0xFF);
 		ioUnit.write(lo8, val);
 		return;
@@ -138,8 +144,16 @@ void PetMem::writeByte(uint16_t addr, uint8_t val)
 		}
 	}
 	else {
-		// writes to ROM are ignored
-		LOG_DEBUG("[ROM W ignored] %04X <- %02X", addr, val);
+		// Writes to ROM are ignored (open bus), same as real hardware.
+		// Rate-limited: software legitimately hammers ROM space - e.g. the
+		// Infocom interpreters toggle $FFF0 (the 8096/8296 banking register,
+		// absent on this machine) thousands of times per second.
+		static int romWriteLogs = 24;
+		if (romWriteLogs > 0) {
+			LOG_DEBUG("[ROM W ignored] %04X <- %02X", addr, val);
+			if (--romWriteLogs == 0)
+				LOG_DEBUG("[ROM W ignored] (further ROM-write messages suppressed)");
+		}
 	}
 }
 

@@ -15,10 +15,12 @@
 #define IDM_SCALE_3X      40007
 #define IDM_SCALE_FIT     40008
 #define IDM_ABOUT         40009
-#define IDM_EJECT         40010   // File > Eject Disk (unmount .d64 -> ./files vdrive)
+#define IDM_EJECT         40010   // File > Eject Disk (unmount .d64/.d71 -> ./files vdrive)
+#define IDM_BASIC1        40034   // Original PET 2001, BASIC 1, 8 KB
 #define IDM_BASIC2        40030   // Machine > BASIC 2 (radio)
 #define IDM_BASIC4        40031   // Machine > BASIC 4 (radio)
 #define IDM_BASIC8032     40032   // Machine > 8032 80-column (radio, contiguous with BASIC2/4)
+#define IDM_BASIC4032     40033   // 12-inch 4000 with CRTC
 #define IDM_RAM4          40050   // Machine > Memory > 4K  (radio)
 #define IDM_RAM8          40051   // Machine > Memory > 8K  (radio)
 #define IDM_RAM16         40052   // Machine > Memory > 16K (radio)
@@ -28,12 +30,26 @@
 #define IDM_MONITOR_BW    40042   // View > Monitor > Black & white  (radio)
 #define IDM_SPEED2X       40060   // Machine > 2x Speed (checkbox)
 #define IDM_KBDGFX        40061   // Machine > Graphics Keyboard (checkbox, also F12)
+#define IDM_SNES          40062   // Machine > SNES Adapter (checkbox; [input] snes_adapter)
 
 // View > CRT Monitor: shader knob controls. Value items are grayed labels
 // refreshed on WM_INITMENUPOPUP; Up/Dn adjust live and save to pet.ini.
 // Knob index order matches pet_gl.cpp k_knobs: 0 blur_h, 1 blur_v,
 // 2 halation, 3 halation_radius, 4 scanline, 5 contrast, 6 brightness.
-#define IDM_CRT_DEFAULTS  40070   // Restore Defaults
+#define IDM_CRT_SETTINGS  40044   // View > CRT Monitor Settings... (modeless dialog)
+#define IDD_CRTSETTINGS   200     // the settings dialog template
+#define IDD_T64_SELECT   201
+#define IDC_T64_PROGRAMS 2200
+// Dialog controls: 7 knob rows (slider + edit + spin), indexed 0..6 in the
+// same order as pet_gl.cpp k_knobs.
+#define IDC_KNOB_SLIDER0  2001    // ..2007
+#define IDC_KNOB_EDIT0    2011    // ..2017
+#define IDC_KNOB_SPIN0    2021    // ..2027
+#define IDC_CRT_ENABLE    2030
+#define IDC_MON_GREEN     2031
+#define IDC_MON_BW        2032
+#define IDC_CRT_DEFAULTS  2033
+#define IDM_CRT_DEFAULTS  40070   // (menu id retired; dialog uses IDC_CRT_DEFAULTS)
 #define IDM_KNOBVAL0      40071   // ..40077 (7 value-display items)
 #define IDM_KNOBUP0       40081   // ..40087
 #define IDM_KNOBDN0       40091   // ..40097

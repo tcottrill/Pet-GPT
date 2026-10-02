@@ -61,8 +61,9 @@ struct HostApp {
     // per-frame work to this so game speed stays correct. May be null.
     void  (*set_frame_rate)(double hz);
 
-    // Select the system ROM set (2 = BASIC 2, 4 = BASIC 4): reload ROMs + reset.
-    void (*set_basic)(int which);   // may be null
+    // Model IDs: 2=2001N, 4=4000-9, 8=8032, 12=4000-12.
+    bool (*set_basic)(int which); // false on missing ROMs
+    int (*get_basic)(void);
 
     // Select RAM size in KB (4/8/16/32): resize + reset. May be null.
     void (*set_ram)(int kb);
@@ -80,18 +81,23 @@ struct HostApp {
     void (*set_speed)(int mult);
     int  (*get_speed)(void);
 
-    // CRT shader knobs (View > CRT Monitor). idx = knob index (see
-    // host_resource.h); dir = +1/-1. text returns "Current: 0.80" for the
-    // menu display. Any may be null.
-    void        (*shader_adjust)(int idx, int dir);
-    const char* (*shader_text)(int idx);
-    void        (*shader_defaults)(void);
+    // CRT shader knobs (View > CRT Monitor Settings dialog). idx = knob index
+    // 0..6 (see host_resource.h). set clamps and persists. Any may be null.
+    float (*shader_get)(int idx);
+    void  (*shader_set)(int idx, float v);
+    void  (*shader_range)(int idx, float* lo, float* hi, float* step);
+    void  (*shader_defaults)(void);
 
     // Graphics keyboard mode: 1 = Shift+letter types PET graphics chars,
     // 0 = business typing. Can also be toggled by a hotkey inside the
     // emulator, so the host re-reads get_gfx_kbd when menus open. May be null.
     void (*set_gfx_kbd)(int on);
     int  (*get_gfx_kbd)(void);
+
+    // SNES user-port adapter (gamepad input): 1 = enabled, 0 = disabled.
+    // Machine-menu checkbox; persisted to [input] snes_adapter. May be null.
+    void (*set_snes)(int on);
+    int  (*get_snes)(void);
 
     // Master audio volume, 0..100 (emulator-wide, not per-game). May be null.
     int   (*get_volume)(void);

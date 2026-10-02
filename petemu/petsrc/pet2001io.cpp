@@ -31,6 +31,14 @@ Pet2001IO::Pet2001IO(PetIEEE& ieeeBus,
 // -----------------------------------------------------------------------------
 // Pet2001IO::reset
 // -----------------------------------------------------------------------------
+void Pet2001IO::configureCrtc(bool present, int bytesPerCharacter)
+{
+	m_hasCrtc = present;
+	m_crtcBytesPerCharacter = bytesPerCharacter == 2 ? 2 : 1;
+	m_crtc.reset();
+	refreshFrameTiming();
+}
+
 void Pet2001IO::reset()
 {
 	m_pia1.reset();
@@ -170,7 +178,7 @@ void Pet2001IO::setVideoOnSignal(bool active)
 	// 1. Drive PIA1 CB1
 	m_pia1.setSyncCB1(active);
 
-	// 6545 status bit 7 = vertical retrace (LOW video-on phase = VBLANK)
+	// 6545 status bit 5 = vertical blank (LOW video-on phase = VBLANK)
 	m_crtc.setVerticalRetrace(!active);
 
 	// 2. Drive VIA PB5 (bit 5) input
@@ -194,8 +202,8 @@ uint8_t Pet2001IO::read(uint16_t a)
 
 	switch (addr) {
 	// ---- 6545 CRTC ($E880/$E881, 8032) ----
-	case 0x80: return m_crtc.readStatus();
-	case 0x81: return m_crtc.readData();
+	case 0x80: return m_hasCrtc ? m_crtc.readStatus() : 0xFF;
+	case 0x81: return m_hasCrtc ? m_crtc.readData() : 0xFF;
 
 		// ---------------- PIA1 ----------------
 	case PIA1_PA:
@@ -518,14 +526,15 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 
 	case VIA_PCR:
 	{
-		// CA2 is the charset line. Whenever the NEW PCR puts CA2 in manual
-		// output mode (bits 3:2 = 11), the charset follows bit 1 - regardless
-		// of the OLD mode. Requiring the old PCR to already be in manual mode
-		// swallowed the KERNAL's first PCR write after reset, leaving the
-		// display in a stale charset until the user poked 59468 twice.
-		const bool new_is_toggle = ((d8 & 0x0C) == 0x0C);
-		if (new_is_toggle)
-			m_video.setCharset((d8 & 0x02) != 0);
+		// CA2 is the charset line (chargen A10), and the line is PULLED UP on
+		// the PET. So the effective level is high in EVERY CA2 mode except
+		// manual-output-LOW (mode 110): input modes leave the pin undriven
+		// (pull-up wins -> text set), handshake/pulse idle high, manual-high
+		// is high. "A Bright Shining Star" (GP 2022) selects lowercase with
+		// PCR=$12 - CA2 independent-INPUT mode - not manual-high; an earlier
+		// version only honored manual modes and kept the demo in graphics.
+		const uint8_t ca2mode = (uint8_t)((d8 >> 1) & 0x07);
+		m_video.setCharset(ca2mode != 6);
 
 		m_via.writeReg(0x0C, d8);
 		updateIrq(false);
@@ -536,15 +545,16 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 	case VIA_IER: m_via.writeReg(0x0E, d8); updateIrq(false); return;
 
 	case 0x80:  // 6545 CRTC address (8032)
+		if (!m_hasCrtc) return;
 		m_crtc.writeAddr(d8);
 		return;
 	case 0x81:  // 6545 CRTC data
+		if (!m_hasCrtc) return;
 		m_crtc.writeData(d8);
-		if (m_crtc.geometryEpoch() != m_crtcEpoch) {
-			m_crtcEpoch = m_crtc.geometryEpoch();
-			if (m_crtc.cols() > 0)
-				m_video.setColumns(m_crtc.cols() * 2);  // 8032: R1 counts 2-byte units
-		}
+		// The renderer skips unchanged geometry itself. Reapply even when
+		// register values match, since the host may have switched ROM models.
+		m_video.setCrtcGeometry(m_crtc.cols() * m_crtcBytesPerCharacter, m_crtc.rows(),
+			m_crtc.scanlinesPerChar(), (uint16_t)(m_crtc.screenStart() * m_crtcBytesPerCharacter));
 		return;
 
 	case VIA_ANH:
@@ -584,9 +594,13 @@ void Pet2001IO::cycle()
 	// Video Timing Logic (Theory of Operation)
 	// -------------------------------------------------------------------------
 	m_videoCycle++;
-	if (m_videoCycle >= kCyclesPerFrame)
+	if (m_videoCycle >= m_frameCycles)
 	{
 		m_videoCycle = 0;
+		// Timing source can change (8032 editor programs the CRTC; ROM-set
+		// switch flips 40<->80 columns). Re-evaluate at the frame boundary so
+		// a frame in flight never sees its geometry move under it.
+		refreshFrameTiming();
 	}
 
 	// Update Signals on transitions
@@ -597,11 +611,44 @@ void Pet2001IO::cycle()
 		// Falling edge on PIA1 CB1 triggers System Interrupt (IRQ).
 		setVideoOnSignal(false);
 	}
-	else if (m_videoCycle == kVBlankEnd)
+	else if (m_videoCycle == m_vblankEnd)
 	{
-		// Cycle 3840: End of V-BLANK.
-		// VIDEO ON goes HIGH.
+		// End of V-BLANK. VIDEO ON goes HIGH.
 		setVideoOnSignal(true);
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Pet2001IO::refreshFrameTiming
+// 40-col machines use the fixed discrete-logic frame (16640/3840). In
+// either CRTC profile the CRTC generates sync, so derive the frame from its
+// register file: this makes the 60 Hz editor's real cadence (and a 50 Hz
+// editor ROM's 50 Hz) come out automatically. The sanity window guards
+// against a half-programmed register file mid-init.
+// -----------------------------------------------------------------------------
+void Pet2001IO::refreshFrameTiming()
+{
+	uint32_t frame = kCyclesPerFrame;
+	uint32_t vblank = kVBlankEnd;
+
+	if (m_hasCrtc)
+	{
+		const int fc = m_crtc.frameCycles();
+		const int vb = m_crtc.vblankCycles();
+		// Accept ~40..83 Hz worth of frame and a nonempty blank window.
+		if (fc >= 12000 && fc <= 25000 && vb > 0 && vb < fc)
+		{
+			frame = (uint32_t)fc;
+			vblank = (uint32_t)vb;
+		}
+	}
+
+	if (frame != m_frameCycles || vblank != m_vblankEnd)
+	{
+		LOG_INFO("[PETIO] frame timing: %u cycles/frame (%.3f Hz), vblank %u cycles",
+			frame, 1000000.0 / frame, vblank);
+		m_frameCycles = frame;
+		m_vblankEnd = vblank;
 	}
 }
 

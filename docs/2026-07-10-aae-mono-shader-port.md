@@ -88,6 +88,33 @@ must mean **1 native game pixel**, not 1 FBO texel:
 5. Regression: color raster games and vector games UNCHANGED (effect gated on
    `raster_effect=="mono"`); scanlineMultiply games unchanged.
 
+## AS-BUILT (2026-07-10) — implemented in AAE-main; deviations from this plan
+
+The port shipped, but two assumptions above were stale:
+
+1. **Hook point**: raster games no longer composite through FBO1/img1a +
+   `final_render()`. They render into `fbo_raster`/`img5a` at native size x
+   prescale, and `Layout_Render()` (mame_layout.cpp) composites to the
+   backbuffer. The mono pass is a post-process `img5a -> img5b` (new
+   `fbo_mono`) in `final_render_raster()` before `Layout_Render()`, which
+   then receives the processed texture. Section 3's sub-rect math and the
+   edge-bleed clamp are unnecessary: the texture IS the game, CLAMP_TO_EDGE.
+2. **Gate**: `raster_effect` is the scanline-overlay texture FILENAME picked
+   in the menu, so it could not be overloaded with "mono". The gate is
+   `(video_attributes & VIDEO_TYPE_RASTER_BW) && config.mono_enable`
+   (`mono_monitor_active()` in opengl_renderer.cpp).
+3. **uSrcSize** = oriented native visible-area size; new `uLodBias` uniform
+   (= log2(prescale)) shifts the halation mip level for the prescaled
+   texture. Scanline ripple rewritten for 1-row pitch.
+4. img5a already had a mip chain + LINEAR_MIPMAP_LINEAR from create_texture();
+   the pass only adds one glGenerateMipmap per frame (FBO unbound first).
+
+Landed in: shader_definitions.h (monoMonitorVert/Frag), gl_shader.cpp/.h
+(fragMonoMonitor), gl_fbo.cpp/.h (fbo_mono/img5b), config.h/.cpp
+([monomonitor] ini section, per-game override, clamps), opengl_renderer.cpp
+(render_mono_monitor + hook), menu.cpp (MONO MONITOR SETUP submenu under
+VIDEO SETUP: enable, P4/P1/P3 presets, 7 knobs; saves globally to aae.ini).
+
 ## 6. Known pitfalls
 
 - GL state leakage: AAE's renderer swaps programs/textures aggressively —

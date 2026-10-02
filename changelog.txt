@@ -1,0 +1,67 @@
+Pet-GPT - Commodore PET 2001 Emulator
+Version 2.5
+=====================================
+
+New machines & display
+- PET 8032 support: selectable 40- and 80-column modes driven by a functional
+  MOS 6545 CRTC (geometry-driven), a 2 KB screen window, and the business
+  keyboard matrix. In 80-column mode the frame timing is derived from the CRTC
+  registers (~60.06 Hz), so a 50 Hz editor ROM would run at 50 Hz.
+- Mono monitor CRT shader (VICE-style): horizontal softness + halation glow,
+  green-phosphor or black-&-white, plus beam overdrive (contrast) and
+  black-level lift (brightness). Live tuning: F9 selects a knob, PgUp/PgDn
+  adjust, F8 dumps the current values to the log. Persists to pet.ini
+  (View > CRT Monitor Settings).
+- Display aspect ratio fixed to a proper 4:3 - fullscreen no longer stretches
+  the image wide.
+- 2x speed toggle (Machine > 2x Speed) for slow text adventures.
+
+Disk drive (HLE IEEE-488, device 8)
+- .d71 (1571 double-sided, 70-track) images, read AND write, including the
+  split BAM - needed by the Infocom-patched games.
+- DOS block / direct-access commands: OPEN "#" buffer channels, U1/U2 block
+  read/write, B-P buffer pointer, B-A/B-F block allocate/free, UI/UJ soft
+  reset - the API the Zork-style interpreters use instead of named files.
+- Named-file reads now cover SEQ, PRG and USR as data, honor the file-type
+  suffix (,S / ,P / ,U), and accept CBM wildcards (* ?) in OPEN.
+- Write-mode fixes: the shorthand OPEN"NAME,W" (and ",A" append) now arm the
+  writer correctly, save-with-replace "@0:NAME" resolves to the right name, and
+  the error channel (15) re-latches to "00, OK" after a full read like real DOS.
+- Replacing a file on a near-full disk now reclaims the old file's blocks
+  instead of spuriously reporting DISK FULL.
+- Character-ROM fix: the text charset bank now loads correctly, so lowercase and
+  the proper uppercase glyphs render (e.g. the "A Bright Shining Star" demo).
+
+Hardware accuracy
+- 6502 core synced with six AAE fixes (2-byte NOPs, KIL/JAM, RTI immediate IRQ,
+  NMOS decimal flag, silent NOPs, SHx/AHX); the PET and AAE cores are now
+  byte-identical.
+- VIA 6522 tier-2 datasheet pass, done test-first (suite grew 26 -> 69 checks):
+  fixed a scrambled CA2 mode decode and swapped DDR registers, port-access flag
+  clears, one-shot/PB7/handshake behavior.
+- PIA 6520 flag clearing, screen-RAM mirroring, and PRG/ROM-load hardening;
+  40-track D64 images mount write-protected rather than corrupting.
+
+UI & housekeeping
+- SNES user-port adapter is now a menu toggle (Machine > SNES Adapter), not just
+  an ini setting.
+- ROMs are organized into self-contained per-set subfolders (roms/basic2,
+  roms/basic4, roms/8032); a download-roms.ps1 script fetches them from
+  zimmers.net into the right place.
+- .d71 files are recognized by File > Load, drag-and-drop, and -disk.
+- Graphics-keyboard toggle moved from F11 to F12 (F11 is now fullscreen); many
+  graphics-keyboard fixes landed as part of the VIA work.
+
+Testing
+- Standalone unit-test suite restored and expanded to eight suites - VIA 6522,
+  SNES adapter, CB2 sound, D64/D71 disk, host viewport, PET video, MOS 6545
+  CRTC, and PRG relink - plus a headless IEEE bus-level LOAD harness (boot +
+  real image + typed LOAD"*",8,1 + RAM byte-compare). Run petemu\tests\run_tests.bat.
+
+
+Version 2.0
+=====================================
+- Ground-up rewrite: cycle-driven 6502, accurate VIA 6522 with CB2 shift-
+  register sound, rewritten PIA 6520 x2, full PCM sound (Faulty Robots etc.),
+  SNES user-port gamepad support, a fully bug-fixed HLE IEEE-488 disk drive
+  (D64 + host-folder virtual drive), and a native Win32/OpenGL 3.3 host shell.

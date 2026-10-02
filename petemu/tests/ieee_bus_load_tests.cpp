@@ -8,7 +8,7 @@
 // invisible to every unit suite.
 //
 // Usage: ieee_bus_load_tests.exe <romdir> <d64path>
-//   e.g. ieee_bus_load_tests.exe ..\..\x64\Release\roms ..\..\x64\Release\files\ADVENTURE.d64
+//   e.g. ieee_bus_load_tests.exe ..\..\x64\Release\roms\basic2 ..\..\x64\Release\files\ADVENTURE.d64
 
 #include <cstdio>
 #include <cstdint>
@@ -125,7 +125,7 @@ static void press(PetMachine& m, int row, int col, int hold = 4, int gap = 4) {
 }
 
 int main(int argc, char** argv) {
-    const std::string romdir = argc > 1 ? argv[1] : "..\\..\\x64\\Release\\roms";
+    const std::string romdir = argc > 1 ? argv[1] : "..\\..\\x64\\Release\\roms\\basic2";
     const std::string d64p   = argc > 2 ? argv[2] : "..\\..\\x64\\Release\\files\\ADVENTURE.d64";
 
     // --- expected file content straight from the image ---
@@ -141,8 +141,8 @@ int main(int argc, char** argv) {
     m.bus().setRamSize(32 * 1024);   // PetMem defaults to 0 = every RAM write dropped
     std::vector<uint8_t> rom;
     struct { const char* f; uint16_t base; } roms[] = {
-        { "901465-01.ud6", 0xC000 }, { "901465-02.ud7", 0xD000 },
-        { "901447-24.ud8", 0xE000 }, { "901465-03.ud9", 0xF000 },
+        { "basic-2-c000.901465-01.bin", 0xC000 }, { "basic-2-d000.901465-02.bin", 0xD000 },
+        { "edit-2-n.901447-24.bin",     0xE000 }, { "kernal-2.901465-03.bin",     0xF000 },
     };
     for (auto& r : roms) {
         if (!read_file(romdir + "\\" + r.f, rom) || !m.loadRom(rom.data(), rom.size(), r.base)) {

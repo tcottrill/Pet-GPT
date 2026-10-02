@@ -211,6 +211,7 @@ private:
 	bool log_debug_rw = false;
 	bool use_handler_for_opfetch = false;
 	bool kil_logged = false;   // one-shot log when a KIL/JAM opcode halts the CPU
+	bool jammed = false;       // only reset/init releases an NMOS JAM
 
 	// 6510 Internal State
 	uint8_t io_port_data = 0; // $0001
@@ -297,6 +298,7 @@ private:
 	// Instruction implementations
 	// -------------------------------------------------------------------------
 	void adc6502(); void and6502(); void asl6502(); void asla6502();
+	void adc_nmos_value(uint8_t m);
 	void bcc6502(); void bcs6502(); void beq6502(); void bit6502();
 	void bmi6502(); void bne6502(); void bpl6502(); void brk6502();
 	void bvc6502(); void bvs6502(); void clc6502(); void cld6502();

@@ -39,10 +39,10 @@ public:
     // 0 blur_h, 1 blur_v, 2 halation, 3 halation_radius, 4 scanline,
     // 5 contrast, 6 brightness.
     static constexpr int kKnobCount = 7;
-    // "Current: 0.80" display text for menu value items.
-    const char* knobText(int idx);
-    // Nudge a knob one step up/down, apply live, and save it to pet.ini.
-    void adjustKnob(int idx, int dir);
+    // Value access for the settings dialog: set clamps + saves to pet.ini.
+    float getKnob(int idx) const;
+    void  setKnob(int idx, float v);
+    void  knobRange(int idx, float* lo, float* hi, float* step) const;
     // Reset all knobs to the built-in defaults and save them to pet.ini.
     void restoreKnobDefaults();
 

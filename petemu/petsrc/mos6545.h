@@ -35,7 +35,7 @@ public:
     uint8_t readData() const;          // base+1 read : R14-R17 only, else 0
 
     // Host hook: feed the vertical-blank state from the synthesized retrace
-    // timing so software polling the status register (bit 7) sees real phase.
+    // timing so software polling the status register (bit 5) sees real phase.
     void setVerticalRetrace(bool inVBlank) { vretrace_ = inVBlank; }
 
     // ---- Decoded geometry (for the renderer / glue) -------------------------
@@ -45,12 +45,28 @@ public:
     uint16_t screenStart() const { return (uint16_t)(((reg_[12] << 8) | reg_[13]) & 0x3FFF); }
     uint16_t cursorAddr()  const { return (uint16_t)(((reg_[14] << 8) | reg_[15]) & 0x3FFF); }
 
+    // ---- Frame timing derived from the register file ------------------------
+    // Units are character clocks, which on the 8032 equal CPU cycles (1 MHz
+    // char clock fetching 2 bytes per clock). Callers sanity-check the result:
+    // an unprogrammed register file yields nonsense (frameCycles() == 1).
+    //   line   = R0+1 clocks
+    //   frame  = (R4+1)*(R9+1) + R5 scanlines
+    //   active = R6*(R9+1) scanlines (rest of the frame is vertical blank)
+    int frameCycles() const {
+        return (reg_[0] + 1) * ((reg_[4] + 1) * (reg_[9] + 1) + reg_[5]);
+    }
+    int vblankCycles() const {
+        const int total  = (reg_[4] + 1) * (reg_[9] + 1) + reg_[5];
+        const int active = reg_[6] * (reg_[9] + 1);
+        return (total > active) ? (total - active) * (reg_[0] + 1) : 0;
+    }
+
     // Raw register access for diagnostics/tests.
     uint8_t reg(int i) const { return (i >= 0 && i < 18) ? reg_[i] : 0; }
     uint8_t selectedReg() const { return addr_; }
 
     // Bumped whenever a DISPLAY-GEOMETRY register (R1/R6/R9/R12/R13) changes
-    // value; the renderer rebuilds only when this moves. Cursor registers are
+    // value; available for geometry observers and diagnostics. Cursor registers are
     // deliberately excluded (they change constantly, and the PET cursor is
     // software-rendered anyway).
     uint32_t geometryEpoch() const { return epoch_; }

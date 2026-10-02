@@ -1,11 +1,31 @@
-Place your Commodore PET ROM .bin files in this folder.
+Commodore PET ROM images go in this folder, one subfolder per ROM set:
 
-Download them from zimmers.net (plain .bin files - no extraction, just save them here):
+    roms\pet2001n\   BASIC 2, "N" editor
+    roms\pet4000-9\   PET 4000 9-inch, BASIC 4, discrete video
+    roms\cbm8032\     BASIC 4, 80-column / 8032 business set
+
+Easiest way: run download-roms.ps1 (next to PetEmu.exe) and it fetches
+everything and puts it in the right place:
+
+    powershell -ExecutionPolicy Bypass -File download-roms.ps1
+
+Or by hand: download the plain .bin files below from zimmers.net (no
+extraction needed) and drop each into the matching subfolder above.
 https://www.zimmers.net/anonftp/pub/cbm/firmware/computers/pet/
 
 
-BASIC 4 (default set)
----------------------
+roms\pet2001n\
+------------
+basic-2-c000.901465-01.bin     ($C000)
+basic-2-d000.901465-02.bin     ($D000)
+edit-2-n.901447-24.bin         ($E000)
+kernal-2.901465-03.bin         ($F000)
+characters-1.901447-08.bin
+characters-2.901447-10.bin
+
+
+roms\pet4000-9\
+---------------------------
 basic-4-b000.901465-23.bin     ($B000)
 basic-4-c000.901465-20.bin     ($C000)
 basic-4-d000.901465-21.bin     ($D000)
@@ -15,11 +35,36 @@ characters-1.901447-08.bin
 characters-2.901447-10.bin
 
 
-BASIC 2 (2001-N set)
---------------------
-basic-2-c000.901465-01.bin     ($C000)
-basic-2-d000.901465-02.bin     ($D000)
-edit-2-n.901447-24.bin         ($E000)   (or edit-2-b.901474-01.bin)
-kernal-2.901465-03.bin         ($F000)
+roms\cbm8032\
+----------
+basic-4-b000.901465-19.bin     ($B000)
+basic-4-c000.901465-20.bin     ($C000)
+basic-4-d000.901465-21.bin     ($D000)
+edit-4-80-b-60Hz.901474-03.bin ($E000)
+kernal-4.901465-22.bin         ($F000)
 characters-1.901447-08.bin
 characters-2.901447-10.bin
+
+roms\pet4000-12\ (12-inch 4016/4032, CRTC, 60 Hz)
+-------------------------------------------------------
+basic-4-b000.901465-23.bin
+basic-4-c000.901465-20.bin
+basic-4-d000.901465-21.bin
+edit-4-40-n-60Hz.901499-01.bin
+kernal-4.901465-22.bin
+characters-1.901447-08.bin
+characters-2.901447-10.bin
+
+Old folders basic2, basic4, 8032 are now pet2001n, pet4000-9, cbm8032.
+
+roms\pet2001\ (original 1977 PET, BASIC 1, 8 KB)
+rom-1-c000.901447-01.bin
+rom-1-c800.901447-02.bin
+rom-1-d000.901447-03.bin
+rom-1-d800.901447-04.bin
+rom-1-e000.901447-05.bin
+rom-1-f000.901447-06.bin
+rom-1-f800.901447-07.bin
+characters-1.901447-08.bin
+
+Select Machine > Model > PET 2001 (BASIC 1, 8K), or use -pet2001.

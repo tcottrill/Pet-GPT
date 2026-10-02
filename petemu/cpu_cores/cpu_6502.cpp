@@ -338,6 +338,8 @@ void cpu_6502::init6502(uint16_t addrmaskval, CpuModel model)
 	_irqMode = 0;
 	clocktickstotal = 0;
 	cpu_model = model;
+	jammed = false;
+	kil_logged = false;
 
 	// 1. Copy the master table (Contains ALL variants)
 	memcpy(opcode_table, initial_opcode_table, sizeof(initial_opcode_table));
@@ -491,8 +493,9 @@ void cpu_6502::init6502(uint16_t addrmaskval, CpuModel model)
 		for (uint8_t op : nops_3byte)
 		{
 			opcode_table[op].instruction = &cpu_6502::nop6502;
-			// Use abs6502 to consume 2 operand bytes (PC+3 total)
-			opcode_table[op].addressing_mode = &cpu_6502::abs6502;
+			// Only $0C is absolute; the others index X and pay a page-cross cycle.
+			opcode_table[op].addressing_mode = op == 0x0C
+				? &cpu_6502::abs6502 : &cpu_6502::absx6502;
 		}
 		opcode_table[0xEB].instruction = &cpu_6502::sbc6502;
 		opcode_table[0xEB].addressing_mode = &cpu_6502::immediate6502;
@@ -518,6 +521,7 @@ void cpu_6502::init6502(uint16_t addrmaskval, CpuModel model)
 		for (uint8_t op : sbc_ops) opcode_table[op].instruction = &cpu_6502::sbc_2a03;
 		for (uint8_t op : rra_ops) opcode_table[op].instruction = &cpu_6502::rra_2a03;
 		for (uint8_t op : isc_ops) opcode_table[op].instruction = &cpu_6502::isc_2a03;
+		opcode_table[0xEB].instruction = &cpu_6502::sbc_2a03;
 	}
 }
 
@@ -762,6 +766,8 @@ void cpu_6502::reset6502()
 	P = F_T | F_I | F_Z;
 	_irqPending = 0;
 	kil_logged = false;
+	jammed = false;
+	irq_inhibit_one = 0;
 
 	PC = PPC = 0;
 	_irqPending = 0;
@@ -781,9 +787,11 @@ void cpu_6502::reset6502()
 // -----------------------------------------------------------------------------
 void cpu_6502::execute_irq()
 {
+	if (jammed) return;
 	push16(PC);
 	push8(P & ~F_B);
 	P |= F_I;
+	if (cpu_model == CPU_CMOS_65C02) P &= ~F_D;
 	PC = get6502memory(0xFFFE & addrmask);
 	PC |= get6502memory(0xFFFF & addrmask) << 8;
 
@@ -810,9 +818,11 @@ void cpu_6502::irq6502(int irqmode)
 // -----------------------------------------------------------------------------
 void cpu_6502::nmi6502()
 {
+	if (jammed) return;
 	push16(PC);
 	push8(P & ~F_B);
 	P |= F_I;
+	if (cpu_model == CPU_CMOS_65C02) P &= ~F_D;
 	PC = get6502memory(0xFFFA & addrmask);
 	PC |= get6502memory(0xFFFB & addrmask) << 8;
 	clockticks6502 += 7;
@@ -874,6 +884,16 @@ int cpu_6502::exec6502(int timerTicks)
 int cpu_6502::step6502()
 {
 	clockticks6502 = 0;
+	if (jammed) {
+		// Keep the scheduler advancing without fetching or accepting interrupts.
+		clockticks6502 = 2;
+		clocktickstotal += clockticks6502;
+#ifdef USING_AAE_EMU
+		timer_update(clockticks6502, cpu_num);
+#endif
+		if (clocktickstotal > 0x0FFFFFFF) clocktickstotal = 0;
+		return clockticks6502;
+	}
 
 	bool interrupts_allowed = (irq_inhibit_one == 0) && !(P & F_I);
 
@@ -1168,7 +1188,13 @@ void cpu_6502::sbc65c02()
 // -----------------------------------------------------------------------------
 inline void cpu_6502::adc6502()
 {
-	const uint8_t m = get6502memory(savepc);
+	adc_nmos_value(get6502memory(savepc));
+}
+
+// Shared by ADC and RRA. NMOS N/V use the low-digit-corrected intermediate;
+// Z uses the binary sum. Algorithm from shared/ref6502's op_adc.
+void cpu_6502::adc_nmos_value(uint8_t m)
+{
 	const int     cin = (P & F_C) ? 1 : 0;
 	const uint16_t sum = (uint16_t)A + m + cin;
 	const uint8_t  bin = (uint8_t)sum;
@@ -1178,17 +1204,23 @@ inline void cpu_6502::adc6502()
 
 	if (P & F_D)
 	{
-		uint16_t dec = sum;
-		if (((A & 0x0F) + (m & 0x0F) + cin) > 9) dec += 0x06;
-		if (dec > 0x0099) { dec += 0x60; P |= F_C; }
+		unsigned lo = (A & 0x0F) + (m & 0x0F) + cin;
+		if (lo >= 0x0A) lo = ((lo + 6) & 0x0F) + 0x10;
+		unsigned dec = (A & 0xF0) + (m & 0xF0) + lo;
+		P &= ~(F_N | F_V | F_Z);
+		P |= dec & F_N;
+		if ((~(A ^ m) & (A ^ dec) & 0x80) != 0) P |= F_V;
+		if (bin == 0) P |= F_Z;
+		if (dec >= 0xA0) dec += 0x60;
+		if (dec >= 0x100) P |= F_C;
 		A = (uint8_t)dec;
 	}
 	else
 	{
 		if (sum & 0x0100) P |= F_C;
 		A = bin;
+		set_nz(bin);
 	}
-	set_nz(bin);
 }
 
 inline void cpu_6502::sbc6502()
@@ -1826,7 +1858,8 @@ void cpu_6502::nop6502()
 // -----------------------------------------------------------------------------
 void cpu_6502::kil6502()
 {
-	PC--;                     // re-execute this opcode forever
+	jammed = true;
+	PC--;                     // retain the address of the instruction that jammed
 	if (!kil_logged) {
 		kil_logged = true;
 		LOG_INFO("6502 JAM (KIL opcode %02X) at %04X - CPU halted", opcode, PC);
@@ -2014,6 +2047,7 @@ void cpu_6502::plp6502()
 // -----------------------------------------------------------------------------
 void cpu_6502::phx6502()
 {
+	clockticks6502++; // CMOS PHX is 3 cycles; NMOS $DA NOP is 2.
 	push8(X);
 }
 
@@ -2024,6 +2058,7 @@ void cpu_6502::phx6502()
 // -----------------------------------------------------------------------------
 void cpu_6502::plx6502()
 {
+	clockticks6502 += 2; // CMOS PLX is 4 cycles.
 	X = pull8();
 	set_nz(X);
 }
@@ -2034,6 +2069,7 @@ void cpu_6502::plx6502()
 // -----------------------------------------------------------------------------
 void cpu_6502::phy6502()
 {
+	clockticks6502++; // CMOS PHY is 3 cycles; NMOS $5A NOP is 2.
 	push8(Y);
 }
 
@@ -2044,6 +2080,7 @@ void cpu_6502::phy6502()
 // -----------------------------------------------------------------------------
 void cpu_6502::ply6502()
 {
+	clockticks6502 += 2; // CMOS PLY is 4 cycles.
 	Y = pull8();
 	set_nz(Y);
 }
@@ -2211,28 +2248,7 @@ void cpu_6502::rra6502()
 	value = (value >> 1) | carry_in;
 	put6502memory(savepc, value);
 
-	// ADC Logic (NMOS)
-	const uint8_t m = value;
-	const int     cin = (P & F_C) ? 1 : 0;
-	const uint16_t sum = (uint16_t)A + m + cin;
-	const uint8_t  bin = (uint8_t)sum;
-
-	P &= ~(F_V | F_C);
-	if ((~(A ^ m) & (A ^ bin) & 0x80) != 0) P |= F_V;
-
-	if (P & F_D)
-	{
-		uint16_t dec = sum;
-		if (((A & 0x0F) + (m & 0x0F) + cin) > 9) dec += 0x06;
-		if (dec > 0x0099) { dec += 0x60; P |= F_C; }
-		A = (uint8_t)dec;
-	}
-	else
-	{
-		if (sum & 0x0100) P |= F_C;
-		A = bin;
-	}
-	set_nz(bin); // NMOS: Flags on Binary Result
+	adc_nmos_value(value);
 }
 
 // -----------------------------------------------------------------------------

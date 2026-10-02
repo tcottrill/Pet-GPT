@@ -77,8 +77,9 @@ enum MouseModifiers {
 
 char buf[256];
 HWND windowHandle;
-unsigned char key[256];
-unsigned int lastkey[256];
+static unsigned char key[256];
+static unsigned int lastkey[256];
+static std::mutex keyboardMutex;
 int mouse_b;
 
 // This defaults to 1x for AAE - To be removed..
@@ -176,8 +177,7 @@ HRESULT RawInput_Initialize(HWND hWnd)
 	Rid[1].dwFlags = RIDEV_INPUTSINK;
 	Rid[1].hwndTarget = hWnd;
 
-	ZeroMemory(key, sizeof(key));
-	ZeroMemory(lastkey, sizeof(lastkey));
+	test_clr();
 	ZeroMemory(&m_mouseStateRaw, sizeof(m_mouseStateRaw));
 
 	ShowCursor(TRUE);
@@ -296,6 +296,8 @@ static void RawInput_ProcessInternal(const RAWINPUT& input)
 		case VK_CLEAR: if (!isE0) virtualKey = VK_NUMPAD5; break;
 		}
 
+		{
+		std::lock_guard<std::mutex> lock(keyboardMutex);
 		if (kbd.Flags & RI_KEY_BREAK) {
 			key[virtualKey] = 0;
 			lastkey[virtualKey] = 0;
@@ -304,6 +306,7 @@ static void RawInput_ProcessInternal(const RAWINPUT& input)
 			key[virtualKey] = 1;
 			lastkey[virtualKey] = (lastkey[virtualKey] + 1) % 0xFFFFFFFF;
 			if (lastkey[virtualKey] == 0) lastkey[virtualKey] = 1;
+		}
 		}
 
 		if (g_keyCallback) {
@@ -398,9 +401,22 @@ void SetCursorPositionCallback(CursorPositionCallback callback) {
 // -----------------------------------------------------------------------------
 void test_clr()
 {
-	char buf[256];
-	SecureZeroMemory(buf, 256);
-	SecureZeroMemory(key, 256);
+	std::lock_guard<std::mutex> lock(keyboardMutex);
+	ZeroMemory(key, sizeof(key));
+	ZeroMemory(lastkey, sizeof(lastkey));
+}
+
+void RawInput_GetKeyboardState(unsigned char out[256])
+{
+	std::lock_guard<std::mutex> lock(keyboardMutex);
+	CopyMemory(out, key, sizeof(key));
+}
+
+void RawInput_ReleaseKey(INT vkCode)
+{
+	std::lock_guard<std::mutex> lock(keyboardMutex);
+	key[vkCode & 0xff] = 0;
+	lastkey[vkCode & 0xff] = 0;
 }
 
 // Function to get the window size
@@ -451,20 +467,26 @@ void get_mouse_mickeys(int* mickeyx, int* mickeyy)
 // Description:
 //   Returns non-zero if the given key has been pressed (held count).
 // -----------------------------------------------------------------------------
-int isKeyHeld(INT vkCode) { return lastkey[vkCode]; }
+int isKeyHeld(INT vkCode) {
+	std::lock_guard<std::mutex> lock(keyboardMutex);
+	return lastkey[vkCode & 0xff];
+}
 // -----------------------------------------------------------------------------
 // IsKeyDown
 // Description:
 //   Returns true if the specified key is currently pressed.
 // -----------------------------------------------------------------------------
 // NOTE: the writer stores 1 (not 0x80), so test for non-zero.
-bool IsKeyDown(INT vkCode) { return key[vkCode & 0xff] != 0; }
+bool IsKeyDown(INT vkCode) {
+	std::lock_guard<std::mutex> lock(keyboardMutex);
+	return key[vkCode & 0xff] != 0;
+}
 // -----------------------------------------------------------------------------
 // IsKeyUp
 // Description:
 //   Returns true if the specified key is currently released.
 // -----------------------------------------------------------------------------
-bool IsKeyUp(INT vkCode) { return key[vkCode & 0xff] == 0; }
+bool IsKeyUp(INT vkCode) { return !IsKeyDown(vkCode); }
 
 //summed mouse state checks/sets;
 //use as convenience, ie. keeping track of movements without needing to maintain separate data set

@@ -22,6 +22,15 @@ int main() {
     r = host_fit_viewport(1280, 800, 640, 400);
     CHECK(r.w==1280 && r.h==800 && r.x==0 && r.y==0);
 
+    // PET presentation is 4:3 (640x480 base): a 16:9 fullscreen desktop must
+    // pillarbox to 1440x1080, NOT fill 1728+ wide like the old 16:10 base.
+    r = host_fit_viewport(1920, 1080, 640, 480);
+    CHECK(r.w==1440); CHECK(r.h==1080); CHECK(r.x==240); CHECK(r.y==0);
+
+    // 4:3 window shows the 4:3 image edge to edge.
+    r = host_fit_viewport(640, 480, 640, 480);
+    CHECK(r.x==0 && r.y==0 && r.w==640 && r.h==480);
+
     // Degenerate inputs -> empty rect.
     r = host_fit_viewport(0, 400, 640, 400);
     CHECK(r.x==0 && r.y==0 && r.w==0 && r.h==0);

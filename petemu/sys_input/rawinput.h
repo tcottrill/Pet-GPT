@@ -357,7 +357,9 @@ void set_mouse_mickey_scale(float scale);
 // Allegro compatible C style keystate buffers.
 // -----------------------------------------------------------------------------
 extern int mouse_b;
-extern unsigned char key[256];
+// Keyboard state is private to rawinput.cpp; readers receive a locked snapshot.
+void RawInput_GetKeyboardState(unsigned char out[256]);
+void RawInput_ReleaseKey(INT vkCode);
 // -----------------------------------------------------------------------------
 // Registers a mouse and keyboard for raw input;
 // Usage: if (FAILED(RawInput_Initialize(hwnd))) {

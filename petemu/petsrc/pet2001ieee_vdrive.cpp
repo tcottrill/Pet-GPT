@@ -18,7 +18,8 @@ bool PetIEEE::loadHostPRG_Folder(const std::string& petName,
 
 	auto try_one = [&](const std::string& fn)->bool {
 		std::vector<uint8_t> file;
-		if (!read_all_file(std::filesystem::path(hostRoot) / fn, file)) return false;
+		std::filesystem::path path;
+		if (!host_file_path(hostRoot, fn, path) || !read_all_file(path, file)) return false;
 		if (file.size() < 2) return false;
 		loadAddr = (uint16_t)file[0] | ((uint16_t)file[1] << 8);
 		payload.assign(file.begin() + 2, file.end());
@@ -108,8 +109,9 @@ bool PetIEEE::loadHostPRG_D64(const std::string& petName,
 	int startT = 0, startS = 0;
 	bool found = false;
 
+	SectorVisits directoryVisited;
 	while (true) {
-		if (!d64_read_sector(t, s, sec)) break;
+		if (!directoryVisited.visit(t, s) || !d64_read_sector(t, s, sec)) return false;
 		int nextT = sec[0];
 		int nextS = sec[1];
 
@@ -138,8 +140,9 @@ bool PetIEEE::loadHostPRG_D64(const std::string& petName,
 	std::vector<uint8_t> file;
 	int ct = startT, cs = startS;
 
+	SectorVisits fileVisited;
 	while (ct != 0) {
-		if (!d64_read_sector(ct, cs, sec)) return false;
+		if (!fileVisited.visit(ct, cs) || !d64_read_sector(ct, cs, sec)) return false;
 		int nt = sec[0];
 		int ns = sec[1];
 
@@ -175,7 +178,7 @@ bool PetIEEE::loadHostPRG_D64(const std::string& petName,
 //   tokens - list of normalized name patterns from CMD15 "S:".
 //
 // Returns:
-//   Count of files successfully deleted.
+//   Count of files successfully deleted, or -1 for an invalid host path.
 // -----------------------------------------------------------------------------
 int PetIEEE::scratch_host_patterns(const std::vector<std::string>& tokens)
 {
@@ -195,7 +198,12 @@ int PetIEEE::scratch_host_patterns(const std::vector<std::string>& tokens)
 			fname.erase(comma);
 
 		// Match saveFile()/loadHostPRG_Folder(): files live under hostRoot as NAME.prg
-		const std::string path = (std::filesystem::path(hostRoot) / (fname + ".prg")).string();
+		std::filesystem::path checked;
+		if (!host_file_path(hostRoot, fname + ".prg", checked)) {
+			set_status(33, "SYNTAX ERROR", 0, 0);
+			return -1;
+		}
+		const std::string path = checked.string();
 
 		LOG_DEBUG("SCRATCH(host): candidate \"%s\"", path.c_str());
 
@@ -250,9 +258,14 @@ void PetIEEE::saveFile(const std::string& fname, const std::string& contents)
 		return;
 	}
 
-	std::filesystem::create_directories(hostRoot);
+	std::filesystem::path outPath;
+	if (!host_file_path(hostRoot, outName, outPath)) {
+		set_status(33, "SYNTAX ERROR", 0, 0); return;
+	}
+	std::error_code ec;
+	std::filesystem::create_directories(hostRoot, ec);
+	if (ec) { set_status(25, "WRITE ERROR", 0, 0); return; }
 	std::vector<uint8_t> bytes(contents.begin(), contents.end());
-	const auto outPath = std::filesystem::path(hostRoot) / outName;
 
 	if (!write_all_file(outPath, bytes)) {
 		LOG_ERROR("IEEE Save -> failed to write %s", outPath.string().c_str());
@@ -271,8 +284,11 @@ void PetIEEE::saveFile(const std::string& fname, const std::string& contents)
 bool PetIEEE::host_rename(const std::string& oldName, const std::string& newName)
 {
 	if (hostRoot.empty()) { set_status(74, "DRIVE NOT READY", 0, 0); return false; }
-	const auto op = std::filesystem::path(hostRoot) / (oldName + ".prg");
-	const auto np = std::filesystem::path(hostRoot) / (newName + ".prg");
+	std::filesystem::path op, np;
+	if (!host_file_path(hostRoot, oldName + ".prg", op) ||
+		!host_file_path(hostRoot, newName + ".prg", np)) {
+		set_status(33, "SYNTAX ERROR", 0, 0); return false;
+	}
 	std::error_code ec;
 	if (!std::filesystem::exists(op, ec)) { set_status(62, "FILE NOT FOUND", 0, 0); return false; }
 	if (std::filesystem::exists(np, ec)) { set_status(63, "FILE EXISTS", 0, 0); return false; }
@@ -289,8 +305,11 @@ bool PetIEEE::host_rename(const std::string& oldName, const std::string& newName
 bool PetIEEE::host_copy(const std::string& srcName, const std::string& dstName)
 {
 	if (hostRoot.empty()) { set_status(74, "DRIVE NOT READY", 0, 0); return false; }
-	const auto sp = std::filesystem::path(hostRoot) / (srcName + ".prg");
-	const auto dp = std::filesystem::path(hostRoot) / (dstName + ".prg");
+	std::filesystem::path sp, dp;
+	if (!host_file_path(hostRoot, srcName + ".prg", sp) ||
+		!host_file_path(hostRoot, dstName + ".prg", dp)) {
+		set_status(33, "SYNTAX ERROR", 0, 0); return false;
+	}
 	std::error_code ec;
 	if (!std::filesystem::exists(sp, ec)) { set_status(62, "FILE NOT FOUND", 0, 0); return false; }
 	if (std::filesystem::exists(dp, ec)) { set_status(63, "FILE EXISTS", 0, 0); return false; }
@@ -305,12 +324,5 @@ bool PetIEEE::host_copy(const std::string& srcName, const std::string& dstName)
 
 bool PetIEEE::scratchHostFile(const std::string& name)
 {
-	std::string path = "./files/" + name + ".prg";
-	if (std::filesystem::exists(path)) {
-		std::filesystem::remove(path);
-		LOG_INFO("[IEEE] SCRATCH host file: \"%s\"", path.c_str());
-		return true;
-	}
-	LOG_WARN("[IEEE] SCRATCH host file NOT FOUND: \"%s\"", path.c_str());
-	return false;
+	return scratch_host_patterns({name}) > 0;
 }

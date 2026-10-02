@@ -45,12 +45,12 @@ void Mos6545::writeAddr(uint8_t v)
 }
 
 // 6545 status register (read of base+0):
-//   bit 7 = vertical retrace active
+//   bit 5 = vertical blank active
 //   bit 6 = light-pen register full   (not modeled -> 0)
-//   bit 5 = update ready (6545-1 transparent addressing; not used on the PET)
+//   bit 7 = update ready (6545-1 transparent addressing; not used on the PET)
 uint8_t Mos6545::readStatus() const
 {
-    return vretrace_ ? 0x80 : 0x00;
+    return vretrace_ ? 0x20 : 0x00;
 }
 
 void Mos6545::writeData(uint8_t v)

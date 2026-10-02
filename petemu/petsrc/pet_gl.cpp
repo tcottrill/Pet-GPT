@@ -294,23 +294,25 @@ void PetGL::clampKnobs()
     }
 }
 
-const char* PetGL::knobText(int idx)
+float PetGL::getKnob(int idx) const
 {
-    if (idx < 0 || idx >= k_knobCount) return "";
-    std::snprintf(m_tuneBuf, sizeof(m_tuneBuf), "Current: %.2f", *knobPtr(idx));
-    return m_tuneBuf;
+    return (idx >= 0 && idx < k_knobCount) ? *const_cast<PetGL*>(this)->knobPtr(idx) : 0.0f;
 }
 
-void PetGL::adjustKnob(int idx, int dir)
+void PetGL::knobRange(int idx, float* lo, float* hi, float* step) const
+{
+    if (idx < 0 || idx >= k_knobCount) { *lo = *hi = *step = 0; return; }
+    *lo = k_knobs[idx].lo; *hi = k_knobs[idx].hi; *step = k_knobs[idx].step;
+}
+
+void PetGL::setKnob(int idx, float v)
 {
     if (idx < 0 || idx >= k_knobCount) return;
-    float* v = knobPtr(idx);
-    *v += (float)dir * k_knobs[idx].step;
+    *knobPtr(idx) = v;
     clampKnobs();
-    // Live apply happens on the next draw (uniforms are set every frame);
+    // Live apply happens on the next draw (uniforms set every frame);
     // persist immediately so the setting survives however the app exits.
-    set_config_float("video", k_knobs[idx].name, *v);
-    LOG_INFO("[CRT] %s=%.2f", k_knobs[idx].name, *v);
+    set_config_float("video", k_knobs[idx].name, *knobPtr(idx));
 }
 
 void PetGL::restoreKnobDefaults()

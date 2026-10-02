@@ -219,6 +219,8 @@ void PIA6520::writePIA_PA(uint8_t data)
 void PIA6520::writePIA_CRA(uint8_t data)
 {
 	cra = static_cast<uint8_t>(data & 0x3F);
+	if (C2_OUTPUT(cra) && C2_STROBE_MODE(cra))
+		ca2_out = true; // Strobe outputs idle high until a port access.
 
 	// CA2 Output Control (Bits 5..3)
 	// 111 (0x38) = Set High
@@ -270,6 +272,8 @@ void PIA6520::writePIA_PB(uint8_t data)
 void PIA6520::writePIA_CRB(uint8_t data)
 {
 	crb = static_cast<uint8_t>(data & 0x3F);
+	if (C2_OUTPUT(crb) && C2_STROBE_MODE(crb))
+		cb2_out = true;
 
 	// FIX: Manual CB2 Output Control (Bits 5..3)
 	// Just like CA2, CB2 can be manually driven High (111) or Low (110).

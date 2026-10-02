@@ -208,7 +208,7 @@ static inline bool press_pet_special_from_vk(std::uint8_t out[10], int vk, const
 	case VK_DELETE:
 	case VK_BACK:    row = 1; col = 7; break; // DELETE (^T)
 	case VK_RIGHT:  row = 0; col = 7; break; // Cursor Right
-	case VK_LEFT:   row = 0; col = 5; break; // Cursor Left
+	case VK_LEFT:   row = 0; col = 7; break; // Cursor Right + Shift = Cursor Left
 	case VK_DOWN:    row = 1; col = 6; break; // Cursor Down (^Q)
 
 		// Cursor Up => press Cursor key; we'll add PET Shift after pressing
@@ -259,7 +259,7 @@ static inline bool press_pet_special_from_vk(std::uint8_t out[10], int vk, const
 		pet_press(out, row, col);
 
 		// For Cursor Up synth, assert a PET Shift key in addition to the cursor key.
-		if (vk == VK_UP) {
+		if (vk == VK_UP || vk == VK_LEFT) {
 			pet_press(out, 8, 0); // Left Shift (8,0) - or use (8,5) for Right Shift.
 		}
 		return true;
@@ -337,7 +337,11 @@ static void build_business_rows(std::uint8_t out[10],
 		switch (vk) {   // VK specials first (business positions)
 		case VK_RETURN: case VK_SEPARATOR: pet_press(out, 3, 4); continue;
 		case VK_CAPITAL: pet_press(out, 9, 4); runstop = true; continue; // RUN/STOP
-		case VK_HOME:   pet_press(out, 8, 4); continue;
+		case VK_HOME:
+			pet_press(out, 8, 4);
+			if ((kbState[VK_SHIFT] | kbState[VK_LSHIFT] | kbState[VK_RSHIFT]) & 0x80)
+				pet_press(out, 6, 0);
+			continue;
 		case VK_DELETE: case VK_BACK: pet_press(out, 4, 7); continue;
 		case VK_RIGHT:  pet_press(out, 0, 5); continue;
 		case VK_LEFT:   pet_press(out, 0, 5); pet_press(out, 6, 0); continue;
@@ -544,7 +548,9 @@ static void build_pet_rows_core(std::uint8_t out[10],
 // -----------------------------------------------------------------------------
 void build_pet_rows_from_vk(std::uint8_t out[PET_KBD_ROWS_BYTES])
 {
-	build_pet_rows_core(out, ::key /*global*/, /*handleModeToggle=*/true, /*pushAfterBuild=*/true);
+	unsigned char snapshot[256];
+	RawInput_GetKeyboardState(snapshot);
+	build_pet_rows_core(out, snapshot, /*handleModeToggle=*/true, /*pushAfterBuild=*/true);
 }
 
 void update_keyboard(PetMachine* pet)
