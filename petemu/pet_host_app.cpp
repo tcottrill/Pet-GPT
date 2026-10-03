@@ -2,8 +2,9 @@
 #include "system/host_window.h"
 #include "system/host_app.h"
 #include "emulator.h"
+#include "petsrc/pet_keyboard_dialog.h"
 
-static bool   PetInit(int argc, char** argv) { emu_init(argc, argv); return true; }
+static bool   PetInit(int argc, char** argv) { emu_init(argc, argv); pet_keyboard_load_settings(); return true; }
 static bool   PetRunFrame()                  { return emu_run_frame(); }
 static void   PetLoadRom(const char* p)      { pet_load_software(p); }
 static void   PetEjectDisk()                 { pet_eject_disk(); }
@@ -62,6 +63,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     app.shader_range    = PetShaderRange;
     app.shader_defaults = PetShaderDefaults;
     app.get_gfx_kbd = PetGetGfxKbd;
+    app.show_keyboard = pet_keyboard_show_dialog;
     app.set_snes    = PetSetSnes;
     app.get_snes    = PetGetSnes;
     app.about_text  = "Commodore PET Emulator\n\nF11 / Alt+Enter: fullscreen\n"

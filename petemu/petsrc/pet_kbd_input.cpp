@@ -60,6 +60,7 @@
 #include <cstdint>
 #include <cstring>
 #include <array>
+#include <sstream>
 
 #include "rawinput.h"
 #include "pet_machine.h"
@@ -274,9 +275,9 @@ static bool vk_to_ascii(unsigned vk, const BYTE kbState[256], HKL layout, unsign
 	if (!sc) return false;
 
 	wchar_t wbuf[8] = { 0 };
-	int rc = ToUnicodeEx(vk, sc, kbState, wbuf, 8, 0, layout);
+	// Windows 10+: do not alter the keyboard's dead-key state (also used by preview).
+	int rc = ToUnicodeEx(vk, sc, kbState, wbuf, 8, 4, layout);
 	if (rc < 0) {
-		(void)ToUnicodeEx(vk, sc, kbState, wbuf, 8, 0, layout); // clear dead key state
 		return false;
 	}
 	if (rc == 0) return false;
@@ -546,11 +547,170 @@ static void build_pet_rows_core(std::uint8_t out[10],
 // Public API: build from globals (key[256]) and push (original single-call behavior).
 // Also handles the F12 graphics-mode toggle.
 // -----------------------------------------------------------------------------
+static PetKeyBindings g_bindings = [] { PetKeyBindings b; b.fill(PET_KEY_DEFAULT); return b; }();
+
+bool pet_keyboard_editable(int vk) noexcept {
+    // Host/OS commands and modifiers must remain available. Ctrl+O/E/R and
+    // Alt+Enter remain host accelerators even when their plain keys are mapped.
+    if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') ||
+        (vk >= VK_NUMPAD0 && vk <= VK_DIVIDE) || (vk >= VK_F1 && vk <= VK_F7)) return true;
+    switch (vk) {
+    case VK_BACK: case VK_TAB: case VK_RETURN: case VK_CAPITAL: case VK_SPACE:
+    case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
+    case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+    case VK_OEM_1: case VK_OEM_PLUS: case VK_OEM_COMMA: case VK_OEM_MINUS:
+    case VK_OEM_PERIOD: case VK_OEM_2: case VK_OEM_3: case VK_OEM_4:
+    case VK_OEM_5: case VK_OEM_6: case VK_OEM_7: case VK_OEM_102: return true;
+    default: return false;
+    }
+}
+
+bool pet_keyboard_valid_action(int a) noexcept {
+    if (a == PET_KEY_DEFAULT || a == PET_KEY_NONE || (a >= PET_KEY_RUNSTOP && a <= PET_KEY_SHIFT)) return true;
+    if (a < 32 || a >= 127 || (a >= 'a' && a <= 'z')) return false;
+    return ascii_to_pet_pos[a].row >= 0 || g_biz_map[a].row >= 0;
+}
+
+PetKeyBindings pet_keyboard_bindings() { return g_bindings; }
+bool pet_keyboard_set_binding(int vk, int action) {
+    if (!pet_keyboard_editable(vk) || !pet_keyboard_valid_action(action)) return false;
+    g_bindings[vk] = action;
+    return true;
+}
+void pet_keyboard_reset_bindings() { g_bindings.fill(PET_KEY_DEFAULT); }
+
+std::string pet_keyboard_serialize() {
+    std::string result;
+    for (int vk=0; vk<256; ++vk) if (g_bindings[vk]!=PET_KEY_DEFAULT) {
+        if (!result.empty()) result += ',';
+        result += std::to_string(vk) + ':' + std::to_string(g_bindings[vk]);
+    }
+    return result.empty() ? "default" : result;
+}
+void pet_keyboard_deserialize(const std::string& text) {
+    pet_keyboard_reset_bindings();
+    std::istringstream input(text);
+    std::string token;
+    while (std::getline(input,token,',')) {
+        std::istringstream pair(token);
+        int vk, action; char colon;
+        if (pair >> vk >> colon >> action && colon==':' && pair.peek()==EOF)
+            pet_keyboard_set_binding(vk,action);
+    }
+}
+
+static void press_action(std::uint8_t out[10], int a, bool shift) {
+    const bool biz = g_pet_business_kbd;
+    auto shifted = [&] { pet_press(out, biz ? 6 : 8, 0); };
+    if (a==PET_KEY_NONE) return;
+    if (a>=32 && a<127) {
+        if (biz) {
+            // In the business matrix uppercase letters require PET Shift.
+            int ch = (a>='A' && a<='Z' && !shift) ? a+'a'-'A' : a;
+            auto k=g_biz_map[ch];
+            if (k.row>=0) { pet_press(out,k.row,k.col); if (k.shift==1) shifted(); }
+        } else {
+            auto k=ascii_to_pet_pos[a];
+            if (k.row>=0) {
+                pet_press(out,k.row,k.col);
+                if (shift && g_pet_graphics_shift_mode && a>='A' && a<='Z') shifted();
+            }
+        }
+        return;
+    }
+    switch (a) {
+    case PET_KEY_RUNSTOP: pet_press(out,9,4); if (shift) shifted(); break;
+    case PET_KEY_HOME: pet_press(out,biz?8:0,biz?4:6); if (shift) shifted(); break;
+    case PET_KEY_DELETE: pet_press(out,biz?4:1,7); break;
+    case PET_KEY_RETURN: pet_press(out,biz?3:6,biz?4:5); break;
+    case PET_KEY_LEFT: case PET_KEY_RIGHT:
+        pet_press(out,0,biz?5:7); if (a==PET_KEY_LEFT) shifted(); break;
+    case PET_KEY_UP: case PET_KEY_DOWN:
+        pet_press(out,biz?5:1,biz?4:6); if (a==PET_KEY_UP) shifted(); break;
+    case PET_KEY_TAB: if (biz) pet_press(out,4,0); break;
+    case PET_KEY_ESCAPE: if (biz) pet_press(out,2,0); break;
+    case PET_KEY_SHIFT: shifted(); break;
+    }
+}
+
+static void build_mapped_rows(std::uint8_t out[10], const unsigned char keys[256],
+                              bool hotkeys, const PetKeyBindings& bindings) {
+    unsigned char defaults[256];
+    std::memcpy(defaults,keys,256);
+    for (int vk=0; vk<256; ++vk) if (bindings[vk]!=PET_KEY_DEFAULT) defaults[vk]=0;
+    build_pet_rows_core(out,defaults,hotkeys,false);
+    const bool shift=keys[VK_SHIFT] || keys[VK_LSHIFT] || keys[VK_RSHIFT];
+    for (int vk=0; vk<256; ++vk)
+        if (keys[vk] && bindings[vk]!=PET_KEY_DEFAULT) press_action(out,bindings[vk],shift);
+}
+
+std::wstring pet_keyboard_action_name(int a) {
+    switch (a) {
+    case PET_KEY_DEFAULT: return L"Default";
+    case PET_KEY_NONE: return L"Unassigned";
+    case PET_KEY_RUNSTOP: return L"RUN/STOP";
+    case PET_KEY_HOME: return L"HOME";
+    case PET_KEY_DELETE: return L"DEL";
+    case PET_KEY_RETURN: return L"RETURN";
+    case PET_KEY_LEFT: return L"LEFT";
+    case PET_KEY_RIGHT: return L"RIGHT";
+    case PET_KEY_UP: return L"UP";
+    case PET_KEY_DOWN: return L"DOWN";
+    case PET_KEY_TAB: return L"TAB (8032)";
+    case PET_KEY_ESCAPE: return L"ESC (8032)";
+    case PET_KEY_SHIFT: return L"SHIFT";
+    case ' ': return L"SPACE";
+    default: return (a>=32 && a<127) ? std::wstring(1,wchar_t(a)) : L"Unassigned";
+    }
+}
+
+std::wstring pet_keyboard_label(int vk, bool shift, const PetKeyBindings* draft) {
+    if (vk<0 || vk>=256) return L"Unassigned";
+    unsigned char keys[256]={};
+    keys[vk]=1;
+    if (shift) keys[VK_LSHIFT]=1;
+    std::uint8_t rows[10];
+    build_mapped_rows(rows,keys,false,draft ? *draft : g_bindings);
+    const bool biz=g_pet_business_kbd;
+    const bool shifted=!(rows[biz?6:8]&1) || (!biz && !(rows[8]&32));
+    rows[biz?6:8] |= 1;
+    if (!biz) rows[8] |= 32;
+    auto only = [&](int r,int c) {
+        for (int i=0;i<10;++i)
+            if (rows[i] != (i==r ? (255 & ~(1<<c)) : 255)) return false;
+        return true;
+    };
+    if (only(9,4)) return shifted ? L"BREAK" : L"RUN/STOP";
+    if (only(biz?8:0,biz?4:6)) return shifted ? L"CLEAR" : L"HOME";
+    if (only(0,biz?5:7)) return shifted ? L"LEFT" : L"RIGHT";
+    if (only(biz?5:1,biz?4:6)) return shifted ? L"UP" : L"DOWN";
+    if (only(biz?4:1,7)) return L"DEL";
+    if (only(biz?3:6,biz?4:5)) return L"RETURN";
+    if (biz && only(4,0)) return L"TAB";
+    if (biz && only(2,0)) return L"ESC";
+    // Letters first, then punctuation: business shifted symbols share keys.
+    for (int ch='A';ch<='Z';++ch) {
+        auto k=biz ? KeyPos{g_biz_map[ch].row,g_biz_map[ch].col} : ascii_to_pet_pos[ch];
+        if (only(k.row,k.col)) return (!biz && shifted ? L"Gfx " : L"")+std::wstring(1,wchar_t(biz && !shifted ? ch+32 : ch));
+    }
+    for (int ch=32;ch<127;++ch) {
+        if (ch>='A' && ch<='Z') continue;
+        if (biz) {
+            auto k=g_biz_map[ch];
+            if (k.row>=0 && (k.shift==1)==shifted && only(k.row,k.col)) return pet_keyboard_action_name(ch);
+        } else {
+            auto k=ascii_to_pet_pos[ch];
+            if (k.row>=0 && only(k.row,k.col)) return (shifted ? L"Shift+" : L"")+pet_keyboard_action_name(ch);
+        }
+    }
+    return shifted ? L"SHIFT" : L"Unassigned";
+}
+
 void build_pet_rows_from_vk(std::uint8_t out[PET_KBD_ROWS_BYTES])
 {
 	unsigned char snapshot[256];
 	RawInput_GetKeyboardState(snapshot);
-	build_pet_rows_core(out, snapshot, /*handleModeToggle=*/true, /*pushAfterBuild=*/true);
+	build_mapped_rows(out, snapshot, true, g_bindings);
 }
 
 void update_keyboard(PetMachine* pet)

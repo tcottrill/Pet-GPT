@@ -17,6 +17,20 @@ echo === Keyboard ===
 cl /nologo /std:c++17 /EHsc /I "..\petsrc" /I "..\cpu_cores" /I "..\sys_general" /I "..\sys_audio" /I "..\sys_input" /I ".." "keyboard_tests.cpp" "..\petsrc\pet_kbd_input.cpp" /Fe:"keyboard_tests.exe" user32.lib 1>build_keyboard.log 2>&1
 if errorlevel 1 ( echo BUILD FAILED & type build_keyboard.log & set FAIL=1 ) else ( "%~dp0keyboard_tests.exe" & if errorlevel 1 set FAIL=1 )
 
+echo === Keyboard dialog sizing ===
+pushd "%~dp0.."
+rc /nologo /fo tests\keyboard_dialog_test.res petemu.rc 1>tests\build_keyboard_dialog.log 2>&1
+set RCFAIL=!errorlevel!
+popd
+if not "!RCFAIL!"=="0" (
+  echo RESOURCE BUILD FAILED
+  type build_keyboard_dialog.log
+  set FAIL=1
+) else (
+  cl /nologo /std:c++17 /EHsc /I "..\petsrc" /I "..\cpu_cores" /I "..\sys_general" /I "..\sys_audio" /I "..\sys_input" /I ".." "keyboard_dialog_tests.cpp" "..\petsrc\pet_kbd_input.cpp" "..\sys_general\iniFile.cpp" "..\system\host_view.cpp" "keyboard_dialog_test.res" /Fe:"keyboard_dialog_tests.exe" user32.lib gdi32.lib 1>>build_keyboard_dialog.log 2>&1
+  if errorlevel 1 ( echo BUILD FAILED & type build_keyboard_dialog.log & set FAIL=1 ) else ( "%~dp0keyboard_dialog_tests.exe" & if errorlevel 1 set FAIL=1 )
+)
+
 echo === 6502 CPU ===
 cl /nologo /std:c++17 /EHsc /I "..\cpu_cores" /I "..\sys_general" "cpu_6502_tests.cpp" "..\cpu_cores\cpu_6502.cpp" /Fe:"cpu_6502_tests.exe" 1>build_cpu.log 2>&1
 if errorlevel 1 ( echo BUILD FAILED & type build_cpu.log & set FAIL=1 ) else ( "%~dp0cpu_6502_tests.exe" & if errorlevel 1 set FAIL=1 )

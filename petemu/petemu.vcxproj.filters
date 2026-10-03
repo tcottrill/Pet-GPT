@@ -93,6 +93,9 @@
     <ClInclude Include="petsrc\pet_kbd_input.h">
       <Filter>Source Files\petsrc</Filter>
     </ClInclude>
+    <ClInclude Include="petsrc\pet_keyboard_dialog.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
     <ClInclude Include="petsrc\via6522.h">
       <Filter>Source Files\petsrc</Filter>
     </ClInclude>
@@ -228,6 +231,9 @@
       <Filter>Source Files\petsrc</Filter>
     </ClCompile>
     <ClCompile Include="petsrc\pet_kbd_input.cpp">
+      <Filter>Source Files\petsrc</Filter>
+    </ClCompile>
+    <ClCompile Include="petsrc\pet_keyboard_dialog.cpp">
       <Filter>Source Files\petsrc</Filter>
     </ClCompile>
     <ClCompile Include="petsrc\via6522.cpp">

@@ -271,6 +271,16 @@ The PC keyboard maps onto the PET 8×10 key matrix. Highlights:
 \* In graphics mode, `Shift`+letter emits the PETSCII graphic for that key. Also toggleable
 in **Machine ▸ Graphics Keyboard**.
 
+Open **Machine ▸ Keyboard Mapping...** for a Windows-style keyboard diagram.
+The window fits the current monitor and can be resized or maximized; its keys,
+labels, and controls scale together. **Show Shift mappings** previews alternate
+functions for the current PET model and typing mode.
+
+Click a key and choose its PET assignment, then **Apply** or **OK** to save it to
+`pet.ini`. **Cancel** discards changes made since the last Apply. You can clear an
+assignment, restore one key, or restore all defaults. Gray keys are reserved for
+host/system controls; Ctrl+O/E/R and Alt+Enter remain emulator shortcuts.
+
 ### 🎮 Gamepad (SNES user-port adapter)
 
 Plug in an Xbox/XInput controller (or any WinMM joystick) and Pet-GPT presents it to the PET

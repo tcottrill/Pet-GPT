@@ -95,6 +95,7 @@ struct HostApp {
     // emulator, so the host re-reads get_gfx_kbd when menus open. May be null.
     void (*set_gfx_kbd)(int on);
     int  (*get_gfx_kbd)(void);
+    void (*show_keyboard)(HWND owner);        // optional mapping/editor dialog
 
     // SNES user-port adapter (gamepad input): 1 = enabled, 0 = disabled.
     // Machine-menu checkbox; persisted to [input] snes_adapter. May be null.

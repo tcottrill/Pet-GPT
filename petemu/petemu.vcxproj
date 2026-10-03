@@ -142,6 +142,7 @@
     <ClInclude Include="petsrc\pet2001video.h" />
     <ClInclude Include="petsrc\pet_gl.h" />
     <ClInclude Include="petsrc\pet_kbd_input.h" />
+    <ClInclude Include="petsrc\pet_keyboard_dialog.h" />
     <ClInclude Include="petsrc\pet_machine.h" />
     <ClInclude Include="petsrc\pet_mem.h" />
     <ClInclude Include="petsrc\pet_roms.h" />
@@ -194,6 +195,7 @@
     <ClCompile Include="petsrc\pet2001video.cpp" />
     <ClCompile Include="petsrc\pet_gl.cpp" />
     <ClCompile Include="petsrc\pet_kbd_input.cpp" />
+    <ClCompile Include="petsrc\pet_keyboard_dialog.cpp" />
     <ClCompile Include="petsrc\pet_machine.cpp" />
     <ClCompile Include="petsrc\pet_mem.cpp" />
     <ClCompile Include="petsrc\pet_roms.cpp" />

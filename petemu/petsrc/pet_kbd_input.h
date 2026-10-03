@@ -30,6 +30,29 @@
 // -----------------------------------------------------------------------------
 
 #include <cstdint>
+#include <array>
+#include <string>
+
+// Stable, model-independent assignments saved in pet.ini. Printable ASCII
+// selects a PET character; letters retain the current Shift/graphics behavior.
+enum PetKeyAction {
+    PET_KEY_DEFAULT = -1, PET_KEY_NONE = 0,
+    PET_KEY_RUNSTOP = 128, PET_KEY_HOME, PET_KEY_DELETE, PET_KEY_RETURN,
+    PET_KEY_LEFT, PET_KEY_RIGHT, PET_KEY_UP, PET_KEY_DOWN, PET_KEY_TAB,
+    PET_KEY_ESCAPE, PET_KEY_SHIFT
+};
+using PetKeyBindings = std::array<int, 256>;
+bool pet_keyboard_editable(int vk) noexcept;
+bool pet_keyboard_valid_action(int action) noexcept;
+PetKeyBindings pet_keyboard_bindings();
+bool pet_keyboard_set_binding(int vk, int action);
+void pet_keyboard_reset_bindings();
+std::string pet_keyboard_serialize();
+void pet_keyboard_deserialize(const std::string& text);
+std::wstring pet_keyboard_action_name(int action);
+// Preview uses exactly the same matrix builder as live input, without hotkeys
+// or changes to the active bindings. A draft allows Cancel to discard edits.
+std::wstring pet_keyboard_label(int vk, bool shift, const PetKeyBindings* draft = nullptr);
 
 class PetMachine;
 

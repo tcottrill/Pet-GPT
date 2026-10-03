@@ -35,6 +35,16 @@
 #define IDM_SPEED2X       40060   // Machine > 2x Speed (checkbox)
 #define IDM_KBDGFX        40061   // Machine > Graphics Keyboard (checkbox, also F12)
 #define IDM_SNES          40062   // Machine > SNES Adapter (checkbox; [input] snes_adapter)
+#define IDM_KEYBOARD      40063
+#define IDD_KEYBOARD      202
+#define IDC_KBD_MODEL     2300
+#define IDC_KBD_SHIFT     2301
+#define IDC_KBD_SELECTED  2302
+#define IDC_KBD_ASSIGN    2303
+#define IDC_KBD_CLEAR     2304
+#define IDC_KBD_KEY_DEFAULT 2305
+#define IDC_KBD_DEFAULTS  2306
+#define IDC_KBD_APPLY     2307
 
 // View > CRT Monitor: shader knob controls. Value items are grayed labels
 // refreshed on WM_INITMENUPOPUP; Up/Dn adjust live and save to pet.ini.

@@ -571,6 +571,9 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
             set_config_int("machine", "speed2x", g_speed2x);
             HostUpdateSpeedCheck();
             return 0;
+        case IDM_KEYBOARD:
+            if (g_app.show_keyboard) g_app.show_keyboard(wnd);
+            return 0;
         case IDM_KBDGFX:
             g_gfxKbd = !g_gfxKbd;
             if (g_app.set_gfx_kbd) g_app.set_gfx_kbd(g_gfxKbd);
