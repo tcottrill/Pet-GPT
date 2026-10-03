@@ -1,3 +1,69 @@
+Pet-GPT - Commodore PET/CBM Emulator
+Version 2.6 - The one with the features!
+========================================
+
+New machines
+- Five machine models, all from Machine > Model (or the command line):
+  - PET 2001 (original 1977): BASIC 1, 8 KB, original character ROM  (-pet2001)
+  - PET 2001N / 3000: BASIC 2, discrete video                        (-basic2)
+  - PET 4000 9-inch: BASIC 4, discrete video                         (-basic4)
+  - PET 4000 12-inch (NEW): BASIC 4, 40-column 6545 CRTC, 60 Hz      (-4032)
+  - CBM 8032: BASIC 4, 80-column 6545 CRTC, 60 Hz                    (-8032)
+- The 4000 family covers 4016/4032 by RAM size (default 32 KB). The 2001 is fixed
+  at 8 KB and the 8032 at 32 KB. Banked 8096/8296 models are not implemented.
+- pet.ini [machine] basic accepts 1 / 2 / 4 / 8 / 12. The old values 2/4/8 keep
+  their meaning.
+
+Tape and program loading
+- TAP cassette playback (NEW): load or drag a .tap onto the window to attach it
+  to cassette port 1, type LOAD, then File > Tape (cassette 1) > Play. The real
+  PET ROM reads it at tape speed, and tape motor control pauses playback between
+  reads. Stop, Rewind and Eject are on the same menu. Reset keeps the tape position.
+  Supports read-only TAP v0 and v1, including extended v1 pulses and older
+  C64-clock captures of PET tapes. Not supported yet: TAP v2 half-wave images,
+  recording/SAVE, and cassette port 2. A bad image leaves the current tape and
+  machine untouched.
+- T64 archives (NEW): a single-program archive loads straight into RAM, and a
+  multi-program archive shows a picker. Programs keep their original load address.
+- File > Load, the file dialog and drag-and-drop now accept .prg, .t64, .tap,
+  .d64 and .d71.
+
+ROMs
+- ROM sets are now one folder per model: roms\pet2001, pet2001n, pet4000-9,
+  pet4000-12 and cbm8032.
+- download-roms.ps1 now sits next to PetEmu.exe and fetches all five sets from
+  zimmers.net. The old set names (Basic2, Basic4, 8032) still work as aliases.
+- Upgrading from 2.5: rename roms\basic2 -> pet2001n, basic4 -> pet4000-9 and
+  8032 -> cbm8032, or just run download-roms.ps1 again.
+
+Accuracy and robustness
+- 6502: correct cycle counts for the indexed undocumented NOPs, a JAM'd CPU keeps
+  time without taking interrupts, and NMOS decimal-mode N/V flags for ADC/RRA now
+  match the reference core.
+- VIA 6522: shift-register external-clock modes, and SR writes now re-arm the
+  transfer correctly.
+- PIA 6520: CA2/CB2 strobe outputs now idle high until a port access.
+- CRTC video: screen RAM wraps correctly when software scrolls the CRTC display,
+  switching models resets the video hardware properly, screen RAM survives a
+  reset, and switching to the 8032 no longer flashes a screen of '@' characters.
+- Disk drive: disk writes are transactional, so a failed write restores the image
+  instead of half-writing it. Looping directory and file chains are detected.
+  The virtual drive refuses paths that try to escape the ./files folder.
+- Keyboard: the Left arrow now works as cursor-left, Shift+Home clears the screen
+  (CLR), and keyboard reads are thread-safe, so keys no longer get dropped or
+  stick between the window and the emulation thread.
+
+Testing
+- New suites for TAP playback, T64 archives, keyboard, 6502 CPU and machine
+  models, alongside the existing VIA, SNES, CB2 sound, D64/D71, host viewport,
+  video, CRTC and PRG-relink suites. Everything passes.
+  Run petemu\tests\run_tests.bat.
+
+Download: PetGPT_2.6_Release.zip contains PetEmu.exe, pet.ini, download-roms.ps1,
+the roms\ folder layout, and a couple of sample programs in files\. No Commodore
+ROMs are included; run download-roms.ps1 to fetch them.
+
+
 Pet-GPT - Commodore PET 2001 Emulator
 Version 2.5
 =====================================

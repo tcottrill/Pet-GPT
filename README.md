@@ -5,11 +5,17 @@
 <h1 align="center">Pet-GPT — Commodore PET/CBM Emulator</h1>
 
 <p align="center">
+  Note to anyone actually stumbling on this repository, this actually is a halfway decent
+  pet emulator, and the hle disk drive handles about 95% of the use cases. I am really happy with
+  it and if you give it a couple of minutes I think you will be too. The 6502 core and via6522
+  have been highly debugged and are suitable for using in just about any other C++ project.<br>
+  ...
   A modern, modular Commodore PET emulator for Windows — cycle-driven 6502, accurate
   VIA&nbsp;6522 / PIA&nbsp;6520 I/O, full CB2 sound, a mono-monitor CRT shader,
-  <strong>PET&nbsp;4000 and CBM&nbsp;8032</strong> modes, SNES&nbsp;user-port gamepad support, and a
-  bug-fixed HLE IEEE-488 disk drive with <strong>.d64 and .d71</strong> images. Now
-  <strong>version&nbsp;2.5</strong>.
+  <strong>five PET/CBM models</strong> from the original 2001 to the 80-column 8032,
+  <strong>.tap cassette playback</strong> and <strong>.t64</strong> loading, SNES&nbsp;user-port
+  gamepad support, and a bug-fixed HLE IEEE-488 disk drive with <strong>.d64 and .d71</strong>
+  images. Now <strong>version&nbsp;2.6</strong>.
 </p>
 
 <p align="center">
@@ -28,13 +34,11 @@
   <img src="images/pet_menu_lr.gif" alt="Pet-GPT running — menus, CRT look, and BASIC" width="620">
 </p>
 
-<p align="center">
-  <a href="images/PetGPT-Robots.mp4">
-    <img src="images/petgpt-robots-poster.png" alt="Faulty Robots CB2 sound demo running in Pet-GPT — click to play" width="480">
-  </a>
-  <br>
-  <a href="images/PetGPT-Robots.mp4">▶ Watch: the Faulty Robots CB2 sound demo running in Pet-GPT</a> <em>(video with audio)</em>
-</p>
+**▶ The _Faulty Robots_ CB2 sound demo running in Pet-GPT (video, with audio):**
+
+https://github.com/user-attachments/assets/0e11d07d-d96a-43b2-86fe-575940d97524
+
+<sub>If the player above doesn't load (some mirrors strip it), <a href="images/PetGPT-Robots.mp4">click here to watch the video</a>.</sub>
 
 ---
 
@@ -58,6 +62,19 @@ a **bug-fixed HLE disk drive**.
 - a proper **4:3** display (fullscreen no longer stretches), a **2× speed** toggle, and the
   **SNES adapter** exposed as a menu option.
 
+**Version 2.6** — *the one with the features* — fills out the family tree and adds tape:
+
+- **Five machine models** — the **original PET 2001** (BASIC 1, 8 KB), **2001N / 3000**
+  (BASIC 2), **4000 9-inch** (BASIC 4, discrete video), the new **4000 12-inch** (40-column
+  **CRTC**, 60 Hz), and the **CBM 8032** (80-column) — all from **Machine ▸ Model**.
+- **TAP cassette playback** — attach a `.tap` to cassette port 1 and drive it from
+  **File ▸ Tape** (Play / Stop / Rewind / Eject); the real PET ROM does the loading.
+- **T64 archive loading** — single-program archives load directly; multi-program archives
+  show a picker.
+- **ROM sets reorganized** into one folder per model, with an updated `download-roms.ps1`
+  that fetches all five (old set names still accepted).
+- A broad accuracy and robustness pass across the 6502, VIA, CRTC video and the disk drive.
+
 > ⚠️ **ROMs are not included.** Pet-GPT ships no Commodore ROM images. You must supply your
 > own legally-obtained PET BASIC / EDIT / KERNAL / character ROMs — a bundled script can fetch
 > them for you (see [Running](#-running)).
@@ -73,8 +90,13 @@ a **bug-fixed HLE disk drive**.
 - 🔌 **Rewritten PIA 6520 ×2** — PET keyboard scan, IEEE handshake lines, screen-retrace IRQ.
 - 🔊 **Full CB2 sound** — the VIA shift-register / CB2 line is reconstructed to PCM in real
   time, so the classic PET sound demos (e.g. *Faulty Robots*) play correctly.
-- 🖳 **PET models** — **original 2001 (BASIC 1, 8 KB)**, **2001N/3000 (BASIC 2)**, **4000 9-inch (BASIC 4)**, **4000 12-inch CRTC**, and **8032 (80-column)**
-  with a functional **MOS 6545 CRTC** and CRTC-derived frame timing.
+- 🖳 **PET models** — **original 2001 (BASIC 1, 8 KB)**, **2001N/3000 (BASIC 2)**,
+  **4000 9-inch (BASIC 4)**, **4000 12-inch CRTC**, and **8032 (80-column)**; the CRTC models
+  use a functional **MOS 6545 CRTC** with CRTC-derived frame timing.
+- 📼 **TAP cassette playback** — `.tap` v0/v1 images on cassette port 1, read by the real PET
+  ROM at tape speed, with motor control and a **File ▸ Tape** transport.
+- 📦 **T64 archives** — load a program straight into RAM, with a picker for multi-program
+  archives.
 - 📺 **Mono CRT shader** — VICE-style horizontal softness + halation glow, **green phosphor**
   or **black & white**, with beam-overdrive contrast and black-level lift. Live-tunable
   (F9 / PgUp-PgDn / F8) and saved to `pet.ini`.
@@ -124,8 +146,9 @@ msbuild PetEmu.sln /t:Build /p:Configuration=Release /p:Platform=x64 /m
 
 The binary is produced at `x64\Release\PetEmu.exe`.
 
-To run the standalone unit tests — eight suites (VIA 6522, SNES adapter, CB2 sound,
-D64/D71 disk, host viewport, PET video, MOS 6545 CRTC, PRG relink):
+To run the standalone unit tests — TAP cassette, T64 archive, keyboard, 6502 CPU, VIA 6522,
+SNES adapter, CB2 sound, D64/D71 disk, host viewport, PET video, MOS 6545 CRTC, machine
+models, and PRG relink:
 
 ```powershell
 petemu\tests\run_tests.bat
@@ -176,20 +199,48 @@ character ROMs (`characters-1.901447-08.bin`, `characters-2.901447-10.bin`):
 Pick the model at runtime with **Machine ▸ Model**, `-pet2001` / `-basic2` / `-basic4` / `-4032` / `-8032`, or `[machine] basic`
 in `pet.ini`. Existing values 2/4/8 retain their meaning; 12 selects the new CRTC model.
 
-The 4000 family labels cover 4016/4032 configurations according to RAM size; the default is 32 KB. Smaller RAM selections are custom configurations. The original PET 2001 profile uses BASIC 1 and 8 KB RAM. Banked 8096/8296 models are not implemented. File > Load and drag-and-drop accept PRGs and T64 archives. A single T64 program loads directly; archives with multiple programs show a picker. Type RUN after loading a BASIC program. T64 programs retain their original load address and must be PET-compatible. This extracts programs into RAM; TAP images, cassette timing, and subsequent tape reads are not supported. T64 archives are not mounted on the virtual disk drive. Only the 12-inch 4000 and 8032 profiles expose the CRTC.
+The 4000 models cover 4016/4032 configurations according to RAM size (default 32 KB; smaller
+sizes are custom configurations). The original PET 2001 uses BASIC 1 and 8 KB RAM. Only the
+12-inch 4000 and the 8032 have the CRTC. Banked 8096/8296 models are not implemented.
 
-When upgrading an older installation, rename `basic2` to `pet2001n`, `basic4` to `pet4000-9`, and `8032` to `cbm8032` inside `roms`. The downloader also accepts the old set names as aliases.
+> **Upgrading from 2.5?** Inside `roms`, rename `basic2` → `pet2001n`, `basic4` → `pet4000-9`,
+> and `8032` → `cbm8032` — or just run `download-roms.ps1` again. The downloader still accepts
+> the old set names as aliases.
 
 ### `files/` — your programs and disks (the virtual drive root)
 
 Drop `.prg`, `.d64`, and `.d71` files here, then `LOAD"NAME",8` / `LOAD"$",8` from BASIC, or
-use **File ▸ Load** (or drag-and-drop onto the window).
+use **File ▸ Load** (or drag-and-drop onto the window). File ▸ Load also accepts `.t64`
+archives and `.tap` cassette images (see [TAP cassette playback](#-tap-cassette-playback)).
 
 Then just launch:
 
 ```powershell
 x64\Release\PetEmu.exe
 ```
+
+### 📦 T64 archives
+
+**File ▸ Load** and drag-and-drop accept `.t64` archives. A single-program archive loads
+directly; an archive with several programs shows a picker. Type `RUN` after loading a BASIC
+program. Programs keep their original load address and must be PET-compatible. T64 loading
+extracts the program straight into RAM — it has no cassette timing and isn't mounted on the
+disk drive; use TAP playback for software that reads more from tape.
+
+### 📼 TAP cassette playback
+
+Use **File ▸ Load** or drag a `.tap` onto the window to attach it to cassette port 1.
+Type `LOAD` and press Return, then select **File ▸ Tape (cassette 1) ▸ Play**.
+The PET ROM reads the tape at emulated tape speed; type `RUN` when loading finishes.
+Stop pauses at the current position. Rewind stops and returns to the beginning;
+press Play to resume. Eject removes the image. Reset stops playback and preserves
+the tape position. Tape motor control pauses playback automatically between reads.
+
+Read-only TAP versions 0 and 1 are supported, including extended v1 pulses and
+legacy C64-clock captures of PET tapes. The contents must be PET-compatible.
+TAP v2 half-wave images, recording/SAVE, and cassette port 2 are not implemented.
+An invalid image leaves the previous tape and running machine intact.
+TAP is separate from the IEEE disk drive and the `-disk` option.
 
 ### Command line (optional)
 
@@ -213,8 +264,8 @@ The PC keyboard maps onto the PET 8×10 key matrix. Highlights:
 | `RUN/STOP` | `Caps Lock` |
 | `STOP` + restore (**BREAK**) | `Caps Lock` + `Shift` |
 | Cursor ↑ / ↓ | `↑` / `↓` |
-| Cursor ← / → | `Shift +` `↑/↓` (PET has 2 cursor keys) |
-| `CLR/HOME` | `Home` |
+| Cursor ← / → | `←` / `→` (sent as the PET's shifted/unshifted cursor key) |
+| `HOME` / `CLR` | `Home` / `Shift`+`Home` |
 | Graphics ⇄ business charset | `F12`* |
 
 \* In graphics mode, `Shift`+letter emits the PETSCII graphic for that key. Also toggleable
@@ -249,9 +300,10 @@ lives in `pet.ini` (`[input] snes_invert`).
 ## 📂 Menus
 
 ```text
-File ─┬─ Load Program/Disk…   (Ctrl+O)
-      ├─ Eject Disk           (Ctrl+E)
-      ├─ Reset                (Ctrl+R)
+File ─┬─ Load Program/Disk/Tape…   (Ctrl+O)
+      ├─ Eject Disk                (Ctrl+E)
+      ├─ Tape (cassette 1) ▸ Play / Stop / Rewind / Eject Tape
+      ├─ Reset                     (Ctrl+R)
       └─ Exit
 Machine ─┬─ Model ▸ PET 2001 / PET 2001N/3000 / PET 4000 9-inch / PET 4000 12-inch CRTC / CBM 8032   (radio)
          ├─ Memory ▸ 4K / 8K / 16K / 32K                              (radio)
@@ -321,7 +373,8 @@ Pet-GPT-2026/
 
 - **Tim Cottrill** ([@tcottrill](https://github.com/tcottrill)) — author, integrator, maintainer.
 - Built with AI pair-programming: **ChatGPT** (original 1.0) and **Claude** (the 2.0 rewrite
-  and 2.5 — VIA/PIA, sound, SNES, HLE disk, 8032/CRTC, the CRT shader, and the host shell).
+  through 2.6 — VIA/PIA, sound, SNES, HLE disk, the PET/CBM models and CRTC, TAP/T64, the
+  CRT shader, and the host shell).
 
 ## 🙏 Acknowledgements
 
