@@ -505,6 +505,9 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDM_LOADROM:    HostLoadRomDialog(); return 0;
+        case IDM_TAPE_PLAY: case IDM_TAPE_STOP: case IDM_TAPE_REWIND: case IDM_TAPE_EJECT:
+            if (g_app.tape_command) g_app.tape_command(LOWORD(wParam) - IDM_TAPE_PLAY);
+            return 0;
         case IDM_EJECT:      if (g_app.eject_disk) g_app.eject_disk(); return 0;
         case IDM_RESET:      if (g_app.reset) g_app.reset(); return 0;
         case IDM_EXIT:       PostMessage(wnd, WM_CLOSE, 0, 0); return 0;
@@ -618,6 +621,15 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         return DefWindowProc(wnd, msg, wParam, lParam);
 
     case WM_INITMENUPOPUP:
+        if (g_app.tape_state) {
+            const int state = g_app.tape_state();
+            const HMENU menu = (HMENU)wParam;
+            EnableMenuItem(menu, IDM_TAPE_PLAY, MF_BYCOMMAND | ((state & 1) && !(state & 6) ? MF_ENABLED : MF_GRAYED));
+            EnableMenuItem(menu, IDM_TAPE_STOP, MF_BYCOMMAND | (state & 2 ? MF_ENABLED : MF_GRAYED));
+            EnableMenuItem(menu, IDM_TAPE_REWIND, MF_BYCOMMAND | (state & 1 ? MF_ENABLED : MF_GRAYED));
+            EnableMenuItem(menu, IDM_TAPE_EJECT, MF_BYCOMMAND | (state & 1 ? MF_ENABLED : MF_GRAYED));
+            CheckMenuItem(menu, IDM_TAPE_PLAY, MF_BYCOMMAND | (state & 2 ? MF_CHECKED : MF_UNCHECKED));
+        }
         // Grey "Eject Disk" unless a disk is mounted. Queried fresh each time a
         // popup opens; wParam is the submenu being shown (works for both the
         // menu bar's File popup and the right-click popup, which share the

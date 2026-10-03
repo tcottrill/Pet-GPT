@@ -5,6 +5,10 @@ pushd "%~dp0"
 
 set FAIL=0
 
+echo === TAP cassette ===
+call "%~dp0run_tap_tests.bat"
+if errorlevel 1 set FAIL=1
+
 echo === T64 archive ===
 cl /nologo /std:c++17 /EHsc "t64_tests.cpp" /Fe:"t64_tests.exe" 1>build_t64.log 2>&1
 if errorlevel 1 ( echo BUILD FAILED & type build_t64.log & set FAIL=1 ) else ( "%~dp0t64_tests.exe" & if errorlevel 1 set FAIL=1 )

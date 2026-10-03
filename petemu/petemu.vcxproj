@@ -146,6 +146,7 @@
     <ClInclude Include="petsrc\pet_mem.h" />
     <ClInclude Include="petsrc\pet_roms.h" />
     <ClInclude Include="petsrc\t64.h" />
+    <ClInclude Include="petsrc\pet_tape.h" />
     <ClInclude Include="petsrc\pia6520.h" />
     <ClInclude Include="petsrc\mos6545.h" />
     <ClInclude Include="petsrc\via6522.h" />

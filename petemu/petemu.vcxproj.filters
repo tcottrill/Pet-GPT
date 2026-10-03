@@ -189,6 +189,9 @@
     <ClInclude Include="petsrc\t64.h">
       <Filter>Source Files\petsrc</Filter>
     </ClInclude>
+    <ClInclude Include="petsrc\pet_tape.h">
+      <Filter>Source Files\petsrc</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="emulator.cpp">

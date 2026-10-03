@@ -7,6 +7,10 @@
 #define IDR_HOST_ACCEL    129     // free (102 taken, next free above IDR_MAINFRAME=128)
 
 #define IDM_LOADROM       40001   // Load Program/Disk...
+#define IDM_TAPE_PLAY     40110
+#define IDM_TAPE_STOP     40111
+#define IDM_TAPE_REWIND   40112
+#define IDM_TAPE_EJECT    40113
 #define IDM_RESET         40002
 #define IDM_EXIT          40003
 #define IDM_FULLSCREEN    40004

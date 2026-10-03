@@ -6,6 +6,8 @@ extern void pet_load_software(const char* utf8_path); // .prg/.d64
 extern void pet_eject_disk();                         // unmount .d64 -> ./files vdrive
 extern int  pet_get_disk_mounted();                   // 1 if a .d64 is mounted, else 0
 extern void pet_reset();
+extern void pet_tape_command(int command); // 0 play, 1 stop, 2 rewind, 3 eject
+extern int pet_tape_state(); // bit 0 mounted, bit 1 playing, bit 2 end
 extern bool pet_set_basic(int which); // Model IDs: 2, 4, 8, 12
 extern int pet_get_basic();
 extern void pet_set_ram(int kb);                      // 4/8/16/32: resize RAM + reset

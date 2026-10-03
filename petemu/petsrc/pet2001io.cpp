@@ -43,6 +43,8 @@ void Pet2001IO::reset()
 {
 	m_pia1.reset();
 	m_pia2.reset();
+	// Reset releases PLAY but retains the mounted image and tape position.
+	m_tape.stop();
 
 	// PIA2 idle high by default
 	m_pia2.setPIA_PA_in(0xFF);
@@ -212,6 +214,10 @@ uint8_t Pet2001IO::read(uint16_t a)
 		const bool eoi = m_ieee.EOIin();
 
 		uint8_t pa_in = m_pia1.getPIA_PA_in();
+		// Cassette switches are active-low. Port 2 has no attached transport.
+		pa_in |= 0x30;
+		if (m_tape.playing()) pa_in &= uint8_t(~0x10);
+		m_pia1.setPIA_PA_in(pa_in);
 		const uint8_t ddra = m_pia1.getPIA_DDRA();
 
 		if ((ddra & 0x40) == 0)
@@ -578,6 +584,13 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 // -----------------------------------------------------------------------------
 void Pet2001IO::cycle()
 {
+	// CB2 controls motor power only in output mode (otherwise pulled high).
+	const bool motor = (m_pia1.getPIA_CRB() & 0x20) && !m_pia1.getPIA_CB2_out();
+	if (m_tape.tick(motor)) {
+		// TAP v0/v1 gives read-event intervals; the PIA latches the edge.
+		m_pia1.setCA1(true);
+		m_pia1.setCA1(false);
+	}
 	// Tick both PIAs and VIA once per CPU cycle.
 	m_pia1.tick();
 	m_pia2.tick();

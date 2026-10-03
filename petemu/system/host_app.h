@@ -32,6 +32,8 @@ struct HostApp {
     void (*eject_disk)(void);                 // unmount mounted disk image (may be null)
     int  (*get_disk_mounted)(void);           // 1 if a disk image is mounted, else 0 (may be null)
     void (*reset)(void);                      // reset the machine
+    void (*tape_command)(int command);        // 0 play, 1 stop, 2 rewind, 3 eject
+    int (*tape_state)(void);                  // mounted=1, playing=2, end=4
     bool (*run_frame)(void);                  // run ONE frame, draw into current
                                               // GL viewport; return false to quit
     void (*shutdown)(void);                   // one-time teardown

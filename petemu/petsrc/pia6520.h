@@ -96,6 +96,7 @@ public:
 
     // CA2 output latch (used for screen blank / EOIout).
     bool    getPIA_CA2_out() const { return ca2_out != 0; }
+    bool    getPIA_CB2_out() const { return cb2_out != 0; }
 
     // Combined IRQ output line for this PIA.
     // True if any enabled IRQ (A or B side) is pending.

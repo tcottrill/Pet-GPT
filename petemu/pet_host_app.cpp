@@ -36,7 +36,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     // (16:10, which read as widescreen-stretched in fullscreen).
     app.base_w      = 640;
     app.base_h      = 480;
-    app.rom_filter  = L"PET software\0*.prg;*.t64;*.d64;*.d71\0All Files\0*.*\0";
+    app.rom_filter  = L"PET software\0*.prg;*.t64;*.tap;*.d64;*.d71\0All Files\0*.*\0";
     app.target_fps  = 60.0;            // authentic PET frame rate
     app.init        = PetInit;
     app.run_frame   = PetRunFrame;
@@ -44,6 +44,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     app.eject_disk  = PetEjectDisk;
     app.get_disk_mounted = PetGetDiskMounted;
     app.reset       = PetReset;
+    app.tape_command = pet_tape_command;
+    app.tape_state = pet_tape_state;
     app.shutdown    = PetShutdown;
     app.set_basic   = PetSetBasic;
     app.get_basic   = pet_get_basic;
@@ -65,7 +67,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     app.about_text  = "Commodore PET Emulator\n\nF11 / Alt+Enter: fullscreen\n"
                       "F12: graphics / business typing mode\n"
                       "View > CRT Monitor: shader, monitor color, and tuning\n"
-                      "File > Load: .prg / .t64 / .d64 / .d71";
+                      "File > Load: .prg / .t64 / .tap / .d64 / .d71\n"
+                      "File > Tape: Play / Stop / Rewind / Eject (cassette 1)";
     // All vector/overlay/audio-slider hooks remain null.
     return host_run(hInstance, nCmdShow, &app);
 }

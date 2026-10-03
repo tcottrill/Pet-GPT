@@ -35,8 +35,11 @@ PetMem::PetMem()
 	videoUnit(),
 	// keysUnit(),
 	ioUnit(ieeeUnit, videoUnit, [this](bool level) { this->onIrqLine(level); })
-{    // Fill screen RAM with spaces on cold start 
-	for (uint16_t a = VIDRAM_ADDR; a <= VIDRAM_END; ++a) {
+{
+	// Initialize the full 2 KB screen SRAM, including the non-visible tail.
+	// A later switch to 8032 exposes the upper KB; leaving it zero-filled
+	// briefly displays '@' characters before the ROM clears the screen.
+	for (uint16_t a = VIDRAM_ADDR; a < VIDRAM_ADDR + 0x0800; ++a) {
 		ram[a] = 0x20;
 	}
 

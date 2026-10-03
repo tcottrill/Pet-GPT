@@ -14,6 +14,7 @@
 #include "pia6520.h"
 #include "snes_adapter.h"
 #include "mos6545.h"
+#include "pet_tape.h"
 
 // -----------------------------------------------------------------------------
 // Pet2001IO
@@ -77,6 +78,7 @@ public:
 		std::function<void(bool)> setIrqLine);
 
 	void reset();
+	PetTape& tape() { return m_tape; }
 
 	// Host IEEE helpers
 	void setIeeeHostRoot(const std::string& dir);
@@ -135,6 +137,7 @@ private:
 	VIA6522 m_via;
 	SnesAdapter m_snes;
 	Mos6545 m_crtc;
+	PetTape m_tape;
 	bool m_hasCrtc = false;
 	int m_crtcBytesPerCharacter = 1; // 4032: one byte; 8032: two bytes
 

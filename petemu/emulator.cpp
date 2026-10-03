@@ -407,6 +407,21 @@ int pet_get_disk_mounted() {
 
 void pet_reset() { if (g_pet) g_pet->reset(); }
 
+void pet_tape_command(int command) {
+	if (!g_pet) return;
+	auto& tape = g_pet->io().tape();
+	if (command == 0) tape.play();
+	if (command == 1) tape.stop();
+	if (command == 2) tape.rewind();
+	if (command == 3) tape.eject();
+	LOG_INFO("[PET] tape command %d, pulse %zu", command, tape.position());
+}
+int pet_tape_state() {
+	if (!g_pet) return 0;
+	const auto& tape = g_pet->io().tape();
+	return (tape.mounted() ? 1 : 0) | (tape.playing() ? 2 : 0) | (tape.atEnd() ? 4 : 0);
+}
+
 bool pet_set_basic(int which) {
 	if (which != 1 && which != 2 && which != 4 && which != 8 && which != 12) return false;
 	if (!load_basic_set(which)) return false;   // PetMachine::loadRom keeps the CPU MEM mirror in sync
@@ -528,6 +543,21 @@ void pet_load_software(const char* utf8_path) {
 	std::string p = utf8_path;
 	std::string ext; { size_t d = p.find_last_of('.'); if (d != std::string::npos) ext = p.substr(d + 1); }
 	std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return (char)tolower(c); });
+	if (ext == "tap") {
+		std::vector<uint8_t> file;
+		std::string error;
+		if (!ieee_helpers::read_all_file(p, file)) error = "Unable to read the TAP file.";
+		else g_pet->io().tape().attach(file, error);
+		if (!error.empty()) {
+			LOG_ERROR("[PET] TAP '%s': %s", p.c_str(), error.c_str());
+			MessageBoxA(GetActiveWindow(), error.c_str(), "Cannot attach tape", MB_OK | MB_ICONERROR);
+		} else {
+			LOG_INFO("[PET] attached TAP '%s' to cassette 1", p.c_str());
+			MessageBoxW(GetActiveWindow(), L"Tape attached to cassette 1.\n\nType LOAD and press Return, then choose File > Tape > Play.\nAfter loading finishes, type RUN.\n\nUse Rewind before loading from the beginning again.",
+				L"Tape attached", MB_OK | MB_ICONINFORMATION);
+		}
+		return;
+	}
 
 	if (ext == "d64" || ext == "d71") {
 		if (g_pet->bus().io().setIeeeD64Image(p))
