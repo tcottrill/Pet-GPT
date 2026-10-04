@@ -10,13 +10,17 @@
 
 namespace {
 constexpr int keyBase=5000;
-struct Keycap { int vk; std::wstring pc, pet; HWND window; };
+struct Keycap { int vk; std::wstring pc, pet; HWND window; bool custom=false; };
 struct LayoutItem { HWND window; RECT bounds; int dropHeight; };
 struct Editor {
     PetKeyBindings draft=pet_keyboard_bindings();
     std::vector<Keycap> caps;
-    int selected=VK_CAPITAL;
+    int selected='A';
+    bool capturing=false;
     bool shift=false;
+    WNDPROC buttonProc=nullptr;
+    std::wstring status;
+    PetKeyBindings defaults{};
     HFONT keyFont=nullptr, labelFont=nullptr, uiFont=nullptr;
     LOGFONTW baseFont{};
     int designWidth=0, designHeight=0, fontHeight=0;
@@ -100,8 +104,18 @@ void fit_window(HWND dlg,RECT desired,HMONITOR monitor,bool center) {
     SetWindowPos(dlg,nullptr,r.left,r.top,w,h,SWP_NOZORDER|SWP_NOACTIVATE);
 }
 
+std::wstring physical_name(int vk) {
+    if(vk==VK_SEPARATOR) return L"Num Enter";
+    UINT scan=MapVirtualKeyW(vk,MAPVK_VK_TO_VSC);
+    if(vk==VK_LEFT || vk==VK_RIGHT || vk==VK_UP || vk==VK_DOWN ||
+       vk==VK_HOME || vk==VK_END || vk==VK_INSERT || vk==VK_DELETE || vk==VK_DIVIDE) scan|=0x100;
+    wchar_t name[80]{};
+    if(GetKeyNameTextW(scan<<16,name,80)) return name;
+    return L"VK "+std::to_wstring(vk);
+}
+
 std::wstring reserved_label(int vk) {
-    switch (vk) {
+    switch(vk) {
     case VK_ESCAPE: return L"Exit";
     case VK_F8: return L"Log CRT";
     case VK_F9: return L"CRT knob";
@@ -117,6 +131,22 @@ std::wstring reserved_label(int vk) {
     }
 }
 
+constexpr UINT captureMessage=WM_APP+17;
+LRESULT CALLBACK key_proc(HWND button,UINT msg,WPARAM wp,LPARAM lp) {
+    HWND dlg=GetParent(button);
+    auto* e=reinterpret_cast<Editor*>(GetWindowLongPtrW(dlg,DWLP_USER));
+    if(e && e->capturing) {
+        if(msg==WM_GETDLGCODE) return DLGC_WANTALLKEYS;
+        if(msg==WM_KEYDOWN || msg==WM_SYSKEYDOWN) {
+            if(!(lp & (1L<<30))) SendMessageW(dlg,captureMessage,wp,lp);
+            return 0;
+        }
+        if(msg==WM_CHAR || msg==WM_SYSCHAR) return 0;
+        if(msg==WM_KILLFOCUS) SendMessageW(dlg,captureMessage,VK_ESCAPE,0);
+    }
+    return CallWindowProcW(e->buttonProc,button,msg,wp,lp);
+}
+
 // Dialog units keep key placement proportional to the native font and DPI.
 void add_key(HWND dlg,Editor& e,int vk,const wchar_t* label,float x,float y,float w=1,float h=1) {
     RECT r={int(14+x*28),int(y),int(14+(x+w)*28)-2,int(y+h*26)-2};
@@ -124,6 +154,8 @@ void add_key(HWND dlg,Editor& e,int vk,const wchar_t* label,float x,float y,floa
     HWND button=CreateWindowExW(0,L"BUTTON",label,WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
         r.left,r.top,r.right-r.left,r.bottom-r.top,dlg,(HMENU)(INT_PTR)(keyBase+vk),GetModuleHandleW(nullptr),nullptr);
     SendMessageW(button,WM_SETFONT,(WPARAM)e.keyFont,FALSE);
+    auto proc=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(button,GWLP_WNDPROC,(LONG_PTR)key_proc));
+    if(!e.buttonProc) e.buttonProc=proc;
     e.caps.push_back({vk,label,L"",button});
 }
 
@@ -163,27 +195,38 @@ void make_keyboard(HWND dlg,Editor& e) {
     }
     add(VK_ADD,L"+",22,112,1,2); add(VK_SEPARATOR,L"Enter",22,164,1,2);
     add(VK_NUMPAD0,L"0",19,190,2); add(VK_DECIMAL,L".",21,190);
+    PetKeyBindings defaults;defaults.fill(PET_KEY_DEFAULT);
+    e.defaults.fill(PET_KEY_NONE);
+    for(int vk=0;vk<256;++vk) if(pet_keyboard_editable(vk)) {
+        auto label=pet_keyboard_label(vk,false,&defaults);
+        if(label.size()==1 && label[0]>='a' && label[0]<='z') label[0]-=32;
+        for(int action=32;action<=PET_KEY_SHIFT;++action) if(pet_keyboard_valid_action(action)) {
+            auto name=pet_keyboard_action_name(action);
+            if(action==PET_KEY_TAB) name=L"TAB";
+            if(action==PET_KEY_ESCAPE) name=L"ESC";
+            if(name==label) {e.defaults[vk]=action;break;}
+        }
+    }
 }
 
 void refresh(HWND dlg,Editor& e) {
     for (auto& c:e.caps) {
+        c.custom=e.draft[c.vk]!=PET_KEY_DEFAULT;
         c.pet=pet_keyboard_editable(c.vk) ? pet_keyboard_label(c.vk,e.shift,&e.draft) : reserved_label(c.vk);
-        // Accessible button names include the PC key and full PET function.
-        auto name=c.pc+L": "+c.pet+(e.draft[c.vk]!=PET_KEY_DEFAULT ? L" (custom)" : L"");
+        if(e.capturing && c.vk==e.selected) c.pet=L"Press a key...";
+        auto name=c.pc+L": "+c.pet+(c.custom ? L" (custom)" : L"");
         SetWindowTextW(c.window,name.c_str());
         InvalidateRect(c.window,nullptr,TRUE);
     }
-    bool editable=pet_keyboard_editable(e.selected);
-    std::wstring pc,pet;
-    for (auto& c:e.caps) if(c.vk==e.selected) {pc=c.pc;pet=c.pet;break;}
-    auto description=pc+L"  ->  "+pet+(editable ? L"   |   Choose its PET assignment below." : L"   |   Reserved host/system key.");
+    auto description=e.capturing ? L"Press a key for the PET function to assign to "+physical_name(e.selected)+L". Escape cancels." : e.status;
+    if(description.empty()) description=L"Click a PC key above, then press the key whose PET function it should type.";
     SetDlgItemTextW(dlg,IDC_KBD_SELECTED,description.c_str());
-    EnableWindow(GetDlgItem(dlg,IDC_KBD_ASSIGN),editable);
-    EnableWindow(GetDlgItem(dlg,IDC_KBD_CLEAR),editable);
-    EnableWindow(GetDlgItem(dlg,IDC_KBD_KEY_DEFAULT),editable);
+    EnableWindow(GetDlgItem(dlg,IDC_KBD_CLEAR),pet_keyboard_editable(e.selected));
+    EnableWindow(GetDlgItem(dlg,IDC_KBD_KEY_DEFAULT),pet_keyboard_editable(e.selected));
     HWND combo=GetDlgItem(dlg,IDC_KBD_ASSIGN);
-    for (int i=0;i<SendMessageW(combo,CB_GETCOUNT,0,0);++i)
-        if (SendMessageW(combo,CB_GETITEMDATA,i,0)==e.draft[e.selected]) { SendMessageW(combo,CB_SETCURSEL,i,0); break; }
+    EnableWindow(combo,pet_keyboard_editable(e.selected));
+    for(int i=0;i<SendMessageW(combo,CB_GETCOUNT,0,0);++i)
+        if(SendMessageW(combo,CB_GETITEMDATA,i,0)==e.draft[e.selected]) {SendMessageW(combo,CB_SETCURSEL,i,0);break;}
     EnableWindow(GetDlgItem(dlg,IDC_KBD_APPLY),e.draft!=pet_keyboard_bindings());
 }
 
@@ -192,8 +235,8 @@ void draw_key(const DRAWITEMSTRUCT& d,Editor& e) {
     Keycap* cap=nullptr;
     for (auto& c:e.caps) if(c.vk==vk) {cap=&c;break;}
     if (!cap) return;
-    bool selected=vk==e.selected, custom=e.draft[vk]!=PET_KEY_DEFAULT, reserved=!pet_keyboard_editable(vk);
-    COLORREF bg=selected ? RGB(219,235,254) : custom ? RGB(225,244,231) : reserved ? RGB(231,233,236) : RGB(255,255,255);
+    bool selected=vk==e.selected, custom=cap->custom;
+    COLORREF bg=selected && e.capturing ? RGB(255,235,170) : selected ? RGB(219,235,254) : custom ? RGB(225,244,231) : !pet_keyboard_editable(vk) ? RGB(231,233,236) : RGB(255,255,255);
     COLORREF border=selected ? RGB(32,103,184) : RGB(186,193,201);
     HBRUSH brush=CreateSolidBrush(bg); HPEN pen=CreatePen(PS_SOLID,selected?2:1,border);
     auto oldBrush=SelectObject(d.hDC,brush); auto oldPen=SelectObject(d.hDC,pen);
@@ -207,7 +250,7 @@ void draw_key(const DRAWITEMSTRUCT& d,Editor& e) {
     DrawTextW(d.hDC,cap->pc.c_str(),-1,&top,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX|DT_END_ELLIPSIS);
     RECT bottom=d.rcItem;bottom.left+=2;bottom.right-=2;bottom.top=top.bottom;bottom.bottom-=3;
     SelectObject(d.hDC,e.labelFont);
-    SetTextColor(d.hDC,reserved ? RGB(103,109,119) : RGB(28,93,62));
+    SetTextColor(d.hDC,RGB(28,93,62));
     std::wstring text=cap->pet==L"Unassigned" ? L"--" : cap->pet;
     DrawTextW(d.hDC,text.c_str(),-1,&bottom,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX|DT_END_ELLIPSIS);
     SelectObject(d.hDC,font);
@@ -236,11 +279,11 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         auto title=get_pet_business_kbd() ? L"CBM 8032 business keyboard" : get_pet_graphics_mode() ? L"PET keyboard - graphics typing" : L"PET keyboard - business typing";
         SetDlgItemTextW(dlg,IDC_KBD_MODEL,title);
         HWND combo=GetDlgItem(dlg,IDC_KBD_ASSIGN);
-        for (int a=PET_KEY_DEFAULT;a<=PET_KEY_SHIFT;++a) if (pet_keyboard_valid_action(a)) {
-            auto name=pet_keyboard_action_name(a);
-            if (a=='_') name+=L" (8032)";
-            LRESULT index=SendMessageW(combo,CB_ADDSTRING,0,(LPARAM)name.c_str());
-            SendMessageW(combo,CB_SETITEMDATA,index,a);
+        for(int action=PET_KEY_DEFAULT;action<=PET_KEY_SHIFT;++action) if(pet_keyboard_valid_action(action)) {
+            auto name=pet_keyboard_action_name(action);
+            if(action=='_') name+=L" (8032)";
+            auto index=SendMessageW(combo,CB_ADDSTRING,0,(LPARAM)name.c_str());
+            SendMessageW(combo,CB_SETITEMDATA,index,action);
         }
         refresh(dlg,*e);
         capture_layout(dlg,*e);
@@ -252,6 +295,44 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
     }
     if(!e) return FALSE;
     switch(msg) {
+    case captureMessage: {
+        if(!e->capturing) return TRUE;
+        int vk=(int)wp;
+        if(vk==VK_ESCAPE) {
+            e->capturing=false;e->status=L"Assignment cancelled.";
+        } else {
+            // Match RawInput_ProcessInternal's physical numpad identities,
+            // including navigation VKs emitted with Num Lock off.
+            const bool extended=(lp & (1L<<24))!=0;
+            if(vk==VK_RETURN && extended) vk=VK_SEPARATOR;
+            if(!extended) switch(vk) {
+            case VK_INSERT: vk=VK_NUMPAD0;break;
+            case VK_DELETE: vk=VK_DECIMAL;break;
+            case VK_HOME: vk=VK_NUMPAD7;break;
+            case VK_END: vk=VK_NUMPAD1;break;
+            case VK_PRIOR: vk=VK_NUMPAD9;break;
+            case VK_NEXT: vk=VK_NUMPAD3;break;
+            case VK_LEFT: vk=VK_NUMPAD4;break;
+            case VK_RIGHT: vk=VK_NUMPAD6;break;
+            case VK_UP: vk=VK_NUMPAD8;break;
+            case VK_DOWN: vk=VK_NUMPAD2;break;
+            case VK_CLEAR: vk=VK_NUMPAD5;break;
+            }
+            if(!pet_keyboard_editable(vk) || (GetKeyState(VK_CONTROL)&0x8000) || (GetKeyState(VK_MENU)&0x8000)) {
+                refresh(dlg,*e);
+                SetDlgItemTextW(dlg,IDC_KBD_SELECTED,L"Reserved key or shortcut. Press another physical key; Escape cancels.");
+                return TRUE;
+            }
+            if(e->defaults[vk]==PET_KEY_NONE) {
+                SetDlgItemTextW(dlg,IDC_KBD_SELECTED,L"That key has no default PET function. Press another key; Escape cancels.");
+                return TRUE;
+            }
+            e->draft[e->selected]=e->defaults[vk];
+            e->capturing=false;
+            e->status=physical_name(e->selected)+L" -> PET "+pet_keyboard_action_name(e->defaults[vk])+L". Apply or OK saves changes.";
+        }
+        refresh(dlg,*e);return TRUE;
+    }
     case WM_SIZE:
         if(wp!=SIZE_MINIMIZED) layout_editor(dlg,*e);
         return TRUE;
@@ -281,18 +362,30 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(wp>=keyBase && wp<keyBase+256) {draw_key(*reinterpret_cast<DRAWITEMSTRUCT*>(lp),*e);return TRUE;} break;
     case WM_COMMAND: {
         int id=LOWORD(wp);
-        if(id>=keyBase && id<keyBase+256) {e->selected=id-keyBase;refresh(dlg,*e);return TRUE;}
+        if(id>=keyBase && id<keyBase+256 && HIWORD(wp)==BN_CLICKED) {
+            SetFocus(GetDlgItem(dlg,id));
+            e->selected=id-keyBase;e->capturing=pet_keyboard_editable(e->selected);
+            e->status=e->capturing ? L"" : physical_name(e->selected)+L" is reserved for host/system controls.";
+            refresh(dlg,*e);return TRUE;
+        }
         switch(id) {
         case IDC_KBD_SHIFT: e->shift=IsDlgButtonChecked(dlg,id)==BST_CHECKED;refresh(dlg,*e);return TRUE;
         case IDC_KBD_ASSIGN:
-            if(HIWORD(wp)==CBN_SELCHANGE) {
-                HWND combo=GetDlgItem(dlg,id);int index=(int)SendMessageW(combo,CB_GETCURSEL,0,0);
+            if(HIWORD(wp)==CBN_SELCHANGE && pet_keyboard_editable(e->selected)) {
+                HWND combo=GetDlgItem(dlg,id);
+                int index=(int)SendMessageW(combo,CB_GETCURSEL,0,0);
                 if(index!=CB_ERR) e->draft[e->selected]=(int)SendMessageW(combo,CB_GETITEMDATA,index,0);
+                e->capturing=false;e->status=L"Assignment updated. Apply or OK saves changes.";
                 refresh(dlg,*e);
-            } return TRUE;
-        case IDC_KBD_CLEAR: e->draft[e->selected]=PET_KEY_NONE;refresh(dlg,*e);return TRUE;
-        case IDC_KBD_KEY_DEFAULT: e->draft[e->selected]=PET_KEY_DEFAULT;refresh(dlg,*e);return TRUE;
-        case IDC_KBD_DEFAULTS: e->draft.fill(PET_KEY_DEFAULT);refresh(dlg,*e);return TRUE;
+            }
+            return TRUE;
+        case IDC_KBD_CLEAR:
+        case IDC_KBD_KEY_DEFAULT:
+            e->capturing=false;
+            if(pet_keyboard_editable(e->selected)) e->draft[e->selected]=id==IDC_KBD_CLEAR ? PET_KEY_NONE : PET_KEY_DEFAULT;
+            e->status=id==IDC_KBD_CLEAR ? L"Assignment cleared for the selected key." : L"Default assignment restored for the selected key.";
+            refresh(dlg,*e);return TRUE;
+        case IDC_KBD_DEFAULTS: e->capturing=false;e->status=L"Default assignments restored.";e->draft.fill(PET_KEY_DEFAULT);refresh(dlg,*e);return TRUE;
         case IDC_KBD_APPLY: apply(*e);refresh(dlg,*e);return TRUE;
         case IDOK: apply(*e);EndDialog(dlg,IDOK);return TRUE;
         case IDCANCEL: EndDialog(dlg,IDCANCEL);return TRUE;

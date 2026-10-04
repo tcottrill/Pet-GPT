@@ -273,13 +273,18 @@ in **Machine ▸ Graphics Keyboard**.
 
 Open **Machine ▸ Keyboard Mapping...** for a Windows-style keyboard diagram.
 The window fits the current monitor and can be resized or maximized; its keys,
-labels, and controls scale together. **Show Shift mappings** previews alternate
-functions for the current PET model and typing mode.
+labels, and controls scale together. PC key names appear on top, with their PET
+functions below. **Show Shift mappings** previews shifted functions.
 
-Click a key and choose its PET assignment, then **Apply** or **OK** to save it to
-`pet.ini`. **Cancel** discards changes made since the last Apply. You can clear an
-assignment, restore one key, or restore all defaults. Gray keys are reserved for
-host/system controls; Ctrl+O/E/R and Alt+Enter remain emulator shortcuts.
+Click the PC key you want to change: it turns yellow and waits for a keypress.
+Press the key whose default PET function you want—for example, click A and press B
+to make physical A type PET B. Only the clicked key changes, and its label updates
+immediately. Escape cancels capture. The assignment dropdown also remains available
+for selecting PET functions directly.
+Use **Apply** or **OK** to save to `pet.ini`; **Cancel** discards changes since the
+last Apply. You can clear a key's assignment, restore its default, or
+restore all defaults. Physical Shift remains a modifier; reserved host/system keys
+stay visible in gray and cannot be remapped. Ctrl+O/E/R and Alt+Enter remain emulator shortcuts.
 
 ### 🎮 Gamepad (SNES user-port adapter)
 
