@@ -15,7 +15,7 @@
   <strong>five PET/CBM models</strong> from the original 2001 to the 80-column 8032,
   <strong>.tap cassette playback</strong> and <strong>.t64</strong> loading, SNES&nbsp;user-port
   gamepad support, and a bug-fixed HLE IEEE-488 disk drive with <strong>.d64 and .d71</strong>
-  images. Now <strong>version&nbsp;2.6</strong>.
+  images. Now <strong>version&nbsp;2.7</strong>.
 </p>
 
 <p align="center">
@@ -74,6 +74,16 @@ a **bug-fixed HLE disk drive**.
 - **ROM sets reorganized** into one folder per model, with an updated `download-roms.ps1`
   that fetches all five (old set names still accepted).
 - A broad accuracy and robustness pass across the 6502, VIA, CRTC video and the disk drive.
+
+**Version 2.7** — *the one with the configurable keyboard* — makes the PC side yours:
+
+- **Keyboard mapping editor** — **Machine ▸ Keyboard Mapping...** shows a resizable keyboard
+  diagram; click a PC key, press the key whose PET function you want, and it's remapped
+  (saved to `pet.ini`). Shift-layer preview, per-key and full restore.
+- **Per-monitor DPI and multi-monitor** — sharp menus and dialogs on any scaling, DPI-aware
+  1×/2×/3× presets (presets too big for the monitor are grayed out), a **Fit** that fills
+  the work area at 4:3, and a choosable start monitor (`-monitor N` / `[video]
+  starting_monitor`).
 
 > ⚠️ **ROMs are not included.** Pet-GPT ships no Commodore ROM images. You must supply your
 > own legally-obtained PET BASIC / EDIT / KERNAL / character ROMs — a bundled script can fetch
@@ -392,8 +402,8 @@ Pet-GPT-2026/
 
 - **Tim Cottrill** ([@tcottrill](https://github.com/tcottrill)) — author, integrator, maintainer.
 - Built with AI pair-programming: **ChatGPT** (original 1.0) and **Claude** (the 2.0 rewrite
-  through 2.6 — VIA/PIA, sound, SNES, HLE disk, the PET/CBM models and CRTC, TAP/T64, the
-  CRT shader, and the host shell).
+  through 2.7 — VIA/PIA, sound, SNES, HLE disk, the PET/CBM models and CRTC, TAP/T64, the
+  CRT shader, the keyboard mapper, and the host shell).
 
 ## 🙏 Acknowledgements
 

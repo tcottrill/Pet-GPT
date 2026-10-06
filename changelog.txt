@@ -1,4 +1,55 @@
 Pet-GPT - Commodore PET/CBM Emulator
+Version 2.7 - The One with the configurable keyboard!
+=====================================================
+
+Configurable keyboard (NEW)
+- Machine > Keyboard Mapping... opens a Windows-style keyboard diagram. PC key
+  names are shown on top with their PET functions underneath. The window fits
+  the current monitor and can be resized or maximized; keys, labels and
+  controls scale together.
+- Remap by pressing a key: click the PC key you want to change (it turns
+  yellow), then press the key whose PET function you want. For example, click A
+  and press B to make the physical A key type PET B. Only the clicked key
+  changes, and Escape cancels. The assignment dropdown is still there for
+  picking a PET function directly.
+- Show Shift mappings previews the shifted functions for the current PET model
+  and typing mode.
+- Apply or OK saves the layout to pet.ini ([input] keyboard_bindings); Cancel
+  discards changes since the last Apply. Clear a key, restore one key, or
+  restore all defaults. Shift stays a modifier, reserved host/system keys stay
+  gray and cannot be remapped, and Ctrl+O/E/R and Alt+Enter remain emulator
+  shortcuts.
+
+Screen size, multi-monitor and DPI (NEW)
+- Per-monitor DPI awareness: the title bar, menus and dialogs stay sharp and
+  rescale when the window moves between monitors with different scaling, and
+  the window keeps its size when dragged across.
+- Scale presets are now DPI-aware logical sizes: 1x = 320x240, 2x = 640x480,
+  3x = 960x720 (so on a 4K monitor at 150% they are 480x360 / 960x720 /
+  1440x1080 pixels). Presets that don't fit the current monitor are grayed
+  out; on a smaller monitor the window steps down to the largest preset that
+  fits, and the chosen preset comes back when you move to a bigger one.
+- Fit now sizes the window to the largest 4:3 area that fits the monitor's
+  work area.
+- Choose the start monitor: pet.ini [video] starting_monitor (1 = primary,
+  2..N = the others left to right) or starting_monitor_id (a stable device id,
+  listed under "Monitor list" in petemu-log.txt), or -monitor N /
+  -monitorid <id> on the command line. Monitor numbering no longer changes
+  when the graphics driver re-enumerates displays.
+- Plugging or unplugging a display re-fits fullscreen and brings an
+  off-screen window back into view.
+
+Other
+- PetEmu.exe now carries version information (2.7.0.0). The first 2.6 build
+  lacked it and some antivirus heuristics flagged it.
+- New keyboard and keyboard-dialog tests. Run petemu\tests\run_tests.bat.
+
+Download: PetGPT_2.7_Release.zip contains PetEmu.exe, pet.ini, download-roms.ps1,
+the roms\ folder layout, and a couple of sample programs in files\. No Commodore
+ROMs are included; run download-roms.ps1 to fetch them. Upgrading from 2.6:
+keep your roms\ folder; your old pet.ini works as is.
+
+
 Version 2.6 - The one with the features!
 ========================================
 
