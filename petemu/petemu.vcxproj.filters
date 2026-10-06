@@ -183,6 +183,9 @@
     <ClInclude Include="system\host_window.h">
       <Filter>Source Files\system</Filter>
     </ClInclude>
+    <ClInclude Include="system\monitor_select.h">
+      <Filter>Source Files\system</Filter>
+    </ClInclude>
     <ClInclude Include="petsrc\mos6545.h">
       <Filter>Source Files\petsrc</Filter>
     </ClInclude>
@@ -288,6 +291,9 @@
       <Filter>Source Files\thirdparty</Filter>
     </ClCompile>
     <ClCompile Include="system\host_window.cpp">
+      <Filter>Source Files\system</Filter>
+    </ClCompile>
+    <ClCompile Include="system\monitor_select.cpp">
       <Filter>Source Files\system</Filter>
     </ClCompile>
     <ClCompile Include="system\host_view.cpp">

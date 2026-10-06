@@ -33,8 +33,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     HostApp app{};
     app.title       = L"Commodore PET";
     // 4:3 like the PET's CRT: the 320x200 raster fills the tube with ~1.2x
-    // tall pixels, so the 1x client is 640x480, not the framebuffer's 640x400
-    // (16:10, which read as widescreen-stretched in fullscreen).
+    // tall pixels, so the base is 640x480, not the framebuffer's 640x400
+    // (16:10, which read as widescreen-stretched in fullscreen). The base
+    // defines the 4:3 viewport aspect; the window scale presets are
+    // base*N/2 logical pixels (1x = 320x240, 2x = 640x480, 3x = 960x720).
     app.base_w      = 640;
     app.base_h      = 480;
     app.rom_filter  = L"PET software\0*.prg;*.t64;*.tap;*.d64;*.d71\0All Files\0*.*\0";

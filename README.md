@@ -250,6 +250,8 @@ PetEmu.exe [program] [options]
   -disk <file>          mount a .d64 / .d71, or prime a .prg from ./files
   -rom <file>           load a program/disk at startup
   -scale <1|2|3|fit>    initial window scale       -fullscreen | -window
+  -monitor <n>          start on monitor n (1 = primary; clears the ini id)
+  -monitorid <id>       start on the monitor with this stable device id
   -h                    help
 ```
 
@@ -349,6 +351,8 @@ Settings live in `pet.ini` next to the executable and are written back on exit:
 | `[input] graphics_kbd` | `0`/`1` | Shift+letter types PET graphics chars |
 | `[video] scale` | `0`=Fit, `1`/`2`/`3` | window scale preset |
 | `[video] fullscreen` | `0`/`1` | start fullscreen |
+| `[video] starting_monitor` | int (default `1`) | monitor to open on: `1` = primary, `2..N` = the others left-to-right |
+| `[video] starting_monitor_id` | string | stable monitor device id (copy it from the "Monitor list" lines in `petemu-log.txt`); wins over the number when that monitor is connected |
 | `[video] crt` | `0`/`1` | mono-monitor CRT shader |
 | `[video] crt_tint` | `0`/`1` | green phosphor (`1`) vs black & white (`0`) |
 | `[video] mono_blur_h` · `mono_blur_v` | float | horizontal / vertical softness |

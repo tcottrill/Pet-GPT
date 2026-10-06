@@ -26,7 +26,7 @@ static bool controls_fit(HWND dlg) {
 
 int main() {
     // Match the production host's per-monitor awareness mode.
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     Editor editor;
     HWND dlg=CreateDialogParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_KEYBOARD),nullptr,dialog_proc,(LPARAM)&editor);
     check("Native keyboard dialog created",dlg!=nullptr);

@@ -340,8 +340,12 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         MONITORINFO info{sizeof(info)};
         if(GetMonitorInfoW(MonitorFromWindow(dlg,MONITOR_DEFAULTTONEAREST),&info)) {
             auto* limits=reinterpret_cast<MINMAXINFO*>(lp);
-            limits->ptMinTrackSize.x=(std::min)(800L,info.rcWork.right-info.rcWork.left-32);
-            limits->ptMinTrackSize.y=(std::min)(440L,info.rcWork.bottom-info.rcWork.top-32);
+            // Minimum size is in 96-dpi units; scale it for the dialog's current DPI.
+            using GetDpi=UINT(WINAPI*)(HWND);
+            auto getDpi=reinterpret_cast<GetDpi>(GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow"));
+            UINT dpi=getDpi ? getDpi(dlg) : 96; if(!dpi) dpi=96;
+            limits->ptMinTrackSize.x=(std::min)((LONG)MulDiv(800,dpi,96),info.rcWork.right-info.rcWork.left-32);
+            limits->ptMinTrackSize.y=(std::min)((LONG)MulDiv(440,dpi,96),info.rcWork.bottom-info.rcWork.top-32);
         }
         return TRUE;
     }

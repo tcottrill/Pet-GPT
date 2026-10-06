@@ -39,6 +39,7 @@
 #include "path_helper.h"   // getpathU
 #include "iniFile.h"       // SetIniFile, get/set_config_*
 #include "utf8conv.h"      // win32::Utf16ToUtf8 / Utf8ToUtf16
+#include "monitor_select.h" // stable multi-monitor selection (vendored from shared/monitor_select)
 #include "sys_log.h"
 
 #pragma comment(lib, "winmm.lib")
@@ -76,6 +77,7 @@ static HostViewRect g_vp{ 0, 0, 0, 0 };
 static bool         g_fullscreen = false;
 static RECT         g_savedRect{};
 static DWORD        g_savedStyle = 0;
+static UINT         g_savedDpi = 96;        // window DPI when g_savedRect was captured
 static int          g_scale = 2;            // 1,2,3 = preset; 0 = Fit (free resize)
 static std::wstring g_lastRomDir;
 
@@ -105,23 +107,151 @@ static int HostDetectRefreshHz(HWND wnd)
     return hz;
 }
 
-// Enable per-monitor DPI awareness when available (Win10+); harmless otherwise.
+// Per-Monitor V2 awareness is declared in petemu.manifest (the recommended way).
+// This is only a fallback for an exe without that manifest: try V2, then V1.
+// Harmless (fails with ACCESS_DENIED) when the manifest already set it.
 static void HostEnableDpiAwareness()
 {
     HMODULE u32 = GetModuleHandleW(L"user32");
     if (!u32) return;
     typedef BOOL(WINAPI* PFN)(DPI_AWARENESS_CONTEXT);
     PFN p = (PFN)GetProcAddress(u32, "SetProcessDpiAwarenessContext");
-    if (p) p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+    if (!p) return;
+    if (!p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+        p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
 }
 
-// Tick the active scale preset in the Video menu (radio style).
+// ---- DPI helpers (Win10 1607+ APIs loaded dynamically; 96 dpi fallbacks) ----
+static UINT HostWindowDpi(HWND wnd)
+{
+    typedef UINT(WINAPI* PFN)(HWND);
+    static PFN p = (PFN)GetProcAddress(GetModuleHandleW(L"user32"), "GetDpiForWindow");
+    UINT dpi = (p && wnd) ? p(wnd) : 0;
+    return dpi ? dpi : 96;
+}
+
+// Effective DPI of a monitor (shcore GetDpiForMonitor, Win8.1+); 96 if unavailable.
+static UINT HostMonitorDpi(HMONITOR mon)
+{
+    typedef HRESULT(WINAPI* PFN)(HMONITOR, int, UINT*, UINT*);
+    static HMODULE sh = LoadLibraryW(L"shcore.dll");
+    static PFN p = sh ? (PFN)GetProcAddress(sh, "GetDpiForMonitor") : nullptr;
+    UINT dx = 0, dy = 0;
+    if (p && mon && SUCCEEDED(p(mon, 0 /*MDT_EFFECTIVE_DPI*/, &dx, &dy)) && dx) return dx;
+    return 96;
+}
+
+static void HostAdjustRectForDpi(RECT* rc, DWORD style, BOOL menu, DWORD exStyle, UINT dpi)
+{
+    typedef BOOL(WINAPI* PFN)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    static PFN p = (PFN)GetProcAddress(GetModuleHandleW(L"user32"), "AdjustWindowRectExForDpi");
+    if (p) p(rc, style, menu, exStyle, dpi);
+    else   AdjustWindowRectEx(rc, style, menu, exStyle);
+}
+
+// Title-bar (small) and Alt-Tab/taskbar (big) icons, each rasterized from the
+// best-matching size in the .ico at the given DPI rather than scaled.
+static void HostSetWindowIcons(HWND wnd, HINSTANCE inst, UINT dpi)
+{
+    typedef int(WINAPI* PFN)(int, UINT);
+    static PFN p = (PFN)GetProcAddress(GetModuleHandleW(L"user32"), "GetSystemMetricsForDpi");
+    auto metric = [&](int idx) { return p ? p(idx, dpi) : GetSystemMetrics(idx); };
+    if (HICON big = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                      metric(SM_CXICON), metric(SM_CYICON), 0))
+        if (HICON old = (HICON)SendMessageW(wnd, WM_SETICON, ICON_BIG, (LPARAM)big)) DestroyIcon(old);
+    if (HICON sm = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                     metric(SM_CXSMICON), metric(SM_CYSMICON), 0))
+        if (HICON old = (HICON)SendMessageW(wnd, WM_SETICON, ICON_SMALL, (LPARAM)sm)) DestroyIcon(old);
+}
+
+// Outer window size for scale preset n (1..3) at the given DPI: the client is
+// base*N/2 logical pixels (1x = 320x240 for a 640x480 base) converted to
+// physical pixels, plus frame and menu bar.
+static void HostPresetWindowSize(int n, DWORD style, DWORD exStyle, UINT dpi, int* ww, int* wh)
+{
+    RECT wr{ 0, 0, MulDiv(g_app.base_w * n, (int)dpi, 192), MulDiv(g_app.base_h * n, (int)dpi, 192) };
+    HostAdjustRectForDpi(&wr, style, TRUE /*has menu*/, exStyle, dpi);
+    *ww = wr.right - wr.left;
+    *wh = wr.bottom - wr.top;
+}
+
+// Does preset n fit inside work area wa at this DPI (frame and menu included)?
+static bool HostPresetFits(int n, const RECT& wa, DWORD style, DWORD exStyle, UINT dpi)
+{
+    int ww, wh;
+    HostPresetWindowSize(n, style, exStyle, dpi, &ww, &wh);
+    return ww <= wa.right - wa.left && wh <= wa.bottom - wa.top;
+}
+
+// The preset actually used: the largest one <= the chosen g_scale that fits wa
+// at this DPI; 0 (Fit) when g_scale is Fit or not even 1x fits.
+static int HostEffectiveScale(const RECT& wa, DWORD style, DWORD exStyle, UINT dpi)
+{
+    for (int n = (g_scale > 3 ? 3 : g_scale); n >= 1; --n)
+        if (HostPresetFits(n, wa, style, exStyle, dpi)) return n;
+    return 0;
+}
+
+// Largest window with the base 4:3 client aspect whose outer rect (frame and
+// menu included) fits wa at this DPI, centered in wa.
+static RECT HostFitWindowRect(const RECT& wa, DWORD style, DWORD exStyle, UINT dpi)
+{
+    RECT z{ 0, 0, 0, 0 };
+    HostAdjustRectForDpi(&z, style, TRUE /*has menu*/, exStyle, dpi);
+    const int extraW = z.right - z.left, extraH = z.bottom - z.top;
+    int availW = (wa.right - wa.left) - extraW;
+    int availH = (wa.bottom - wa.top) - extraH;
+    if (availW < 1) availW = 1;
+    if (availH < 1) availH = 1;
+    const int bw = g_app.base_w > 0 ? g_app.base_w : 640;
+    const int bh = g_app.base_h > 0 ? g_app.base_h : 480;
+    int cw = MulDiv(availH, bw, bh);
+    int ch = availH;
+    if (cw > availW) { cw = availW; ch = MulDiv(availW, bh, bw); }
+    const int ww = cw + extraW, wh = ch + extraH;
+    const int x = wa.left + ((wa.right - wa.left) - ww) / 2;
+    const int y = wa.top + ((wa.bottom - wa.top) - wh) / 2;
+    return RECT{ x, y, x + ww, y + wh };
+}
+
+// Style the window has (or will have again) while windowed.
+static DWORD HostWindowedStyle()
+{
+    return g_fullscreen ? g_savedStyle : (DWORD)GetWindowLongPtr(hWnd, GWL_STYLE);
+}
+
+// Tick the EFFECTIVE scale in the Video menu (radio style): Fit in fit mode or
+// when no preset fits the current monitor.
 static void HostUpdateScaleChecks()
 {
     if (!g_menu) return;
     UINT items[4] = { IDM_SCALE_FIT, IDM_SCALE_1X, IDM_SCALE_2X, IDM_SCALE_3X };
-    UINT active = (g_scale >= 1 && g_scale <= 3) ? items[g_scale] : IDM_SCALE_FIT;
-    CheckMenuRadioItem(g_menu, IDM_SCALE_1X, IDM_SCALE_FIT, active, MF_BYCOMMAND);
+    int eff = 0;
+    if (g_scale >= 1 && hWnd)
+        eff = HostEffectiveScale(monsel::FromWindow(hWnd).workRect, HostWindowedStyle(),
+                                 (DWORD)GetWindowLongPtr(hWnd, GWL_EXSTYLE), HostWindowDpi(hWnd));
+    CheckMenuRadioItem(g_menu, IDM_SCALE_1X, IDM_SCALE_FIT, items[eff], MF_BYCOMMAND);
+}
+
+// Grey the presets that do not fit the window's current monitor.
+static void HostUpdateScaleEnables(HMENU menu)
+{
+    if (!hWnd) return;
+    const RECT wa = monsel::FromWindow(hWnd).workRect;
+    const DWORD st = HostWindowedStyle(), ex = (DWORD)GetWindowLongPtr(hWnd, GWL_EXSTYLE);
+    const UINT dpi = HostWindowDpi(hWnd);
+    const UINT ids[3] = { IDM_SCALE_1X, IDM_SCALE_2X, IDM_SCALE_3X };
+    for (int n = 1; n <= 3; ++n)
+        EnableMenuItem(menu, ids[n - 1],
+                       MF_BYCOMMAND | (HostPresetFits(n, wa, st, ex, dpi) ? MF_ENABLED : MF_GRAYED));
+}
+
+static void HostLogScaleFallback(int eff)
+{
+    if (g_scale >= 1 && eff != g_scale) {
+        if (eff >= 1) LOG_INFO("scale %dx does not fit this monitor, using %dx", g_scale, eff);
+        else          LOG_INFO("scale %dx does not fit this monitor, using Fit", g_scale);
+    }
 }
 
 // ---- System ROM set (BASIC 2 / BASIC 4) ----
@@ -308,28 +438,46 @@ static void HostShowCrtSettings(HWND owner)
     if (g_dlgCrt) ShowWindow(g_dlgCrt, SW_SHOW);
     else LOG_ERROR("CRT settings dialog failed to create (err=%lu)", GetLastError());
 }
-// Resize the windowed client to base*N, clamped to the monitor work area.
+// Apply the user's chosen scale n (0 = Fit, 1..3 = preset; persisted at exit via
+// g_scale). The window uses the EFFECTIVE preset: the largest <= n that fits the
+// work area of the monitor it is on (preset = base*N/2 logical pixels, at that
+// monitor's DPI). If none fits, or n is Fit, the window is sized to the largest
+// base-aspect rectangle that fits and centered. A click is never ignored.
 static void HostApplyScale(int n)
 {
     g_scale = n;
     HostUpdateScaleChecks();
-    if (n < 1 || g_fullscreen) return; // Fit, or no-op while fullscreen
+    if (g_fullscreen) return; // applied when leaving fullscreen
 
-    int cw = g_app.base_w * n;
-    int ch = g_app.base_h * n;
+    // Work area of the monitor the window is on (not necessarily the primary).
+    const RECT wa = monsel::FromWindow(hWnd).workRect;
+    const DWORD st = (DWORD)GetWindowLongPtr(hWnd, GWL_STYLE);
+    const DWORD ex = (DWORD)GetWindowLongPtr(hWnd, GWL_EXSTYLE);
+    const UINT dpi = HostWindowDpi(hWnd);
+    const int eff = HostEffectiveScale(wa, st, ex, dpi);
+    HostLogScaleFallback(eff);
 
-    RECT wa{};
-    SystemParametersInfo(SPI_GETWORKAREA, 0, &wa, 0);
-    int maxw = wa.right - wa.left;
-    int maxh = wa.bottom - wa.top;
+    if (eff < 1) {
+        const RECT f = HostFitWindowRect(wa, st, ex, dpi);
+        SetWindowPos(hWnd, NULL, f.left, f.top, f.right - f.left, f.bottom - f.top, SWP_NOZORDER);
+        HostUpdateViewport();
+        return;
+    }
 
-    RECT wr{ 0, 0, cw, ch };
-    AdjustWindowRect(&wr, (DWORD)GetWindowLongPtr(hWnd, GWL_STYLE), TRUE);
-    int ww = wr.right - wr.left;
-    int wh = wr.bottom - wr.top;
-    if (ww > maxw || wh > maxh) return; // too big for this screen; keep current
+    int ww, wh;
+    HostPresetWindowSize(eff, st, ex, dpi, &ww, &wh);
 
-    SetWindowPos(hWnd, NULL, 0, 0, ww, wh, SWP_NOMOVE | SWP_NOZORDER);
+    // Keep the resized window inside the work area: shift it back if it would
+    // hang off the right/bottom edge (and never above/left of the work area).
+    RECT cur{};
+    GetWindowRect(hWnd, &cur);
+    int nx = cur.left, ny = cur.top;
+    if (nx + ww > wa.right)  nx = wa.right - ww;
+    if (ny + wh > wa.bottom) ny = wa.bottom - wh;
+    if (nx < wa.left) nx = wa.left;
+    if (ny < wa.top)  ny = wa.top;
+
+    SetWindowPos(hWnd, NULL, nx, ny, ww, wh, SWP_NOZORDER);
     HostUpdateViewport();
 }
 
@@ -338,6 +486,7 @@ static void HostToggleFullscreen()
 {
     if (!g_fullscreen) {
         GetWindowRect(hWnd, &g_savedRect);
+        g_savedDpi = HostWindowDpi(hWnd);
         g_savedStyle = (DWORD)GetWindowLongPtr(hWnd, GWL_STYLE);
 
         MONITORINFO mi{ sizeof(mi) };
@@ -352,14 +501,33 @@ static void HostToggleFullscreen()
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
         g_fullscreen = true;
     } else {
+        // Restore onto the monitor the fullscreen window is on NOW. Its DPI may
+        // differ from the one the rect was saved at (window was moved while
+        // fullscreen, or Windows scaling changed), so rescale the saved size;
+        // if the saved spot is on another monitor, center in this work area.
+        const monsel::MonitorDesc mon = monsel::FromWindow(hWnd);
+        const UINT dpiNow = HostMonitorDpi(mon.handle);
+        int rw = MulDiv(g_savedRect.right - g_savedRect.left, (int)dpiNow, (int)g_savedDpi);
+        int rh = MulDiv(g_savedRect.bottom - g_savedRect.top, (int)dpiNow, (int)g_savedDpi);
+        RECT r;
+        if (MonitorFromRect(&g_savedRect, MONITOR_DEFAULTTONEAREST) == mon.handle) {
+            r = { g_savedRect.left, g_savedRect.top, g_savedRect.left + rw, g_savedRect.top + rh };
+            // keep the (possibly larger) rect inside the work area
+            if (r.right  > mon.workRect.right)  OffsetRect(&r, mon.workRect.right  - r.right, 0);
+            if (r.bottom > mon.workRect.bottom) OffsetRect(&r, 0, mon.workRect.bottom - r.bottom);
+            if (r.left < mon.workRect.left) OffsetRect(&r, mon.workRect.left - r.left, 0);
+            if (r.top  < mon.workRect.top)  OffsetRect(&r, 0, mon.workRect.top - r.top);
+        } else {
+            r = monsel::CenterInWorkArea(rw, rh, mon);
+        }
+        // Clear the flag first: the move below may raise WM_DPICHANGED, which
+        // must take the windowed path, not re-fit fullscreen.
+        g_fullscreen = false;
         SetWindowLongPtr(hWnd, GWL_STYLE, g_savedStyle);
         SetMenu(hWnd, g_menu);
         SetWindowPos(hWnd, HWND_NOTOPMOST,
-                     g_savedRect.left, g_savedRect.top,
-                     g_savedRect.right - g_savedRect.left,
-                     g_savedRect.bottom - g_savedRect.top,
+                     r.left, r.top, r.right - r.left, r.bottom - r.top,
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        g_fullscreen = false;
 
         // A scale preset picked WHILE fullscreen updated g_scale/menu/ini but
         // couldn't resize; apply it now so the restored window matches what
@@ -375,6 +543,9 @@ struct HostCmdLine {
     std::string rom;          // -rom <path|name>, or a bare non-option token
     int  fullscreen = -1;     // -fullscreen=1 / -window=0   (-1 = unset)
     int  scale      = -1;     // -scale: 0=fit, 1/2/3        (-1 = unset)
+    int  monitor    = -1;     // -monitor N: 1 = primary, 2.. by position (-1 = unset)
+    std::string monitorId;    // -monitorid <id>: stable device id (wins over the number)
+    bool monitorIdSet = false;
     bool help       = false;
 };
 static HostCmdLine g_cmd;
@@ -387,7 +558,7 @@ static std::string HostLowerA(const char* s)
 }
 
 // Front-end-friendly command line:  petemu [options] [romfile]
-//   -rom <file>  -fullscreen  -window  -scale <1|2|3|fit>  -h
+//   -rom <file>  -fullscreen  -window  -scale <1|2|3|fit>  -monitor <n>  -monitorid <id>  -h
 // A bare (non-dashed) token is taken as the ROM. Applied in host_run AFTER the
 // ini is read, so anything here overrides the saved setting.
 static void HostParseCommandLine(int argc, char** argv)
@@ -402,6 +573,16 @@ static void HostParseCommandLine(int argc, char** argv)
             std::string v = HostLowerA(argv[++i]);
             g_cmd.scale = (v == "fit") ? 0 : atoi(v.c_str());
             if (g_cmd.scale < 0 || g_cmd.scale > 3) g_cmd.scale = 0;   // out of range -> fit
+        }
+        else if (a == "-monitor" && i + 1 < argc) {
+            g_cmd.monitor = atoi(argv[++i]);
+            if (g_cmd.monitor <= 0) g_cmd.monitor = 1;   // 0/negative/garbage -> primary
+            g_cmd.monitorIdSet = false;                  // an explicit number clears the id
+            g_cmd.monitorId.clear();
+        }
+        else if (a == "-monitorid" && i + 1 < argc) {
+            g_cmd.monitorId = argv[++i];                 // keep original case (ids are matched case-insensitively)
+            g_cmd.monitorIdSet = true;
         }
         else if (a == "-h" || a == "-help" || a == "--help" || a == "-?" || a == "/?")
             g_cmd.help = true;
@@ -418,6 +599,8 @@ static void HostShowUsage()
         L"  -fullscreen       Start in fullscreen\n"
         L"  -window           Start in a window\n"
         L"  -scale <n>        Window scale: 1, 2, 3, or fit\n"
+        L"  -monitor <n>      Start on monitor n (1 = primary)\n"
+        L"  -monitorid <id>   Start on the monitor with this device id (see the log)\n"
         L"  -h                Show this help\n\n"
         L"Command-line options override the matching settings saved in the ini.",
         L"petemu", MB_OK | MB_ICONINFORMATION);
@@ -624,6 +807,8 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
         return DefWindowProc(wnd, msg, wParam, lParam);
 
     case WM_INITMENUPOPUP:
+        HostUpdateScaleEnables((HMENU)wParam);
+        HostUpdateScaleChecks();
         if (g_app.tape_state) {
             const int state = g_app.tape_state();
             const HMENU menu = (HMENU)wParam;
@@ -656,6 +841,103 @@ static LRESULT CALLBACK HostWndProc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lP
     case WM_SIZE:
         HostUpdateViewport();
         return 0;
+
+    case WM_GETDPISCALEDSIZE: {
+        // Scale preset: tell Windows the outer size of the chosen preset for the
+        // new DPI so the drag preview matches. The destination monitor is not
+        // known here, so this ignores whether it fits; WM_DPICHANGED then steps
+        // down to the effective preset for the monitor the window landed on.
+        if (g_fullscreen || g_scale < 1) return FALSE; // default scaling
+        SIZE* sz = (SIZE*)lParam;
+        int ww, wh;
+        HostPresetWindowSize(g_scale > 3 ? 3 : g_scale, (DWORD)GetWindowLongPtr(wnd, GWL_STYLE),
+                             (DWORD)GetWindowLongPtr(wnd, GWL_EXSTYLE), (UINT)wParam, &ww, &wh);
+        sz->cx = ww;
+        sz->cy = wh;
+        return TRUE; }
+
+    case WM_DPICHANGED: {
+        // Window moved to a monitor with different scaling (or the scale changed).
+        const UINT newDpi = LOWORD(wParam);
+        const RECT* sug = (const RECT*)lParam;   // Windows' suggested rect for the new DPI
+        LOG_INFO("WM_DPICHANGED: dpi=%u suggested (%ld,%ld)-(%ld,%ld)", newDpi,
+                 sug->left, sug->top, sug->right, sug->bottom);
+        if (g_fullscreen) {
+            const RECT r = monsel::FromWindow(wnd).monitorRect;
+            SetWindowPos(wnd, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        } else {
+            RECT r = *sug;
+            const DWORD st = (DWORD)GetWindowLongPtr(wnd, GWL_STYLE);
+            const DWORD ex = (DWORD)GetWindowLongPtr(wnd, GWL_EXSTYLE);
+            MONITORINFO mi{ sizeof(mi) };
+            if (GetMonitorInfo(MonitorFromRect(sug, MONITOR_DEFAULTTONEAREST), &mi)) {
+                const RECT& wa = mi.rcWork;
+                const int eff = (g_scale >= 1) ? HostEffectiveScale(wa, st, ex, newDpi) : 0;
+                if (g_scale >= 1) HostLogScaleFallback(eff);
+                int ww = sug->right - sug->left, wh = sug->bottom - sug->top;
+                bool place = false;
+                if (eff >= 1) {
+                    // Preset: exact size for the new DPI and monitor.
+                    HostPresetWindowSize(eff, st, ex, newDpi, &ww, &wh);
+                    place = true;
+                } else if (ww > wa.right - wa.left || wh > wa.bottom - wa.top) {
+                    // Fit mode (or no preset fits) and Windows' rect is too big
+                    // for this monitor: shrink to the Fit rect.
+                    r = HostFitWindowRect(wa, st, ex, newDpi);
+                } else {
+                    place = true; // Fit mode: keep the suggested size
+                }
+                if (place) {
+                    // Suggested top-left, clamped into the work area.
+                    int nx = sug->left, ny = sug->top;
+                    if (nx + ww > wa.right)  nx = wa.right - ww;
+                    if (ny + wh > wa.bottom) ny = wa.bottom - wh;
+                    if (nx < wa.left) nx = wa.left;
+                    if (ny < wa.top)  ny = wa.top;
+                    r = { nx, ny, nx + ww, ny + wh };
+                }
+            }
+            SetWindowPos(wnd, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        HostSetWindowIcons(wnd, (HINSTANCE)GetWindowLongPtr(wnd, GWLP_HINSTANCE), newDpi);
+        HostUpdateViewport();
+        HostUpdateScaleChecks();
+        return 0; }
+
+    case WM_DISPLAYCHANGE: {
+        // Monitors were added/removed/re-arranged or a mode changed. Keep the
+        // window on screen.
+        RECT cur{};
+        if (!GetWindowRect(wnd, &cur)) return 0;
+
+        if (g_fullscreen) {
+            const RECT r = monsel::FromWindow(wnd).monitorRect;
+            if (r.left != cur.left || r.top != cur.top || r.right != cur.right || r.bottom != cur.bottom) {
+                LOG_INFO("WM_DISPLAYCHANGE: re-fitting fullscreen to (%ld,%ld)-(%ld,%ld)",
+                         r.left, r.top, r.right, r.bottom);
+                SetWindowPos(wnd, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+                HostUpdateViewport();
+            }
+            // The windowed rect we restore to may now be off-screen.
+            if (!monsel::IsRectVisible(g_savedRect)) {
+                const RECT s = monsel::CenterInWorkArea(g_savedRect.right - g_savedRect.left,
+                                                        g_savedRect.bottom - g_savedRect.top,
+                                                        monsel::Primary());
+                LOG_INFO("WM_DISPLAYCHANGE: saved windowed rect off-screen, recentered on primary at (%ld,%ld)",
+                         s.left, s.top);
+                g_savedRect = s;
+            }
+        } else if (!monsel::IsRectVisible(cur)) {
+            const RECT r = monsel::CenterInWorkArea(cur.right - cur.left, cur.bottom - cur.top, monsel::Primary());
+            LOG_INFO("WM_DISPLAYCHANGE: window no longer visible, moving to primary monitor at (%ld,%ld)",
+                     r.left, r.top);
+            SetWindowPos(wnd, NULL, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 0;
+    }
 
     case WM_ERASEBKGND:
         return 1; // GL clears every frame; skip GDI erase to avoid flicker.
@@ -717,13 +999,59 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
 
     g_menu = LoadMenuW(hInstance, MAKEINTRESOURCEW(IDR_HOST_MENU));
 
-    RECT wr{ 0, 0, app->base_w * 2, app->base_h * 2 }; // initial 2x; adjusted below
     const DWORD style = WS_OVERLAPPEDWINDOW;
-    AdjustWindowRect(&wr, style, TRUE); // TRUE: window has a menu
-    const int ww = wr.right - wr.left;
-    const int wh = wr.bottom - wr.top;
-    const int px = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2;
-    const int py = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
+
+    // Pick the starting monitor: command line wins over ini. Numbering and the
+    // stable device id come from the shared monitor_select module (see its README).
+    int startMonitor = (g_cmd.monitor > 0) ? g_cmd.monitor : get_config_int("video", "starting_monitor", 1);
+    if (startMonitor <= 0) startMonitor = 1;
+    std::string startMonitorId;
+    if (g_cmd.monitor > 0)            startMonitorId.clear();   // explicit number beats the ini id
+    else if (g_cmd.monitorIdSet)      startMonitorId = g_cmd.monitorId;
+    else                              startMonitorId = get_config_string(std::string("video"), std::string("starting_monitor_id"), std::string());
+
+    // Log every monitor once so the user can copy a device id into the ini.
+    {
+        std::string list = monsel::DescribeAll();
+        size_t pos = 0;
+        while (pos < list.size()) {
+            size_t nl = list.find('\n', pos);
+            if (nl == std::string::npos) nl = list.size();
+            LOG_INFO("Monitor list: %s", list.substr(pos, nl - pos).c_str());
+            pos = nl + 1;
+        }
+    }
+    std::string monReason;
+    const monsel::MonitorDesc startMon = monsel::Select(startMonitor, startMonitorId, &monReason);
+    LOG_INFO("Starting monitor %d selected: (%ld,%ld)-(%ld,%ld) name=\"%s\" id=%s (%s)",
+             startMon.number,
+             startMon.monitorRect.left, startMon.monitorRect.top,
+             startMon.monitorRect.right, startMon.monitorRect.bottom,
+             startMon.friendlyName.c_str(), startMon.deviceId.c_str(), monReason.c_str());
+
+    // Initial size: the effective preset (largest <= the chosen scale that fits)
+    // for the start monitor, or its Fit rect, in physical pixels at that
+    // monitor's DPI (the window does not exist yet, so ask the monitor);
+    // HostApplyScale refines it.
+    g_scale = (g_cmd.scale >= 0) ? g_cmd.scale : get_config_int("video", "scale", 2);
+    if (g_scale < 0 || g_scale > 3) g_scale = 2;
+    const UINT startDpi = HostMonitorDpi(startMon.handle);
+    const int startEff = HostEffectiveScale(startMon.workRect, style, 0, startDpi);
+    int ww, wh;
+    RECT startRect;
+    if (startEff >= 1) {
+        HostPresetWindowSize(startEff, style, 0, startDpi, &ww, &wh);
+        startRect = monsel::CenterInWorkArea(ww, wh, startMon);
+    } else {
+        startRect = HostFitWindowRect(startMon.workRect, style, 0, startDpi);
+        ww = startRect.right - startRect.left;
+        wh = startRect.bottom - startRect.top;
+    }
+    LOG_INFO("Start monitor DPI %u, scale %d (effective %s%d), initial window %dx%d", startDpi, g_scale,
+             startEff >= 1 ? "" : "Fit/", startEff, ww, wh);
+    HostLogScaleFallback(startEff);
+    const int px = startRect.left;
+    const int py = startRect.top;
 
     hWnd = CreateWindowW(L"EmulatorHost", app->title, style,
                          px, py, ww, wh, NULL, g_menu, hInstance, NULL);
@@ -734,13 +1062,7 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
 
     // Set the title-bar (small) and Alt-Tab/taskbar (big) icons explicitly so each
     // is rasterized from the best-matching size in the .ico rather than scaled.
-    if (HICON big = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APPICON),
-                                      IMAGE_ICON, 0, 0, LR_DEFAULTSIZE))
-        SendMessageW(hWnd, WM_SETICON, ICON_BIG, (LPARAM)big);
-    if (HICON sm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APPICON),
-                                     IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
-                                     GetSystemMetrics(SM_CYSMICON), 0))
-        SendMessageW(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)sm);
+    HostSetWindowIcons(hWnd, hInstance, HostWindowDpi(hWnd));
 
     ShowWindow(hWnd, nCmdShow);
     DragAcceptFiles(hWnd, TRUE);   // accept dropped program/disk files
@@ -760,7 +1082,6 @@ int host_run(HINSTANCE hInstance, int nCmdShow, const HostApp* app)
     HostUpdateViewport();
 
     // Restore persisted view settings.
-    g_scale = (g_cmd.scale >= 0) ? g_cmd.scale : get_config_int("video", "scale", 2);
     {
         char* dir = get_config_string("paths", "lastromdir", "");
         if (dir) { g_lastRomDir = win32::Utf8ToUtf16(dir); free(dir); }
