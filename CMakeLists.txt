@@ -69,7 +69,9 @@ if(PET_BUILD_GUI)
   endif()
   target_link_libraries(pet_support PUBLIC pet_core wx::core wx::base)
   add_library(pet_glew STATIC petemu/thirdparty/glew.c)
-  target_compile_definitions(pet_glew PUBLIC GLEW_STATIC)
+  # GLEW_NO_GLU: Pet-GPT calls no GLU function, and the Freedesktop runtime the
+  # Flatpak builds against ships no GL/glu.h, which glew.h includes otherwise.
+  target_compile_definitions(pet_glew PUBLIC GLEW_STATIC GLEW_NO_GLU)
   target_include_directories(pet_glew PUBLIC petemu/thirdparty)
   target_link_libraries(pet_glew PUBLIC OpenGL::GL)
   if(NOT WIN32)

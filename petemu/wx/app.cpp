@@ -586,6 +586,11 @@ public:
         // backend choice while preferring native Wayland in Wayland sessions.
         if (!std::getenv("GDK_BACKEND") && std::getenv("WAYLAND_DISPLAY"))
             ::setenv("GDK_BACKEND", "wayland,x11", 0);
+        // Inside a Flatpak, name the program after the app ID so the Wayland
+        // app_id / X11 WM_CLASS match the installed .desktop file and the
+        // taskbar shows the Pet-GPT icon instead of a generic one.
+        if (const char* flatpakId = std::getenv("FLATPAK_ID"); flatpakId && *flatpakId)
+            g_set_prgname(flatpakId);
 #endif
     }
     bool OnInit() override {

@@ -158,6 +158,28 @@ CMake provides the executable and Linux desktop integration:
 cmake --install build/linux --prefix "$HOME/.local"
 ```
 
+### Flatpak
+
+`tools/package-flatpak.sh` builds Pet-GPT inside `org.freedesktop.Sdk//24.08` and
+writes a single-file bundle to `dist/linux/` (ignored by git). Building in the SDK
+makes the binary depend only on the runtime, so it runs on SteamOS whatever glibc
+the build machine has.
+
+```sh
+PET_WX_SOURCE=/path/to/wxWidgets bash tools/package-flatpak.sh            # no ROMs
+PET_WX_SOURCE=/path/to/wxWidgets bash tools/package-flatpak.sh --testing  # + local ROMs
+flatpak install --user dist/linux/Pet-GPT-testing-x86_64.flatpak
+flatpak run io.github.tcottrill.Pet-GPT//testing
+```
+
+The `--testing` bundle includes your local ROM sets (default `x64/Release/roms`) for
+your own machines; never publish it. Inside the sandbox settings live in
+`~/.var/app/io.github.tcottrill.Pet-GPT/data/pet-gpt` and user content in
+`~/Pet-GPT`; ROMs there take precedence over bundled ones. The permissions follow
+AAE's manifest (Wayland and X11 for gamescope, DRI, PipeWire/pulse, `--device=all`
+for gamepads, `~/Pet-GPT:create`, read-only home and `/run/media` for loading).
+Icons are generated from `petemu/petemu.ico` with `tools/make-linux-icons.py`.
+
 For Windows, use `cmake --install build/windows --config Release --prefix <directory>`.
 ROMs and user disks must be supplied separately. Installation into system directories
 may require administrator privileges; a user prefix avoids that requirement.

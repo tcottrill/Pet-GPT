@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Pet-GPT
+Comment=Commodore PET and CBM emulator
+Exec=pet-gpt %f
+Icon=io.github.tcottrill.Pet-GPT
+Terminal=false
+Categories=Game;Emulator;
+Keywords=Commodore;PET;CBM;8032;6502;BASIC;
+StartupNotify=true

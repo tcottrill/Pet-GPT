@@ -35,6 +35,8 @@ files/
 # Local source snapshots (not published)
 backups/
 build/
+# Packaged releases (tools/package-flatpak.sh). A testing bundle contains ROMs.
+dist/
 *.legacy
 *.sdl-discarded
 

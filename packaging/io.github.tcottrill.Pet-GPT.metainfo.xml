@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tcottrill.Pet-GPT</id>
+
+  <name>Pet-GPT</name>
+  <summary>Commodore PET and CBM emulator</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <developer id="io.github.tcottrill">
+    <name>Tim Cottrill</name>
+  </developer>
+
+  <description>
+    <p>
+      Pet-GPT emulates five Commodore PET and CBM models - the original PET 2001,
+      the 2001N/3000, the 4000 with 9-inch and 12-inch screens, and the 80-column
+      CBM 8032 - with tape and disk images, CB2 sound, SNES user-port gamepads and
+      an OpenGL CRT monitor look.
+    </p>
+    <p>
+      Pet-GPT ships no ROMs. Put your own PET ROM sets, programs and disk images in
+      the Pet-GPT folder in your home directory, which is created the first time
+      Pet-GPT runs: ~/Pet-GPT/roms (one folder per model), ~/Pet-GPT/files (the
+      emulated drive 8) and ~/Pet-GPT/screenshots. On SteamOS that is
+      /home/deck/Pet-GPT. Settings are kept separately, so resetting them never
+      touches anything there.
+    </p>
+  </description>
+
+  <url type="homepage">https://github.com/tcottrill/Pet-GPT</url>
+  <url type="bugtracker">https://github.com/tcottrill/Pet-GPT/issues</url>
+
+  <launchable type="desktop-id">io.github.tcottrill.Pet-GPT.desktop</launchable>
+
+  <categories>
+    <category>Game</category>
+    <category>Emulator</category>
+  </categories>
+
+  <supports>
+    <control>keyboard</control>
+    <control>gamepad</control>
+    <control>pointing</control>
+  </supports>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="2.7" date="2026-11-08">
+      <description>
+        <p>Pause and PNG screenshots, stable monitor selection on Windows, a
+        visible ~/Pet-GPT folder on Linux, AltGr typing on international
+        keyboards, and smoother sound after a hitch.</p>
+      </description>
+    </release>
+  </releases>
+</component>

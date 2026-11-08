@@ -129,7 +129,11 @@ void initialize_paths(const std::string& executable) {
             layout.config = config;
             layout.user = user;
             fs::create_directories(layout.config, ec);
-            pet_paths::migrate_legacy(legacyUser, layout, &report);
+            // A Flatpak sees the host's ~/.Pet-GPT read-only at most, so it
+            // could only fail to move it on every start; a native build of
+            // Pet-GPT does that move itself.
+            if (environment("FLATPAK_ID").empty())
+                pet_paths::migrate_legacy(legacyUser, layout, &report);
             fs::create_directories(layout.user / "roms", ec);
             write_user_readme(layout.user, layout.config);
         }
