@@ -13,6 +13,7 @@ namespace {
 std::mutex mutex;
 std::condition_variable changed;
 std::vector<int16_t> captured;
+std::vector<int16_t> history; // first left sample of every submission
 unsigned submissions=0, flushes=0;
 class MemoryBackend final: public IAudioBackend {
     std::array<uint8_t,4096> pcm{};
@@ -24,7 +25,8 @@ public:
     bool Submit(uint8_t* data,uint32_t bytes) override {
         std::lock_guard<std::mutex> lock(mutex);
         auto* first=reinterpret_cast<int16_t*>(data);
-        captured.assign(first,first+bytes/2); ++submissions; changed.notify_one(); return true;
+        captured.assign(first,first+bytes/2); if(bytes) history.push_back(first[0]);
+        ++submissions; changed.notify_one(); return true;
     }
     void FlushStream() override { std::lock_guard<std::mutex> lock(mutex); captured.clear(); ++flushes; }
     void SetMasterVolume(float x) override { volume=x; }
@@ -65,6 +67,29 @@ int main() {
     for(auto s:out) CHECK(s==0);
     restore_audio(); out=mix(); for(auto s:out) CHECK(s==0);
     stream_update(1,source.data()); out=mix(); CHECK(out[0]==1000);
+    // A catch-up burst: several frames produced before the audio thread runs.
+    // Each mix must play its own frame, in order, not the newest one repeatedly.
+    {
+        std::unique_lock<std::mutex> lock(mutex); history.clear(); const auto before=submissions; lock.unlock();
+        const int16_t levels[]={100,200,300};
+        for(int16_t level:levels) { std::vector<int16_t> frame(735,level); stream_update(1,frame.data()); mixer_update(); }
+        lock.lock();
+        CHECK(changed.wait_for(lock,std::chrono::seconds(2),[&]{return submissions>=before+3;}));
+        CHECK(history.size()==3 && history[0]==100 && history[1]==200 && history[2]==300);
+    }
+    // Several frames per mixer_update (uncapped mode services audio at ~60 Hz):
+    // the newest frame plays and the older ones are dropped, with no backlog.
+    {
+        std::unique_lock<std::mutex> lock(mutex); history.clear(); const auto before=submissions; lock.unlock();
+        for(int16_t level=400;level<=800;level+=100) { std::vector<int16_t> frame(735,level); stream_update(1,frame.data()); }
+        mixer_update();
+        lock.lock();
+        CHECK(changed.wait_for(lock,std::chrono::seconds(2),[&]{return submissions>=before+1;}));
+        lock.unlock();
+        out=mix();   // no new frame: the channel keeps its current buffer
+        lock.lock();
+        CHECK(history.size()==2 && history[0]==800 && history[1]==800);
+    }
     stream_stop(1,1); mixer_end(); mixer_end();
     std::puts("Mixer native-rate/flush/pause tests passed");
 }

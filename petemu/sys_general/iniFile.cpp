@@ -1,4 +1,4 @@
-// New code update 6/17/2025
+// New code update 7/17/2026
 // Updated 6/22/2025 for secure functions and bugfixes
 // Removed dependency on legacy Windows functions. 
 // Added string functions for other uses. 
@@ -33,6 +33,7 @@ For more information, please refer to < https://unlicense.org/>
 
 
 #include "iniFile.h"
+#include "sys_log.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -42,9 +43,14 @@ For more information, please refer to < https://unlicense.org/>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
-
 #include <filesystem>
+#include <system_error>
+
+// Pet-GPT: the path is UTF-8 and has no length limit. It is opened through
+// std::filesystem::u8path so non-ASCII install folders work on Windows, where
+// narrow fstream/remove/rename paths use the ANSI code page instead.
 static std::string m_szFileName;
+static std::filesystem::path ini_path(const std::string& utf8) { return std::filesystem::u8path(utf8); }
 
 struct IniEntry {
     std::string key;
@@ -56,14 +62,20 @@ struct IniEntry {
 static std::map<std::string, std::vector<IniEntry>> ini_data;
 
 static std::string trim(const std::string& s) {
-    size_t start = s.find_first_not_of("");
-    size_t end = s.find_last_not_of("");
+    // NOTE: this used find_first_not_of("") -- an EMPTY charset -- making it
+    // a no-op. On CRLF files the trailing \r then survived into every line,
+    // so "[section]\r" never matched the [..] test and whole sections were
+    // silently unparsed (reads fell back to defaults, and saves appended
+    // duplicate keys instead of updating). Trim real whitespace.
+    const char* ws = " \t\r\n";
+    size_t start = s.find_first_not_of(ws);
+    size_t end = s.find_last_not_of(ws);
     return (start == std::string::npos) ? "" : s.substr(start, end - start + 1);
 }
 
 void LoadIniFile() {
     ini_data.clear();
-    std::ifstream file(std::filesystem::u8path(m_szFileName));
+    std::ifstream file(ini_path(m_szFileName));
     if (!file.is_open()) return;
 
     std::string line, section;
@@ -80,34 +92,44 @@ void LoadIniFile() {
                 std::string key = line.substr(0, eq);
                 std::string value = line.substr(eq + 1);
 
-                // Trim both
-                key.erase(0, key.find_first_not_of(" \t"));
-                key.erase(key.find_last_not_of(" \t") + 1);
-                value.erase(0, value.find_first_not_of(" \t"));
+                // Trim both (include \r so CRLF files parse identically)
+                key.erase(0, key.find_first_not_of(" \t\r\n"));
+                key.erase(key.find_last_not_of(" \t\r\n") + 1);
+                value.erase(0, value.find_first_not_of(" \t\r\n"));
+                value.erase(value.find_last_not_of(" \t\r\n") + 1);
 
-                // Physical monitor paths contain embedded '#'. Only a hash
-                // at the start or following whitespace introduces a comment;
-                // retain the existing semicolon comment convention.
-                size_t comment_pos = std::string::npos;
-                for (size_t i = 0; i < value.size(); ++i) {
-                    if (value[i] == ';' || (value[i] == '#' &&
-                        (i == 0 || value[i - 1] == ' ' || value[i - 1] == '\t'))) {
-                        comment_pos = i;
-                        break;
-                    }
-                }
-                if (comment_pos != std::string::npos)
-                    value = value.substr(0, comment_pos);
-
-                // Final trim after comment removal
-                value.erase(value.find_last_not_of(" \t") + 1);
-
-                // Reject key or value if they contain spaces
-                if (key.find(' ') != std::string::npos || value.find(' ') != std::string::npos) {
+                // NOTE (2026-07-17): inline comment stripping REMOVED.
+                // Comments are FULL-LINE only (';' or '#' at line start).
+                // Both characters are legal in Windows paths and in device
+                // identity strings; stripping them here silently corrupted
+                // values on every reload (device-path assignments came back
+                // truncated as "\\?\HID" and never matched again). Numeric
+                // values carrying a legacy inline comment still parse fine:
+                // atoi/atof stop at the first non-numeric character.
+                //
+                // Values MAY contain spaces (Windows paths do). Keys must
+                // not -- a key with spaces is ambiguous and unreadable.
+                if (key.empty() || key.find(' ') != std::string::npos) {
                     ini_data[section].push_back({ "", "", line, true }); // treat as invalid
                 }
                 else {
-                    ini_data[section].push_back({ key, value, line, false });
+                    // Duplicate keys within a section: LAST occurrence wins
+                    // (standard ini semantics). This also self-heals files
+                    // that accumulated duplicate blocks while the CRLF bug
+                    // above kept appending instead of updating -- the stale
+                    // first copy is dropped, the user's latest value is kept,
+                    // and the next save writes the section back clean.
+                    bool updated = false;
+                    for (auto& entry : ini_data[section]) {
+                        if (!entry.is_comment && entry.key == key) {
+                            entry.value = value;
+                            entry.original_line = key + "=" + value;
+                            updated = true;
+                            break;
+                        }
+                    }
+                    if (!updated)
+                        ini_data[section].push_back({ key, value, line, false });
                 }
             }
             else {
@@ -119,19 +141,66 @@ void LoadIniFile() {
 }
 
 void SaveIniFile() {
-    std::ofstream file(std::filesystem::u8path(m_szFileName));
-    for (const auto& sec : ini_data) {
-        if (!sec.first.empty())
-            file << "[" << sec.first << "]\n";  // newline after section
-
-        for (const auto& entry : sec.second) {
-            if (entry.is_comment || entry.key.empty())
-                file << entry.original_line << "\n";  // ensure comment ends in newline
-            else
-                file << entry.key << "=" << entry.value << "\n";  // newline after key=value
+    // Atomic save: write to a temp file, then swap it in. The previous
+    // in-place rewrite truncated the target first -- a crash, power loss,
+    // or full disk mid-write left a gutted config and silently reset every
+    // setting to defaults on the next run.
+    const std::string tmpname = m_szFileName + ".tmp";
+    {
+        std::ofstream file(ini_path(tmpname), std::ios::trunc);
+        if (!file.is_open()) {
+            LOG_ERROR("SaveIniFile: cannot open temp file '%s'", tmpname.c_str());
+            return;
         }
 
-        file << ""; // add blank line after each section for readability
+        for (const auto& sec : ini_data) {
+            if (!sec.first.empty())
+                file << "[" << sec.first << "]\n";  // newline after section
+
+            // Drop TRAILING blank lines from the section body -- one canonical
+            // blank is appended below. Without this, the separator would be
+            // re-read as section content on the next load and every save+load
+            // cycle would grow the file by one blank line per section.
+            // Blank lines in the middle of a section are preserved.
+            size_t last = sec.second.size();
+            while (last > 0) {
+                const auto& e = sec.second[last - 1];
+                if (e.is_comment && trim(e.original_line).empty())
+                    --last;
+                else
+                    break;
+            }
+
+            for (size_t i = 0; i < last; ++i) {
+                const auto& entry = sec.second[i];
+                if (entry.is_comment || entry.key.empty())
+                    file << entry.original_line << "\n";  // ensure comment ends in newline
+                else
+                    file << entry.key << "=" << entry.value << "\n";  // newline after key=value
+            }
+
+            file << "\n"; // blank line after each section for readability
+        }
+
+        file.flush();
+        if (!file.good()) {
+            LOG_ERROR("SaveIniFile: write to '%s' failed (disk full?); keeping existing '%s'",
+                tmpname.c_str(), m_szFileName.c_str());
+            file.close();
+            std::error_code ignored;
+            std::filesystem::remove(ini_path(tmpname), ignored);
+            return;
+        }
+    }
+
+    // filesystem::rename replaces an existing target in one step on both
+    // platforms (MoveFileEx with MOVEFILE_REPLACE_EXISTING on Windows), so
+    // there is no window where the ini is missing.
+    std::error_code ec;
+    std::filesystem::rename(ini_path(tmpname), ini_path(m_szFileName), ec);
+    if (ec) {
+        LOG_ERROR("SaveIniFile: rename '%s' -> '%s' failed: %s",
+            tmpname.c_str(), m_szFileName.c_str(), ec.message().c_str());
     }
 }
 
@@ -151,7 +220,34 @@ std::string get_value(const char* section, const char* key, const char* defval) 
     return defval;
 }
 
+// Write-time guard: reject anything that would be unreadable or corrupting
+// on the NEXT load. Failing loudly here beats the old failure mode, where
+// the write succeeded and the value silently came back wrong at startup
+// (that's how device-path assignments vanished across restarts).
+static bool ini_write_ok(const char* section, const char* key, const char* value) {
+    if (!key || !key[0]) {
+        LOG_ERROR("ini: rejected write to [%s]: empty key", section);
+        return false;
+    }
+    if (key[0] == ';' || key[0] == '#' || key[0] == '[') {
+        LOG_ERROR("ini: rejected key '%s' in [%s]: would parse as comment/section", key, section);
+        return false;
+    }
+    if (strpbrk(key, " =\r\n")) {
+        LOG_ERROR("ini: rejected key '%s' in [%s]: contains space/'='/newline", key, section);
+        return false;
+    }
+    if (value && strpbrk(value, "\r\n")) {
+        LOG_ERROR("ini: rejected value for [%s] %s: embedded newline would break the file", section, key);
+        return false;
+    }
+    return true;
+}
+
 void update_or_add_entry(const char* section, const char* key, const char* value) {
+    if (!ini_write_ok(section, key, value))
+        return;
+
     auto& entries = ini_data[section];
     for (auto& entry : entries) {
         if (!entry.is_comment && entry.key == key) {
@@ -163,6 +259,12 @@ void update_or_add_entry(const char* section, const char* key, const char* value
     }
     entries.push_back({ key, value, std::string(key) + "=" + value, false });
     SaveIniFile();
+}
+
+bool has_config_section(const char* section) {
+    // A [header] line creates the map entry in LoadIniFile even when no keys
+    // follow it, so plain membership - not "has entries" - is the question.
+    return ini_data.find(section ? section : "") != ini_data.end();
 }
 
 int get_config_int(const char* section, const char* key, int defval) {
@@ -182,6 +284,8 @@ bool get_config_bool(const char* section, const char* key, bool defval) {
 char* get_config_string(const char* section, const char* key, const char* defval) {
     std::string val = get_value(section, key, defval);
     char* res = new char[val.size() + 1];
+    // memcpy with the exact length, rather than MSVC's strcpy_s: the buffer is
+    // sized from val.size() a line above, so there is nothing to check.
     std::memcpy(res, val.c_str(), val.size() + 1);
 
     // Caller must delete[] the returned pointer!
@@ -224,6 +328,10 @@ float get_config_float(const std::string& section, const std::string& key, float
 
 bool get_config_bool(const std::string& section, const std::string& key, bool defaultValue) {
     return get_config_bool(section.c_str(), key.c_str(), defaultValue);
+}
+
+bool has_config_section(const std::string& section) {
+    return has_config_section(section.c_str());
 }
 
 std::string get_config_string(const std::string& section, const std::string& key, const std::string& defaultValue) {

@@ -535,13 +535,6 @@ static void build_pet_rows_core(std::uint8_t out[10],
 	if (key_state[VK_HOME] && (kbState[VK_LSHIFT] & 0x80 || kbState[VK_RSHIFT] & 0x80 || kbState[VK_SHIFT] & 0x80)) {
 		pet_press(out, 8, 0); // choose Left Shift (8,0). Use (8,5) for Right Shift if you prefer
 	}
-
-	const bool left_pressed = (out[0] & (1u << 5)) == 0;  // row 0, bit 5 cleared?
-	const bool right_pressed = (out[0] & (1u << 7)) == 0;  // row 0, bit 7 cleared?
-	const bool down_pressed = (out[1] & (1u << 6)) == 0;  // row 1, bit 6
-	const bool up_pressed = (out[2] & (1u << 5)) == 0;  // row 2, bit 5
-
-
 }
 
 // -----------------------------------------------------------------------------
@@ -554,7 +547,8 @@ bool pet_keyboard_editable(int vk) noexcept {
     // Host/OS commands and modifiers must remain available. Ctrl+O/E/R and
     // Alt+Enter remain host accelerators even when their plain keys are mapped.
     if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') ||
-        (vk >= VK_NUMPAD0 && vk <= VK_DIVIDE) || (vk >= VK_F1 && vk <= VK_F7)) return true;
+        (vk >= VK_NUMPAD0 && vk <= VK_DIVIDE) || (vk >= VK_F1 && vk <= VK_F5) || vk == VK_F7) return true;
+    // F6 is the host screenshot key and never reaches PET input.
     switch (vk) {
     case VK_BACK: case VK_TAB: case VK_RETURN: case VK_CAPITAL: case VK_SPACE:
     case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
@@ -720,28 +714,6 @@ void update_keyboard(PetMachine* pet)
 
 	// Build the 10x8 active-low matrix (fills rows10, does not push)
 	build_pet_rows_from_vk(rows10);
-
-	// Count pressed bits (active-low: 0 means pressed)
-	/*
-	int pressed_bits = 0;
-	for (int r = 0; r < 10; ++r) {
-		pressed_bits += 8 - __popcnt(rows10[r]);
-	}
-
-	if (pressed_bits > 0) {
-		LOG_DEBUG("[KEY] active bits this frame: %d", pressed_bits);
-	}
-	*/
-	// After build_pet_rows_core has filled `out`
-	const bool left_pressed = (rows10[0] & (1u << 5)) == 0;  // row 0, bit 5 cleared?
-	const bool right_pressed = (rows10[0] & (1u << 7)) == 0;  // row 0, bit 7 cleared?
-	const bool down_pressed = (rows10[1] & (1u << 6)) == 0;  // row 1, bit 6
-	const bool up_pressed = (rows10[2] & (1u << 5)) == 0;  // row 2, bit 5
-
-	if (left_pressed)  LOG_DEBUG("PET matrix: LEFT bit active (r0 c5)");
-	if (right_pressed) LOG_DEBUG("PET matrix: RIGHT bit active (r0 c7)");
-	if (down_pressed)  LOG_DEBUG("PET matrix: DOWN bit active (r1 c6)");
-	if (up_pressed)    LOG_DEBUG("PET matrix: UP bit active (r2 c5)");
 
 	// Push to emulator if a PetMachine* was provided
 	if (pet) {

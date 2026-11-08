@@ -159,6 +159,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <utility>
+#include <deque>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -318,6 +319,38 @@ struct StreamAA {
 };
 static StreamAA g_streamAA[MAX_CHANNELS];
 
+// Stream frames handed over by stream_update and not yet mixed. The frame loop
+// can run several frames back to back (catch-up after a hitch) before the audio
+// thread wakes; each of those frames signals one mix, and each mix must consume
+// its own frame. Writing straight into the channel's single buffer lost every
+// frame but the newest and then mixed that one several times. Each mix pass
+// moves the oldest queued frame into the channel buffer. With nothing queued
+// the channel keeps its current buffer (the previous behaviour).
+//
+// One frame per mix signal: mixer_update seals the frames written since the
+// previous signal down to the newest one (stream_seal_frames_locked). A loop
+// that writes several frames per mixer_update (uncapped/benchmark mode
+// services audio at ~60 Hz) therefore keeps the old behaviour - the newest
+// frame plays and the rest are dropped - instead of building a backlog.
+// The cap matches the audio thread's catch-up limit; beyond it the oldest frame
+// is dropped. Buffers are recycled, so steady state does not allocate.
+// All access is under audioMutex.
+struct StreamQueue {
+	static constexpr size_t kMax = 8;
+	std::deque<std::vector<uint8_t>> frames;
+	std::vector<std::vector<uint8_t>> spare;
+	size_t unsignaled = 0;   // trailing frames written since the last mixer_update
+	void clear()
+	{
+		while (!frames.empty()) {
+			spare.push_back(std::move(frames.front()));
+			frames.pop_front();
+		}
+		unsignaled = 0;
+	}
+};
+static StreamQueue g_streamQ[MAX_CHANNELS];
+
 // The one place a channel's applied linear gain is derived: its own byte
 // under its group's byte. Callers hold audioMutex (or are inside a start
 // function that already does).
@@ -378,6 +411,8 @@ static std::chrono::steady_clock::time_point lastSignalTime;
 // Forward declarations
 static void mixer_update_internal();
 static void stop_channel_locked(int chanid);
+static void stream_dequeue_locked(int chanid);
+static void stream_seal_frames_locked();
 
 // 0..255 (128=center).
 // Uses "Square Root" law for constant power (volume stays consistent across pan).
@@ -1167,6 +1202,9 @@ static void mixer_update_internal()
 
 	std::scoped_lock lock(audioMutex);
 
+	// One mix pass consumes one queued stream frame per stream channel.
+	for (int chan : audio_list) stream_dequeue_locked(chan);
+
 	// N or N+1 samples this frame: BUFFER_SIZE is the truncated base, and the
 	// remainder accumulator adds the extra sample whenever a whole one is
 	// owed, so long-term output exactly matches the sample rate.
@@ -1423,9 +1461,18 @@ void mixer_update()
 
 	mixer_reap_voice_channels();
 
-	queuedFrames++;
+	{
+		std::scoped_lock lock(audioMutex);
+		stream_seal_frames_locked();
+	}
+
 	{
 		std::lock_guard<std::mutex> lock(audioCVMutex);
+		// Count and run flag change together under the lock the audio thread
+		// claims them under. Incrementing outside it let the thread take the
+		// count early, then wake on the flag with nothing pending and mix a
+		// frame that was never signalled (an occasional duplicate frame).
+		queuedFrames++;
 		lastSignalTime = std::chrono::steady_clock::now(); // read by audio thread under the same lock
 		audioThreadRun.store(true, std::memory_order_release);
 	}
@@ -1498,6 +1545,7 @@ void mixer_end()
 		std::scoped_lock lock(audioMutex);
 		for (int i = 0; i < MAX_CHANNELS; ++i) {
 			stop_channel_locked(i);
+			g_streamQ[i] = StreamQueue{};
 		}
 		audio_list.clear();
 		for (auto& sample : lsamples) {
@@ -2155,6 +2203,7 @@ void stream_start(int chanid, int /*stream*/, int bits, int frame_rate, bool ste
 	fade_step[chanid] = 0.0;
 	ch.vol = channel_gain(ch);
 	g_streamAA[chanid].disable();   // enabled again by stream_set_native_rate if needed
+	g_streamQ[chanid].clear();
 
 	// Build the per-frame stream SAMPLE inline -- create_sample takes its own
 	// lock so we can't call it from inside this scope without re-entering the
@@ -2236,6 +2285,7 @@ void stream_stop(int chanid, int /*stream*/)
 	    lsamples[ch.loaded_sample_num] == ch.playing_sample) {
 		lsamples[ch.loaded_sample_num].reset();
 	}
+	g_streamQ[chanid] = StreamQueue{};   // release the queued and spare buffers
 	stop_channel_locked(chanid);
 }
 
@@ -2257,6 +2307,67 @@ static void stream_reanchor_locked(CHANNEL& ch, const SAMPLE& sample)
 	ch.pos_q32 = (ch.pos_q32 >= total_q32) ? (ch.pos_q32 - total_q32) : 0;
 }
 
+// Queue one frame of stream data (see StreamQueue). Caller holds audioMutex.
+static void stream_enqueue_locked(int chanid, const uint8_t* data, size_t bytes)
+{
+	auto& q = g_streamQ[chanid];
+	std::vector<uint8_t> buf;
+	if (q.frames.size() >= StreamQueue::kMax) {
+		buf = std::move(q.frames.front());   // drop the oldest unmixed frame
+		q.frames.pop_front();
+	} else if (!q.spare.empty()) {
+		buf = std::move(q.spare.back());
+		q.spare.pop_back();
+	}
+	buf.assign(data, data + bytes);
+	q.frames.push_back(std::move(buf));
+	q.unsignaled = std::min(q.unsignaled + 1, q.frames.size());
+}
+
+// Called by mixer_update before it signals a mix: of the frames written since
+// the previous signal, keep only the newest, so each signal owns at most one
+// frame per stream. Caller holds audioMutex.
+static void stream_seal_frames_locked()
+{
+	for (auto& q : g_streamQ) {
+		if (q.unsignaled > 1) {
+			const auto last = q.frames.end() - 1;
+			const auto first = last - static_cast<std::ptrdiff_t>(q.unsignaled - 1);
+			for (auto it = first; it != last; ++it) q.spare.push_back(std::move(*it));
+			q.frames.erase(first, last);
+		}
+		q.unsignaled = 0;
+	}
+}
+
+// Move the oldest queued frame into the channel's buffer ahead of a mix pass.
+// Filtering and the position re-anchor happen here, in mix order, so the
+// anti-alias state stays continuous. Caller holds audioMutex.
+static void stream_dequeue_locked(int chanid)
+{
+	auto& q = g_streamQ[chanid];
+	if (q.frames.empty()) return;
+	std::vector<uint8_t> buf = std::move(q.frames.front());
+	q.frames.pop_front();
+
+	auto& ch = channel[chanid];
+	auto& sample = ch.playing_sample;
+	if (ch.state == SoundState::Playing &&
+	    ch.stream_type == static_cast<int>(SoundState::Stream) &&
+	    sample && buf.size() == sample->dataSize) {
+		if (sample->data16) {
+			std::memcpy(sample->data16.get(), buf.data(), sample->dataSize);
+			g_streamAA[chanid].process16(sample->data16.get(), sample->sampleCount, sample->fx.channels);
+			stream_reanchor_locked(ch, *sample);
+		} else if (sample->data8) {
+			std::memcpy(sample->data8.get(), buf.data(), sample->dataSize);
+			g_streamAA[chanid].process8(sample->data8.get(), sample->sampleCount, sample->fx.channels);
+			stream_reanchor_locked(ch, *sample);
+		}
+	}
+	q.spare.push_back(std::move(buf));
+}
+
 void stream_update(int chanid, short* data)
 {
 	if (chanid < 0 || chanid >= MAX_CHANNELS) {
@@ -2272,11 +2383,8 @@ void stream_update(int chanid, short* data)
 	if (ch.state == SoundState::Playing &&
 	    ch.stream_type == static_cast<int>(SoundState::Stream)) {
 		auto& sample = ch.playing_sample;
-		if (sample && sample->data16) {
-			std::memcpy(sample->data16.get(), data, sample->dataSize);
-			g_streamAA[chanid].process16(sample->data16.get(), sample->sampleCount, sample->fx.channels);
-			stream_reanchor_locked(ch, *sample);
-		}
+		if (sample && sample->data16)
+			stream_enqueue_locked(chanid, reinterpret_cast<const uint8_t*>(data), sample->dataSize);
 	}
 }
 
@@ -2291,11 +2399,8 @@ void stream_update(int chanid, unsigned char* data)
 	if (ch.state == SoundState::Playing &&
 	    ch.stream_type == static_cast<int>(SoundState::Stream)) {
 		auto& sample = ch.playing_sample;
-		if (sample && sample->data8) {
-			std::memcpy(sample->data8.get(), data, sample->dataSize);
-			g_streamAA[chanid].process8(sample->data8.get(), sample->sampleCount, sample->fx.channels);
-			stream_reanchor_locked(ch, *sample);
-		}
+		if (sample && sample->data8)
+			stream_enqueue_locked(chanid, data, sample->dataSize);
 	}
 }
 
@@ -2355,6 +2460,9 @@ void stream_set_native_rate(int chanid, int native_rate)
 	sample->sampleCount = new_sample_count;
 	sample->dataSize    = new_data_size;
 
+	// Frames queued at the old size no longer fit the buffer.
+	g_streamQ[chanid].clear();
+
 	// Reset position and set the resampling step (source frames per output frame).
 	ch.pos_q32  = 0;
 	ch.step_q32 = (static_cast<uint64_t>(native_rate) << 32) / static_cast<uint64_t>(SYS_FREQ);
@@ -2381,6 +2489,7 @@ void mixer_flush()
 	audioThreadRun.store(false);
 	for (int i = 0; i < MAX_CHANNELS; ++i) {
 		auto& ch = channel[i];
+		g_streamQ[i].clear();
 		if (ch.stream_type != static_cast<int>(SoundState::Stream) || !ch.playing_sample) continue;
 		auto& s = *ch.playing_sample;
 		if (s.data16) std::fill_n(s.data16.get(), s.sampleCount, int16_t(0));

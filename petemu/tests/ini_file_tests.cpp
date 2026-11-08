@@ -28,6 +28,45 @@ int main() {
     set_config_string("video", "starting_monitor_id", id.c_str());
     SetIniFile(path.u8string().c_str());
     check("physical ID survives save and reload", readId() == id);
+
+    const std::string spaced = R"(C:\Users\Jane Smith\My Programs)";
+    const auto readDir = [&] { return get_config_string(std::string("paths"), std::string("lastromdir"), std::string()); };
+    set_config_string("paths", "lastromdir", spaced.c_str());
+    SetIniFile(path.u8string().c_str());
+    check("value with spaces survives save and reload", readDir() == spaced);
+    set_config_string("paths", "lastromdir", spaced.c_str());
+    SetIniFile(path.u8string().c_str());
+    const auto countLines = [&](const std::string& prefix) {
+        std::ifstream in(path); std::string line; int n = 0;
+        while (std::getline(in, line)) if (line.rfind(prefix, 0) == 0) ++n;
+        return n;
+    };
+    check("repeated saves do not duplicate a spaced value", countLines("lastromdir=") == 1);
+
+    {
+        // Duplicates left by older builds: the last line is the newest value.
+        std::ofstream out(path, std::ios::binary);
+        out << "[paths]\r\nlastromdir=C:\\Old Dir\r\nlastromdir=C:\\New Dir\r\n"
+            << "  [video]  \r\nfullscreen=True\r\n";
+    }
+    SetIniFile(path.u8string().c_str());
+    check("duplicate keys resolve to the last value", readDir() == R"(C:\New Dir)");
+    check("CRLF section header parses", get_config_bool("video", "fullscreen", false));
+    check("indented section header parses", get_config_bool(std::string("video"), std::string("fullscreen"), false));
+    set_config_int("video", "scale", 3);
+    check("merged duplicates are written once", countLines("lastromdir=") == 1);
+    check("save leaves no temp file", !std::filesystem::exists(path.string() + ".tmp"));
     std::filesystem::remove(path);
+
+    // Non-ASCII folder: the path is UTF-8 and must not go through the ANSI code page.
+    const auto folder = std::filesystem::temp_directory_path() / std::filesystem::u8path(u8"pet-ini-éß日");
+    std::filesystem::create_directories(folder);
+    const auto unicodeIni = folder / "pet.ini";
+    SetIniFile(unicodeIni.u8string().c_str());
+    set_config_int("video", "scale", 2);
+    check("non-ASCII path saves", std::filesystem::exists(unicodeIni));
+    SetIniFile(unicodeIni.u8string().c_str());
+    check("non-ASCII path reloads", get_config_int("video", "scale", 0) == 2);
+    std::filesystem::remove_all(folder);
     return failures ? 1 : 0;
 }
