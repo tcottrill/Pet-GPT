@@ -9,6 +9,8 @@
 #include <wx/aboutdlg.h>
 #include <wx/choicdlg.h>
 #include <wx/dnd.h>
+#include <wx/file.h>
+#include <wx/wfstream.h>
 #include "emulator.h"
 #include "iniFile.h"
 #include "system/path_helper.h"
@@ -23,6 +25,9 @@
 #include "host_options.h"
 #include "system/host_view.h"
 #include "sys_log.h"
+#ifdef __WXMSW__
+#include "system/monitor_select.h"
+#endif
 #ifdef __WXGTK__
 #include <gdk/gdk.h>
 #ifdef GDK_WINDOWING_WAYLAND
@@ -40,7 +45,7 @@ enum {
     Load = wxID_HIGHEST + 100, Eject, Reset, Fullscreen, Scale1, Scale2, Scale3, ScaleFit,
     Model1, Model2, Model4, Model12, Model8, Ram4, Ram8, Ram16, Ram32,
     Speed, Graphics, Snes, Keyboard, Crt, Green, White, CrtSettings,
-    TapePlay, TapeStop, TapeRewind, TapeEject
+    TapePlay, TapeStop, TapeRewind, TapeEject, TogglePause, Screenshot
 };
 class PetFrame;
 PetFrame* frame = nullptr;
@@ -80,15 +85,25 @@ public:
         ram_ = get_config_int("machine", "ram", 32);
         scale_ = get_config_int("video", "scale", 2);
         if (scale_ < 0 || scale_ > 3) scale_ = 2;
-        int monitor = get_config_int("video", "starting_monitor", 1) - 1;
+        int monitor = get_config_int("video", "starting_monitor", 1);
         bool fullscreen = get_config_bool("video", "fullscreen", false);
         std::string monitorName = get_config_string(std::string("video"), std::string("starting_monitor_id"), std::string());
         const auto options = parse_host_options(arguments_);
         startupProgram_ = options.rom;
         if (options.scale >= 0) scale_ = options.scale;
         if (options.fullscreen >= 0) fullscreen = options.fullscreen != 0;
-        if (options.monitor > 0) { monitor = options.monitor - 1; monitorName.clear(); }
-        else if (options.monitorIdSet) monitorName = options.monitorId;
+        if (options.monitor > 0) { monitor = options.monitor; monitorName.clear(); }
+        if (options.monitorIdSet) monitorName = options.monitorId;
+#ifdef __WXMSW__
+        // G-Sync/driver re-enumeration changes wx/GDI display order and names.
+        // Reuse AAE's layout numbering and physical-device-path selection.
+        std::string reason;
+        const auto selected = monsel::Select(monitor, monitorName, &reason);
+        LOG_INFO("Monitor list:\n%s", monsel::DescribeAll().c_str());
+        LOG_INFO("Starting monitor %d: %s", selected.number, reason.c_str());
+        Move(wxPoint(selected.workRect.left, selected.workRect.top) + wxPoint(FromDIP(24), FromDIP(24)));
+#else
+        --monitor; // wx display indexes are zero-based on the portable path.
         if (!monitorName.empty()) {
             for (unsigned i = 0; i < wxDisplay::GetCount(); ++i)
                 if (host_lower(wxDisplay(i).GetName().ToStdString(wxConvUTF8)) == host_lower(monitorName)) monitor = static_cast<int>(i);
@@ -98,13 +113,14 @@ public:
             const wxRect work = wxDisplay(static_cast<unsigned>(monitor)).GetClientArea();
             Move(work.GetTopLeft() + wxPoint(FromDIP(24), FromDIP(24)));
         }
+#endif
         ApplyScale(scale_);
         canvas_->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
             wxPaintDC dc(canvas_);
             if (ready_ && !closing_) { PrepareViewport(); emu_present(); canvas_->SwapBuffers(); }
         });
         canvas_->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) { canvas_->Refresh(false); event.Skip(); });
-        canvas_->Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& event) { if (!HandleShortcut(event)) pet_keyboard_handle_wx(event, true); });
+        canvas_->Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& event) { if (!HandleShortcut(event) && !userPaused_) pet_keyboard_handle_wx(event, true); });
         canvas_->Bind(wxEVT_KEY_UP, [](wxKeyEvent& event) { pet_keyboard_handle_wx(event, false); });
         canvas_->Bind(wxEVT_KILL_FOCUS, [](wxFocusEvent& event) { RawInput_ReleaseAll(); event.Skip(); });
         canvas_->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent&) { canvas_->SetFocus(); });
@@ -160,6 +176,8 @@ private:
     FrameSchedule schedule_;
     int paused_ = 0, ram_ = 32, scale_ = 2, knob_ = 0, smokeFrames_ = 0;
     bool ready_ = false, closing_ = false, smoke_ = false;
+    bool userPaused_ = false;
+    wxString titleNote_;
     wxSize windowedTrim_;
 
     struct Suspension {
@@ -190,9 +208,14 @@ private:
         tape->AppendCheckItem(TapePlay, "&Play"); tape->Append(TapeStop, "&Stop");
         tape->Append(TapeRewind, "&Rewind"); tape->Append(TapeEject, "&Eject");
         file->AppendSubMenu(tape, "&Tape"); file->AppendSeparator();
+        // Show these shortcuts without native menu accelerators: Windows
+        // accelerators bypass the canvas's IsAutoRepeat guard.
+        file->Append(Screenshot, "Save &Screenshot (F6)"); file->AppendSeparator();
         file->Append(Reset, "&Reset\tCtrl+R"); file->AppendSeparator(); file->Append(wxID_EXIT, "E&xit");
         bar->Append(file, "&File");
         auto* machine = new wxMenu;
+        machine->AppendCheckItem(TogglePause, "&Pause (Ctrl+P / Pause)", "Pause or resume emulation and audio");
+        machine->AppendSeparator();
         machine->AppendRadioItem(Model1, wxS("PET 2001 — BASIC 1"));
         machine->AppendRadioItem(Model2, wxS("PET 2001-N — BASIC 2"));
         machine->AppendRadioItem(Model4, wxS("PET 4000 — BASIC 4"));
@@ -292,15 +315,62 @@ private:
         }
     }
 
-    void VerifySmokeFrame() {
+    wxImage CaptureScreen() {
         PrepareViewport(); emu_present(); glFinish();
         const auto size = canvas_->GetClientSize();
         const double dpi = canvas_->GetContentScaleFactor();
         const int w = std::max(1, static_cast<int>(size.x * dpi)), h = std::max(1, static_cast<int>(size.y * dpi));
-        wxImage image(w, h); glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        wxImage image(w, h);
+        if (!image.IsOk()) return {};
+        GLint alignment = 4, readBuffer = GL_BACK;
+        glGetIntegerv(GL_PACK_ALIGNMENT, &alignment); glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadBuffer(GL_BACK); glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, image.GetData());
+        glPixelStorei(GL_PACK_ALIGNMENT, alignment); glReadBuffer(readBuffer);
+        return image.Mirror(false);
+    }
+
+    void SaveScreenshot() {
+        const wxImage image = CaptureScreen();
+        if (!image.IsOk() || glGetError() != GL_NO_ERROR) {
+            host_message("Screenshot failed", "Unable to capture the PET display.", true); return;
+        }
+        const wxString directory = wxString::FromUTF8(data_path("screenshots"));
+        if (!wxDirExists(directory) && !wxFileName::Mkdir(directory, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL)) {
+            host_message("Screenshot failed", "Unable to create the screenshots folder.", true); return;
+        }
+        const wxString stem = "pet-gpt-" + wxDateTime::Now().Format("%Y%m%d-%H%M%S");
+        wxString path;
+        wxFile file;
+        for (unsigned suffix = 0; ; ++suffix) {
+            const wxString name = stem + (suffix ? wxString::Format("-%u", suffix) : wxString()) + ".png";
+            path = wxFileName(directory, name).GetFullPath();
+            if (wxFileExists(path)) continue;
+            // Exclusive creation also protects captures from another instance.
+            if (file.Create(path, false)) break;
+            if (wxFileExists(path)) continue;
+            host_message("Screenshot failed", "Unable to create the screenshot file.", true); return;
+        }
+        bool saved = false;
+        {
+            wxFileOutputStream output(file);
+            saved = image.SaveFile(output, wxBITMAP_TYPE_PNG) && output.IsOk();
+        }
+        saved = file.Close() && saved;
+        if (!saved) {
+            wxRemoveFile(path);
+            host_message("Screenshot failed", "Unable to write the PNG screenshot.", true); return;
+        }
+        titleNote_ = "Saved " + path;
+        UpdateTitle();
+        LOG_INFO("Screenshot saved: %s", path.ToStdString(wxConvUTF8).c_str());
+    }
+
+    void VerifySmokeFrame() {
+        const wxImage image = CaptureScreen();
+        if (!image.IsOk()) { applicationExitCode = 1; return; }
         size_t lit = 0;
-        for (size_t i = 0; i < static_cast<size_t>(w) * h * 3; ++i) if (image.GetData()[i] > 32) ++lit;
+        for (size_t i = 0; i < static_cast<size_t>(image.GetWidth()) * image.GetHeight() * 3; ++i) if (image.GetData()[i] > 32) ++lit;
         const GLenum error = glGetError();
         if (error != GL_NO_ERROR || lit < 100) {
             wxLogError("SMOKE: rendering failed (GL error %u, lit channels %zu)", static_cast<unsigned>(error), lit);
@@ -308,7 +378,7 @@ private:
         } else {
             wxLogMessage("SMOKE: %d frames, model %d, RAM %d KB, %zu lit channels, GL OK", smokeFrames_, pet_get_basic(), pet_get_ram(), lit);
         }
-        if (!screenshot_.empty() && !image.Mirror(false).SaveFile(screenshot_, wxBITMAP_TYPE_PNG)) applicationExitCode = 1;
+        if (!screenshot_.empty() && !image.SaveFile(screenshot_, wxBITMAP_TYPE_PNG)) applicationExitCode = 1;
     }
 
     void ApplyScale(int scale) {
@@ -348,6 +418,7 @@ private:
     void UpdateMenus() {
         if (!ready_) return;
         auto* bar = GetMenuBar();
+        bar->Check(TogglePause, userPaused_);
         ram_ = pet_get_ram();
         const int modelIds[] = {1, 2, 4, 12, 8};
         for (int i = 0; i < 5; ++i) bar->Check(Model1 + i, pet_get_basic() == modelIds[i]);
@@ -389,6 +460,8 @@ private:
         if (keycode == WXK_F10) command = Crt;
         else if (keycode == WXK_F11 || (keycode == WXK_RETURN && event.AltDown())) command = Fullscreen;
         else if (keycode == WXK_F12) command = Graphics;
+        else if (keycode == WXK_PAUSE || (event.ControlDown() && keycode == 'P')) command = TogglePause;
+        else if (keycode == WXK_F6) command = Screenshot;
         else if (event.ControlDown() && keycode == 'O') command = Load;
         else if (event.ControlDown() && keycode == 'E') command = Eject;
         else if (event.ControlDown() && keycode == 'R') command = Reset;
@@ -412,7 +485,14 @@ private:
         return false;
     }
     void UpdateTuningTitle() {
-        SetTitle(wxString::Format(wxS("Commodore PET — %s = %.3f"), knobNames[knob_], pet_shader_get(knob_)));
+        titleNote_ = wxString::Format("%s = %.3f", knobNames[knob_], pet_shader_get(knob_));
+        UpdateTitle();
+    }
+    void UpdateTitle() {
+        wxString title = wxS("Commodore PET — Pet-GPT 2.7");
+        if (userPaused_) title += " [Paused]";
+        if (!titleNote_.empty()) title += wxS(" — ") + titleNote_;
+        SetTitle(title);
     }
 
     void OnCommand(wxCommandEvent& event) {
@@ -434,6 +514,11 @@ private:
         } else if (id >= TapePlay && id <= TapeEject) pet_tape_command(id - TapePlay);
         else if (id >= Scale1 && id <= ScaleFit) ApplyScale(id == ScaleFit ? 0 : id - Scale1 + 1);
         else switch (id) {
+        case TogglePause:
+            userPaused_ = !userPaused_;
+            if (userPaused_) Pause(); else Resume();
+            titleNote_.clear(); UpdateTitle(); break;
+        case Screenshot: SaveScreenshot(); break;
         case Load: {
             const auto directory = get_config_string(std::string("paths"), std::string("lastromdir"), std::string());
             wxFileDialog dialog(this, "Load PET software", wxString::FromUTF8(directory), "",
@@ -463,6 +548,7 @@ private:
             info.SetName(wxS("Pet-GPT — Commodore PET Emulator")); info.SetVersion("2.7");
             info.SetDescription("Five PET/CBM models, tape and disk images, CB2 audio, SNES input, and OpenGL CRT display.\n\n"
                 "F11 / Alt+Enter: fullscreen\nF10: CRT shader\nF12: graphics keyboard\n"
+                "Pause/Break / Ctrl+P: pause or resume\nF6: save PNG screenshot\n"
                 "F9: select CRT knob; Page Up/Down: adjust (Shift: coarse)\nF8: log shader settings");
             info.SetCopyright("Pet-GPT contributors"); info.SetWebSite("https://github.com/tcottrill/Pet-GPT");
             info.SetLicense("GNU General Public License, version 3.\nSee LICENSE in the distribution.\n\n"
@@ -527,8 +613,8 @@ public:
                 "-rom <file>  Load a program or media image\n"
                 "-fullscreen / -window  Override saved window mode\n"
                 "-scale <1|2|3|fit>  Override saved scale\n"
-                "-monitor <n>  Select starting monitor (1 = primary)\n"
-                "-monitorid <name>  Select a display by its name\n"
+                "-monitor <n>  Select starting monitor (Windows: 1 = primary, others by layout)\n"
+                "-monitorid <id>  Windows: physical monitor ID from log; Linux: display name\n"
                 "-pet2001 / -basic2 / -basic4 / -4032 / -8032  Select model\n"
                 "-disk <image>  Mount a disk image\n"
                 "-h  Show this help", "Pet-GPT", wxOK | wxICON_INFORMATION);

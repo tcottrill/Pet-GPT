@@ -85,8 +85,17 @@ void LoadIniFile() {
                 key.erase(key.find_last_not_of(" \t") + 1);
                 value.erase(0, value.find_first_not_of(" \t"));
 
-                // Strip inline comment in value (look for ';' or '#')
-                size_t comment_pos = value.find_first_of(";#");
+                // Physical monitor paths contain embedded '#'. Only a hash
+                // at the start or following whitespace introduces a comment;
+                // retain the existing semicolon comment convention.
+                size_t comment_pos = std::string::npos;
+                for (size_t i = 0; i < value.size(); ++i) {
+                    if (value[i] == ';' || (value[i] == '#' &&
+                        (i == 0 || value[i - 1] == ' ' || value[i - 1] == '\t'))) {
+                        comment_pos = i;
+                        break;
+                    }
+                }
                 if (comment_pos != std::string::npos)
                     value = value.substr(0, comment_pos);
 

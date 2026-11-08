@@ -8,6 +8,9 @@
 #undef wxIMPLEMENT_APP
 #include <cstdio>
 #include <filesystem>
+#ifdef __WXMSW__
+#include "system/monitor_select.h"
+#endif
 
 namespace {
 int failures = 0;
@@ -51,10 +54,21 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "SKIP: PETGPT_DATA_DIR must name isolated data with writable pet.ini and all five ROM sets.\n");
         return 77;
     }
-    char smoke[] = "--smoke-test";
-    char* testArgv[] = {argv[0], smoke, nullptr};
-    int testArgc = 2;
-    if (!wxEntryStart(testArgc, testArgv)) return 1;
+    std::vector<std::string> testArgs = {argv[0], "--smoke-test"};
+#ifdef __WXMSW__
+    const auto monitors = monsel::Enumerate();
+    const auto expectedMonitor = monitors.back();
+    SetIniFile((directory + "/pet.ini").ToStdString(wxConvUTF8).c_str());
+    set_config_int("video", "starting_monitor", expectedMonitor.deviceId.empty() ? expectedMonitor.number : 1);
+    set_config_string("video", "starting_monitor_id", expectedMonitor.deviceId.c_str());
+    // Choose the last physical display, with primary as numeric fallback,
+    // so ignoring the physical ID cannot accidentally pass on multi-monitor PCs.
+#endif
+    std::vector<char*> testArgv;
+    for (auto& arg : testArgs) testArgv.push_back(arg.data());
+    testArgv.push_back(nullptr);
+    int testArgc = int(testArgs.size());
+    if (!wxEntryStart(testArgc, testArgv.data())) return 1;
     if (!wxFileName::IsFileWritable(directory + "/pet.ini")) {
         std::fprintf(stderr, "SKIP: isolated pet.ini is not writable; refusing user-config fallback.\n");
         wxEntryCleanup(); return 77;
@@ -64,6 +78,10 @@ int main(int argc, char** argv) {
     // no polling loop and no modal dialog can block this smoke-mode application.
     wxTheApp->Yield(true);
     check("startup succeeded", frame && applicationExitCode == 0);
+#ifdef __WXMSW__
+    if (frame) check("startup uses stable physical monitor selection",
+        monsel::FromWindow(static_cast<HWND>(frame->GetHandle())).handle == expectedMonitor.handle);
+#endif
     if (frame && applicationExitCode == 0) {
         // Hold the normal menu-open suspension during synchronous assertions so
         // the smoke timer cannot auto-close while a slow test machine runs them.
@@ -115,6 +133,79 @@ int main(int argc, char** argv) {
         wxGLCanvas* canvas = nullptr;
         for (auto* child : frame->GetChildren()) if (auto* gl = dynamic_cast<wxGLCanvas*>(child)) canvas = gl;
         check("GL canvas exists", canvas != nullptr);
+        const int pauseId = frame->GetMenuBar()->FindMenuItem("Machine", "Pause (Ctrl+P / Pause)");
+        const int screenshotId = frame->GetMenuBar()->FindMenuItem("File", "Save Screenshot (F6)");
+        check("pause menu available", pauseId != wxNOT_FOUND);
+        check("screenshot menu available", screenshotId != wxNOT_FOUND);
+        if (canvas && pauseId != wxNOT_FOUND && screenshotId != wxNOT_FOUND) {
+            for (const int id : {pauseId, screenshotId}) {
+                std::unique_ptr<wxAcceleratorEntry> native(frame->GetMenuBar()->FindItem(id)->GetAccel());
+                check("new shortcut has no native menu repeat bypass", !native);
+            }
+            // Boot a real display so a blank but valid PNG cannot pass.
+            for (int i = 0; i < 150; ++i) emu_run_frame();
+            wxKeyEvent pauseKey(wxEVT_KEY_DOWN); pauseKey.m_keyCode = WXK_PAUSE;
+            canvas->GetEventHandler()->ProcessEvent(pauseKey);
+            check("Pause key pauses", frame->GetMenuBar()->IsChecked(pauseId));
+            wxKeyEvent repeatedPause(pauseKey); repeatedPause.m_isRepeat = true;
+            canvas->GetEventHandler()->ProcessEvent(repeatedPause);
+            check("held pause key does not resume", frame->GetMenuBar()->IsChecked(pauseId));
+            check("paused title visible", frame->GetTitle().Contains("[Paused]"));
+            frame->Pause(); frame->Resume();
+            check("temporary suspension preserves user pause", frame->GetMenuBar()->IsChecked(pauseId));
+            wxKeyEvent letter(wxEVT_KEY_DOWN); letter.m_keyCode = 'P';
+            canvas->GetEventHandler()->ProcessEvent(letter);
+            check("paused typing does not queue PET keys", IsKeyUp('P'));
+
+            const auto shots = std::filesystem::u8path(data_path("screenshots"));
+            auto countShots = [&] {
+                size_t count = 0;
+                if (std::filesystem::exists(shots))
+                    for (const auto& entry : std::filesystem::directory_iterator(shots))
+                        if (entry.path().extension() == ".png") ++count;
+                return count;
+            };
+            const auto before = countShots();
+            std::vector<std::filesystem::path> existing;
+            if (std::filesystem::exists(shots))
+                for (const auto& entry : std::filesystem::directory_iterator(shots)) existing.push_back(entry.path());
+            // Release the test's menu suspension. User pause alone must now
+            // keep the screen frozen while actual timer events are processed.
+            frame->Resume();
+            command(screenshotId);
+            for (int i = 0; i < 30; ++i) { wxMilliSleep(20); wxTheApp->Yield(true); }
+            wxKeyEvent shotKey(wxEVT_KEY_DOWN); shotKey.m_keyCode = WXK_F6;
+            canvas->GetEventHandler()->ProcessEvent(shotKey);
+            wxKeyEvent repeatedShot(shotKey); repeatedShot.m_isRepeat = true;
+            canvas->GetEventHandler()->ProcessEvent(repeatedShot);
+            frame->Pause(); // Restore the surrounding test's menu suspension.
+            check("menu and F6 save separate PNGs", countShots() == before + 2);
+            check("screenshots preserve pause", frame->GetMenuBar()->IsChecked(pauseId));
+            std::vector<unsigned char> firstPixels;
+            if (std::filesystem::exists(shots)) {
+                for (const auto& entry : std::filesystem::directory_iterator(shots)) {
+                    if (entry.path().extension() != ".png" || std::find(existing.begin(), existing.end(), entry.path()) != existing.end()) continue;
+                    wxImage image(wxString::FromUTF8(entry.path().u8string()), wxBITMAP_TYPE_PNG);
+                    check("saved screenshot decodes", image.IsOk());
+                    if (image.IsOk()) {
+                        const double dpi = canvas->GetContentScaleFactor();
+                        check("screenshot matches drawable size", image.GetWidth() == int(canvas->GetClientSize().x * dpi) && image.GetHeight() == int(canvas->GetClientSize().y * dpi));
+                        const size_t size = size_t(image.GetWidth()) * image.GetHeight() * 3;
+                        std::vector<unsigned char> pixels(image.GetData(), image.GetData() + size);
+                        check("screenshot contains rendered PET pixels", std::count_if(pixels.begin(), pixels.end(), [](unsigned char c) { return c > 32; }) > 100);
+                        if (firstPixels.empty()) firstPixels = pixels;
+                        else check("user pause freezes display across timer events", firstPixels == pixels);
+                    }
+                }
+            }
+            wxKeyEvent resumeKey(wxEVT_KEY_DOWN); resumeKey.m_keyCode = 'P'; resumeKey.SetControlDown(true);
+            canvas->GetEventHandler()->ProcessEvent(resumeKey);
+            check("Ctrl+P resumes", !frame->GetMenuBar()->IsChecked(pauseId));
+            check("resume clears paused title", !frame->GetTitle().Contains("[Paused]"));
+            canvas->GetEventHandler()->ProcessEvent(letter);
+            check("plain P still reaches PET input", IsKeyDown('P'));
+            RawInput_ReleaseAll();
+        }
         if (canvas) {
             command(Fullscreen);
             RawInput_SetKey(VK_ESCAPE, true);

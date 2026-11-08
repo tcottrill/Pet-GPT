@@ -280,7 +280,7 @@ pet-gpt [program] [options]
   -rom <file>           load a program/disk at startup
   -scale <1|2|3|fit>    initial window scale       -fullscreen | -window
   -monitor <n>          start on monitor n (1 = primary; clears the ini id)
-  -monitorid <id>       start on the display with this name
+  -monitorid <id>       Windows: physical monitor ID from the log; Linux: display name
   -h                    help
 ```
 
@@ -334,12 +334,20 @@ lives in `pet.ini` (`[input] snes_invert`).
 | `Ctrl+O` | Load program / disk… |
 | `Ctrl+E` | Eject disk (back to the `./files` virtual drive) |
 | `Ctrl+R` | Reset |
+| `Pause/Break` / `Ctrl+P` | Pause or resume emulation and audio |
+| `F6` | Save a PNG screenshot (also works while paused) |
 | `F10` | Toggle CRT look (mono monitor shader) |
 | `F9` / `PgUp` / `PgDn` | Select a CRT shader knob / adjust it |
 | `F8` | Dump the current CRT shader values to the log |
 | `F12` | Toggle graphics ⇄ business keyboard |
 | `F11` / `Alt+Enter` | Toggle fullscreen |
 | `Esc` | Leave fullscreen, or quit |
+
+Screenshots include the current CRT appearance and save automatically under
+`screenshots` in the writable data directory (beside the executable in a portable
+installation). Each capture gets a unique filename; the saved path appears in
+the window title. Pausing shows `[Paused]` in the title and keeps the current
+picture visible. Plain `P` remains available to PET software.
 
 ---
 
@@ -349,9 +357,11 @@ lives in `pet.ini` (`[input] snes_invert`).
 File ─┬─ Load Program/Disk/Tape…   (Ctrl+O)
       ├─ Eject Disk                (Ctrl+E)
       ├─ Tape (cassette 1) ▸ Play / Stop / Rewind / Eject Tape
+      ├─ Save Screenshot           (F6)
       ├─ Reset                     (Ctrl+R)
       └─ Exit
-Machine ─┬─ Model ▸ PET 2001 / PET 2001N/3000 / PET 4000 9-inch / PET 4000 12-inch CRTC / CBM 8032   (radio)
+Machine ─┬─ Pause                    (Ctrl+P / Pause)                   (checkbox)
+         ├─ Model ▸ PET 2001 / PET 2001N/3000 / PET 4000 9-inch / PET 4000 12-inch CRTC / CBM 8032   (radio)
          ├─ Memory ▸ 4K / 8K / 16K / 32K                              (radio)
          ├─ 2× Speed                                                  (checkbox)
          ├─ Graphics Keyboard    (F12)                                (checkbox)
@@ -371,6 +381,15 @@ Files can also be **drag-and-dropped** onto the window.
 
 Settings are written to `pet.ini` in the selected writable data directory on exit. Portable installations can keep this beside the executable; see [path selection](docs/porting.md#resources-settings-and-user-files).
 
+On Windows, monitor selection uses the same `monitor_select` module as AAE:
+`1` is the OS primary display, and the remaining displays are numbered by their
+left-to-right position (then top-to-bottom). This avoids driver enumeration
+changes when G-Sync is toggled. To pin a physical display, copy its `id=` value
+from the startup log's **Monitor list** into `[video] starting_monitor_id` or
+pass it with `-monitorid`. A missing ID falls back to the configured number,
+then to the primary display if that number is unavailable. Old `\\.\DISPLAYn`
+names are not stable IDs; replace them with the logged physical ID.
+
 | Section / key | Values | Notes |
 |---|---|---|
 | `[machine] basic` | `1`, `2`, `4`, `8`, `12` | Model: original 2001 / 2001N / 4000 9-inch / 8032 / 4000 12-inch |
@@ -382,7 +401,7 @@ Settings are written to `pet.ini` in the selected writable data directory on exi
 | `[video] scale` | `0`=Fit, `1`/`2`/`3` | window scale preset |
 | `[video] fullscreen` | `0`/`1` | start fullscreen |
 | `[video] starting_monitor` | int (default `1`) | monitor to open on: `1` = primary, `2..N` = the others left-to-right |
-| `[video] starting_monitor_id` | string | wx display name; wins over the monitor number when a matching display is connected |
+| `[video] starting_monitor_id` | string | Windows: physical monitor device path from the startup log; Linux: wx display name. Takes priority when connected. |
 | `[video] crt` | `0`/`1` | mono-monitor CRT shader |
 | `[video] crt_tint` | `0`/`1` | green phosphor (`1`) vs black & white (`0`) |
 | `[video] mono_blur_h` · `mono_blur_v` | float | horizontal / vertical softness |
