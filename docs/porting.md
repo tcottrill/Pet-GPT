@@ -160,10 +160,17 @@ cmake --install build/linux --prefix "$HOME/.local"
 
 ### Flatpak
 
-`tools/package-flatpak.sh` builds Pet-GPT inside `org.freedesktop.Sdk//24.08` and
+`tools/package-flatpak.sh` builds Pet-GPT inside `org.freedesktop.Sdk//26.08` and
 writes a single-file bundle to `dist/linux/` (ignored by git). Building in the SDK
 makes the binary depend only on the runtime, so it runs on SteamOS whatever glibc
 the build machine has.
+
+The runtime and SDK branch share one setting in the script. Dependencies including
+wxWidgets build in `~/pet-gpt-flatpak/build-26.08`, separate from older SDK caches.
+Install `org.freedesktop.Platform//26.08` and `org.freedesktop.Sdk//26.08` before
+packaging. This branch is supported through September 2028; check the
+[official support schedule](https://freedesktop-sdk.gitlab.io/documentation/wiki/Releases.html)
+before future releases.
 
 ```sh
 PET_WX_SOURCE=/path/to/wxWidgets bash tools/package-flatpak.sh            # no ROMs
@@ -171,6 +178,13 @@ PET_WX_SOURCE=/path/to/wxWidgets bash tools/package-flatpak.sh --testing  # + lo
 flatpak install --user dist/linux/Pet-GPT-testing-x86_64.flatpak
 flatpak run io.github.tcottrill.Pet-GPT//testing
 ```
+
+After installing both updated branches, run `python3 tools/test-flatpak.py` from
+a Wayland desktop. It rejects an unexpected runtime branch and checks all five
+models in both installed packages, using isolated local ROM/config copies.
+Screenshots and logs go to `build/flatpak-smoke/`. The test keeps the desktop
+session's `XDG_RUNTIME_DIR`, which Flatpak portals and sandboxed image loaders
+require.
 
 The `--testing` bundle includes your local ROM sets (default `x64/Release/roms`) for
 your own machines; never publish it. Inside the sandbox settings live in

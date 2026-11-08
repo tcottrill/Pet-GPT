@@ -132,6 +132,20 @@ int main(int argc, char** argv) {
         }
         command(Scale1);
         wxTheApp->Yield(true);
+#if defined(__WXGTK__) && defined(GDK_WINDOWING_WAYLAND)
+        if (GDK_IS_WAYLAND_DISPLAY(gdk_display_get_default())) {
+            command(ScaleFit);
+            check("Wayland Fit uses compositor maximization", eventually([&] { return frame->IsMaximized(); }));
+            command(Fullscreen);
+            command(Fullscreen);
+            check("Wayland Fit survives fullscreen roundtrip", eventually([&] { return frame->IsMaximized(); }));
+            command(Scale1);
+            check("Wayland preset leaves maximization", eventually([&] { return !frame->IsMaximized(); }));
+            command(ScaleFit); command(Scale1);
+            for (int i = 0; i < 30; ++i) { wxMilliSleep(10); wxTheApp->Yield(true); }
+            check("Wayland preset cancels outstanding Fit request", !frame->IsMaximized());
+        }
+#endif
         const wxSize windowSize = frame->GetClientSize();
         command(Fullscreen); check("fullscreen entered", frame->IsFullScreen());
         command(Fullscreen); check("fullscreen exited", !frame->IsFullScreen());
@@ -190,6 +204,44 @@ int main(int argc, char** argv) {
             // Release the test's menu suspension. User pause alone must now
             // keep the screen frozen while actual timer events are processed.
             frame->Resume();
+            command(Fullscreen);
+            eventually([&] { return frame->IsFullScreen(); });
+            canvas->SetFocus();
+            wxMouseEvent enter(wxEVT_ENTER_WINDOW); enter.SetPosition(wxPoint(10, 10));
+            canvas->GetEventHandler()->ProcessEvent(enter);
+            if (frame->IsActive()) {
+                // Hides 3 s after the last activity. Late activate/configure
+                // events can restart that timer, so poll with a deadline.
+                bool kept = true; // the compositor may take focus away mid-test
+                auto still = [&] { kept = kept && frame->IsActive() && wxWindow::FindFocus() == canvas; return kept; };
+                // wxYield on MSW does not deliver the frame timer here, so tick it directly.
+                wxTimer tickSource; wxTimerEvent tick(tickSource);
+                auto step = [&] { wxMilliSleep(20); wxTheApp->Yield(true); frame->ProcessWindowEvent(tick); };
+                // Wall-clock bounds: Windows rounds short sleeps up to its timer tick.
+                const auto entered = std::chrono::steady_clock::now();
+                auto since = [&] { return std::chrono::steady_clock::now() - entered; };
+                while (since() < std::chrono::milliseconds(2000) && still()) step();
+                if (kept) check("fullscreen cursor stays visible before timeout", !frame->CursorHidden());
+                bool hidden = false;
+                while (!hidden && since() < std::chrono::seconds(7) && still()) { step(); hidden = frame->CursorHidden(); }
+                if (!kept) std::puts("NOTE: cursor hide check skipped because the test window lost focus");
+                else check("fullscreen hides idle cursor while paused", hidden);
+#ifdef __WXGTK__
+                // X11 exposes the blank cursor type; Wayland reports every
+                // themed cursor as a pixmap, so only the app state is checked there.
+                if (!native_wayland()) {
+                    auto* cursor = canvas->GetCursor().GetCursor();
+                    check("GTK applies blank cursor", cursor && gdk_cursor_get_cursor_type(cursor) == GDK_BLANK_CURSOR);
+                }
+#endif
+                wxMouseEvent motion(wxEVT_MOTION); motion.SetPosition(wxPoint(100, 100));
+                canvas->GetEventHandler()->ProcessEvent(motion);
+                check("motion restores fullscreen cursor", !frame->CursorHidden());
+            } else std::puts("NOTE: cursor focus test skipped because compositor did not activate the test window");
+            command(Fullscreen);
+            eventually([&] { return !frame->IsFullScreen(); });
+            // Wait for the windowed configure before taking the two PNGs.
+            eventually([&] { return frame->GetClientSize() == windowSize; });
             // A GL error left over from earlier rendering must not fail the capture.
             glEnable(0x7FFF); // invalid enum: queues GL_INVALID_ENUM
             command(screenshotId);

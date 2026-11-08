@@ -22,6 +22,7 @@
 #include "keyboard_input.h"
 #include "crt_dialog.h"
 #include "frame_schedule.h"
+#include "fullscreen_cursor.h"
 #include "host_options.h"
 #include "system/host_view.h"
 #include "sys_log.h"
@@ -51,6 +52,13 @@ class PetFrame;
 PetFrame* frame = nullptr;
 bool smokeMode = false;
 int applicationExitCode = 0;
+bool native_wayland() {
+#if defined(__WXGTK__) && defined(GDK_WINDOWING_WAYLAND)
+    return GDK_IS_WAYLAND_DISPLAY(gdk_display_get_default());
+#else
+    return false;
+#endif
+}
 const char* knobNames[] = {"mono_blur_h", "mono_blur_v", "mono_halation", "mono_halation_radius",
                           "mono_scanline", "mono_contrast", "mono_brightness"};
 class ProgramDropTarget final : public wxFileDropTarget {
@@ -124,8 +132,30 @@ public:
         canvas_->Bind(wxEVT_CHAR, [this](wxKeyEvent& event) { if (!userPaused_) pet_keyboard_handle_wx_char(event); });
         canvas_->Bind(wxEVT_KEY_UP, [](wxKeyEvent& event) { pet_keyboard_handle_wx(event, false); });
         canvas_->Bind(wxEVT_KILL_FOCUS, [](wxFocusEvent& event) { pet_keyboard_wx_release_all(); event.Skip(); });
-        canvas_->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent&) { canvas_->SetFocus(); });
+        canvas_->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent&) {
+            canvas_->SetFocus(); pointerHeld_ = true; UpdateCursor(true);
+        });
+        for (auto type : {wxEVT_LEFT_UP, wxEVT_MIDDLE_UP})
+            canvas_->Bind(type, [this](wxMouseEvent& event) { pointerHeld_ = event.ButtonIsDown(wxMOUSE_BTN_ANY); UpdateCursor(true); event.Skip(); });
+        for (auto type : {wxEVT_RIGHT_DOWN, wxEVT_MIDDLE_DOWN})
+            canvas_->Bind(type, [this](wxMouseEvent& event) { pointerHeld_ = true; UpdateCursor(true); event.Skip(); });
+        canvas_->Bind(wxEVT_ENTER_WINDOW, [this](wxMouseEvent& event) {
+            pointerInside_ = true;
+            pointerActivity_.update(event.GetX(), event.GetY(), true, FromDIP(6));
+            UpdateCursor(true); event.Skip();
+        });
+        canvas_->Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent& event) {
+            pointerInside_ = false; pointerHeld_ = false; pointerActivity_.update(0, 0, false, 6);
+            UpdateCursor(true); event.Skip();
+        });
+        canvas_->Bind(wxEVT_MOTION, [this](wxMouseEvent& event) {
+            pointerInside_ = true;
+            pointerHeld_ = event.ButtonIsDown(wxMOUSE_BTN_ANY);
+            UpdateCursor(event.Dragging() || pointerActivity_.update(event.GetX(), event.GetY(), true, FromDIP(6)));
+            event.Skip();
+        });
         canvas_->Bind(wxEVT_RIGHT_UP, [this](wxMouseEvent& event) {
+            pointerHeld_ = event.ButtonIsDown(wxMOUSE_BTN_ANY); UpdateCursor(true);
             if (!ready_ || closing_) return;
             Suspension suspended(*this);
             UpdateMenus();
@@ -144,13 +174,22 @@ public:
             UpdateMenus(); canvas_->SetFocus();
         }));
         Bind(wxEVT_ACTIVATE, [this](wxActivateEvent& event) {
+            if (!event.GetActive()) pointerHeld_ = false;
             RawInput_ReleaseAll(); if (!event.GetActive()) mixer_flush();
+            UpdateCursor(true);
             schedule_.Reset(Clock::now()); event.Skip();
         });
         Bind(wxEVT_MENU, &PetFrame::OnCommand, this);
         Bind(wxEVT_MENU_OPEN, [this](wxMenuEvent& event) { Pause(); UpdateMenus(); event.Skip(); });
         Bind(wxEVT_MENU_CLOSE, [this](wxMenuEvent& event) { Resume(); event.Skip(); });
         Bind(wxEVT_TIMER, &PetFrame::OnTimer, this);
+        Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+            if (pendingWindowScale_ && !IsMaximized() && !IsFullScreen()) {
+                pendingWindowScale_ = false;
+                CallAfter([this] { if (!closing_) ApplyScale(scale_); });
+            }
+            event.Skip();
+        });
         Bind(wxEVT_CLOSE_WINDOW, &PetFrame::OnClose, this);
         Show();
         if (fullscreen && !smoke_) ToggleFullscreen();
@@ -164,6 +203,8 @@ public:
         schedule_.Reset(Clock::now());
     }
     bool InputFocused() const { return ready_ && !closing_ && !paused_ && wxWindow::FindFocus() == canvas_; }
+    // For tests: GDK on Wayland reports blank and arrow cursors identically.
+    bool CursorHidden() const { return !cursorVisible_; }
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -180,6 +221,22 @@ private:
     bool userPaused_ = false;
     wxString titleNote_;
     wxSize windowedTrim_;
+    FullscreenCursor cursorPolicy_;
+    PointerActivity pointerActivity_;
+    bool cursorVisible_ = true, pointerInside_ = false, pendingWindowScale_ = false;
+    bool waylandMaximizeRequested_ = false;
+    bool pointerHeld_ = false;
+
+    void UpdateCursor(bool activity = false) {
+        if (!canvas_ || closing_) return;
+        const bool interacting = paused_ > (userPaused_ ? 1 : 0) || pointerHeld_;
+        const bool focused = IsActive() && pointerInside_ && wxWindow::FindFocus() == canvas_;
+        const double now = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+        const bool visible = cursorPolicy_.update(IsFullScreen(), focused, activity, interacting, now);        if (visible != cursorVisible_) {
+            cursorVisible_ = visible;
+            canvas_->SetCursor(wxCursor(visible ? wxCURSOR_ARROW : wxCURSOR_BLANK));
+        }
+    }
 
     struct Suspension {
         PetFrame& owner;
@@ -293,6 +350,7 @@ private:
     }
 
     void OnTimer(wxTimerEvent&) {
+        UpdateCursor(); // Wall-clock UI behavior must continue while emulation is paused.
         if (!ready_ || closing_ || paused_ || IsIconized()) { schedule_.Reset(Clock::now()); return; }
         bool dropped = false;
         const int count = schedule_.Due(Clock::now(), &dropped);
@@ -384,7 +442,24 @@ private:
     void ApplyScale(int scale) {
         scale_ = scale;
         if (IsFullScreen()) return; // defer chosen preset until returning to a window
-        if (IsMaximized()) Maximize(false);
+        if (native_wayland() && scale == 0) {
+            // Wayland owns top-level placement and usable logical geometry.
+            // Request its maximized configure instead of guessing a work area
+            // from output pixels or attempting an unsupported global Move().
+            pendingWindowScale_ = false;
+            waylandMaximizeRequested_ = true;
+            Maximize(true);
+            return;
+        }
+        if (IsMaximized() || (native_wayland() && waylandMaximizeRequested_)) {
+            waylandMaximizeRequested_ = false;
+            Maximize(false);
+            if (native_wayland() && IsMaximized()) {
+                pendingWindowScale_ = true; // apply preset after the configure event
+                return;
+            }
+        }
+        pendingWindowScale_ = false;
         int display = wxDisplay::GetFromWindow(this);
         wxRect work = display == wxNOT_FOUND ? wxGetClientDisplayRect() : wxDisplay(static_cast<unsigned>(display)).GetClientArea();
         const wxSize trim = GetSize() - GetClientSize();
@@ -402,8 +477,14 @@ private:
 
     void ToggleFullscreen() {
         if (!IsFullScreen()) { windowedTrim_ = GetSize() - GetClientSize(); ShowFullScreen(true); }
-        else { ShowFullScreen(false); if (scale_ >= 1) ApplyScale(scale_); }
+        else {
+            ShowFullScreen(false);
+            // Elsewhere ShowFullScreen(false) restores the fitted window; on
+            // Wayland Fit must be requested again as compositor maximization.
+            if (scale_ >= 1 || native_wayland()) ApplyScale(scale_);
+        }
         canvas_->SetFocus();
+        UpdateCursor(true);
     }
 
     void HandleEscape() {

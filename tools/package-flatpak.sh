@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds Pet-GPT inside the Freedesktop 24.08 SDK and packages it as a single-file
+# Builds Pet-GPT inside the Freedesktop 26.08 SDK and packages it as a single-file
 # Flatpak bundle in dist/linux/.
 #
 #   bash tools/package-flatpak.sh              release bundle, no ROMs:
@@ -24,9 +24,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ID=io.github.tcottrill.Pet-GPT
-SDK=org.freedesktop.Sdk//24.08
+# Keep SDK, runtime metadata and compiled dependency caches on the same branch.
+# 26.08 is supported through September 2028; review before that date.
+RUNTIME_VERSION=26.08
+SDK="org.freedesktop.Sdk//$RUNTIME_VERSION"
 WORK="${PET_FLATPAK_WORK:-$HOME/pet-gpt-flatpak}"
-BUILD="$WORK/build"
+BUILD="$WORK/build-$RUNTIME_VERSION"
 OUT="$ROOT/dist/linux"
 
 TESTING=0
@@ -58,7 +61,7 @@ flatpak run "${mounts[@]}" --share=network --command=bash "$SDK" -c "
 # 2. Stage the app.
 STAGE="$(mktemp -d "$WORK/stage-XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
-flatpak build-init "$STAGE" "$ID" org.freedesktop.Sdk org.freedesktop.Platform 24.08
+flatpak build-init "$STAGE" "$ID" org.freedesktop.Sdk org.freedesktop.Platform "$RUNTIME_VERSION"
 install -Dm755 "$BUILD/bin/pet-gpt" "$STAGE/files/bin/pet-gpt"
 # /app/share/pet-gpt is the resource folder (../share/pet-gpt from the binary).
 # Your own ROMs in ~/Pet-GPT/roms always take precedence over anything here.
@@ -79,6 +82,7 @@ WX_LICENCE="${PET_WX_SOURCE:-$BUILD/_deps/wx-src}/docs/licence.txt"
 
 # 3. Check the metadata the way Flathub would.
 flatpak run --filesystem="$STAGE" --command=bash "$SDK" -c "
+    set -e
     desktop-file-validate '$STAGE/files/share/applications/$ID.desktop'
     if command -v appstreamcli >/dev/null; then
         appstreamcli validate --no-net --explain '$STAGE/files/share/metainfo/$ID.metainfo.xml'

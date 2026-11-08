@@ -33,6 +33,7 @@ if(BUILD_TESTING)
   pet_test(host_view_tests petemu/system/host_view.cpp)
   pet_test(rom_loading_tests)
   pet_test(frame_schedule_tests)
+  pet_test(fullscreen_cursor_tests)
   pet_test(ini_file_tests petemu/sys_general/iniFile.cpp petemu/sys_general/sys_log.cpp)
   find_package(Threads REQUIRED)  # sys_log runs a writer thread
   target_link_libraries(ini_file_tests PRIVATE Threads::Threads)

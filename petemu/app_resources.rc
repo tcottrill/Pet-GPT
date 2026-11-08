@@ -1,4 +1,8 @@
 #include <winres.h>
+// wxWidgets stock resources (wxCURSOR_BLANK for the fullscreen cursor hide).
+// The linker embeds petemu.manifest, so leave wx.rc's manifest out.
+#define wxUSE_NO_MANIFEST 1
+#include "wx/msw/wx.rc"
 appicon ICON "petemu.ico"
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 2,7,0,0

@@ -39,6 +39,7 @@ build/
 dist/
 *.legacy
 *.sdl-discarded
+__pycache__/
 
 # Local runtime preferences
 PetGPT/pet.ini

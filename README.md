@@ -360,6 +360,11 @@ the executable in a portable installation). Each capture gets a unique filename;
 the window title. Pausing shows `[Paused]` in the title and keeps the current
 picture visible. Plain `P` remains available to PET software.
 
+In fullscreen, the mouse cursor hides after three seconds of inactivity, even
+while paused; move the mouse to show it again. On native Wayland, **Fit to Screen**
+uses compositor maximization so panels, decorations, and display scaling are
+handled by the desktop. The PET picture retains its 4:3 aspect ratio.
+
 ---
 
 ## 📂 Menus
