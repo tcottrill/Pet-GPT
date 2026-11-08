@@ -57,12 +57,19 @@ int main(int argc, char** argv) {
     std::vector<std::string> testArgs = {argv[0], "--smoke-test"};
 #ifdef __WXMSW__
     const auto monitors = monsel::Enumerate();
-    const auto expectedMonitor = monitors.back();
-    SetIniFile((directory + "/pet.ini").ToStdString(wxConvUTF8).c_str());
-    set_config_int("video", "starting_monitor", expectedMonitor.deviceId.empty() ? expectedMonitor.number : 1);
-    set_config_string("video", "starting_monitor_id", expectedMonitor.deviceId.c_str());
-    // Choose the last physical display, with primary as numeric fallback,
-    // so ignoring the physical ID cannot accidentally pass on multi-monitor PCs.
+    // A headless session (CI service account, no display) can enumerate
+    // nothing; skip the monitor check there instead of reading past the end.
+    const bool haveMonitor = !monitors.empty();
+    const monsel::MonitorDesc expectedMonitor = haveMonitor ? monitors.back() : monsel::MonitorDesc{};
+    if (haveMonitor) {
+        SetIniFile((directory + "/pet.ini").ToStdString(wxConvUTF8).c_str());
+        set_config_int("video", "starting_monitor", expectedMonitor.deviceId.empty() ? expectedMonitor.number : 1);
+        set_config_string("video", "starting_monitor_id", expectedMonitor.deviceId.c_str());
+        // Choose the last physical display, with primary as numeric fallback,
+        // so ignoring the physical ID cannot accidentally pass on multi-monitor PCs.
+    } else {
+        std::fprintf(stderr, "NOTE: no monitors enumerated; skipping the monitor selection check.\n");
+    }
 #endif
     std::vector<char*> testArgv;
     for (auto& arg : testArgs) testArgv.push_back(arg.data());
@@ -79,7 +86,7 @@ int main(int argc, char** argv) {
     wxTheApp->Yield(true);
     check("startup succeeded", frame && applicationExitCode == 0);
 #ifdef __WXMSW__
-    if (frame) check("startup uses stable physical monitor selection",
+    if (frame && haveMonitor) check("startup uses stable physical monitor selection",
         monsel::FromWindow(static_cast<HWND>(frame->GetHandle())).handle == expectedMonitor.handle);
 #endif
     if (frame && applicationExitCode == 0) {
@@ -138,10 +145,21 @@ int main(int argc, char** argv) {
         check("pause menu available", pauseId != wxNOT_FOUND);
         check("screenshot menu available", screenshotId != wxNOT_FOUND);
         if (canvas && pauseId != wxNOT_FOUND && screenshotId != wxNOT_FOUND) {
-            for (const int id : {pauseId, screenshotId}) {
+            for (const int id : {pauseId, screenshotId, int(Load), int(Eject), int(Reset),
+                                 int(Fullscreen), int(Graphics), int(Crt)}) {
                 std::unique_ptr<wxAcceleratorEntry> native(frame->GetMenuBar()->FindItem(id)->GetAccel());
-                check("new shortcut has no native menu repeat bypass", !native);
+                check("shortcut has no native menu repeat bypass", !native);
             }
+            // A held F11 must toggle fullscreen once, not on every repeat.
+            const bool fullBefore = frame->IsFullScreen();
+            wxKeyEvent f11(wxEVT_KEY_DOWN); f11.m_keyCode = WXK_F11;
+            canvas->GetEventHandler()->ProcessEvent(f11);
+            wxKeyEvent f11Repeat(f11); f11Repeat.m_isRepeat = true;
+            canvas->GetEventHandler()->ProcessEvent(f11Repeat);
+            canvas->GetEventHandler()->ProcessEvent(f11Repeat);
+            check("held F11 toggles fullscreen once", frame->IsFullScreen() != fullBefore);
+            canvas->GetEventHandler()->ProcessEvent(f11);
+            check("second F11 press restores the window", frame->IsFullScreen() == fullBefore);
             // Boot a real display so a blank but valid PNG cannot pass.
             for (int i = 0; i < 150; ++i) emu_run_frame();
             wxKeyEvent pauseKey(wxEVT_KEY_DOWN); pauseKey.m_keyCode = WXK_PAUSE;
@@ -172,6 +190,8 @@ int main(int argc, char** argv) {
             // Release the test's menu suspension. User pause alone must now
             // keep the screen frozen while actual timer events are processed.
             frame->Resume();
+            // A GL error left over from earlier rendering must not fail the capture.
+            glEnable(0x7FFF); // invalid enum: queues GL_INVALID_ENUM
             command(screenshotId);
             for (int i = 0; i < 30; ++i) { wxMilliSleep(20); wxTheApp->Yield(true); }
             wxKeyEvent shotKey(wxEVT_KEY_DOWN); shotKey.m_keyCode = WXK_F6;

@@ -121,8 +121,9 @@ public:
         });
         canvas_->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) { canvas_->Refresh(false); event.Skip(); });
         canvas_->Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& event) { if (!HandleShortcut(event) && !userPaused_) pet_keyboard_handle_wx(event, true); });
+        canvas_->Bind(wxEVT_CHAR, [this](wxKeyEvent& event) { if (!userPaused_) pet_keyboard_handle_wx_char(event); });
         canvas_->Bind(wxEVT_KEY_UP, [](wxKeyEvent& event) { pet_keyboard_handle_wx(event, false); });
-        canvas_->Bind(wxEVT_KILL_FOCUS, [](wxFocusEvent& event) { RawInput_ReleaseAll(); event.Skip(); });
+        canvas_->Bind(wxEVT_KILL_FOCUS, [](wxFocusEvent& event) { pet_keyboard_wx_release_all(); event.Skip(); });
         canvas_->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent&) { canvas_->SetFocus(); });
         canvas_->Bind(wxEVT_RIGHT_UP, [this](wxMouseEvent& event) {
             if (!ready_ || closing_) return;
@@ -202,16 +203,18 @@ private:
     void BuildMenus() {
         auto* bar = new wxMenuBar;
         auto* file = new wxMenu;
-        file->Append(Load, "&Load Program / Disk / Tape...\tCtrl+O");
-        file->Append(Eject, "&Eject Disk\tCtrl+E");
+        // Shortcuts are shown in the labels but are not native menu
+        // accelerators: Windows accelerators bypass the canvas's IsAutoRepeat
+        // guard, so a held key would repeat the command (fullscreen flipping
+        // back and forth, repeated resets). HandleShortcut runs them all.
+        file->Append(Load, "&Load Program / Disk / Tape... (Ctrl+O)");
+        file->Append(Eject, "&Eject Disk (Ctrl+E)");
         auto* tape = new wxMenu;
         tape->AppendCheckItem(TapePlay, "&Play"); tape->Append(TapeStop, "&Stop");
         tape->Append(TapeRewind, "&Rewind"); tape->Append(TapeEject, "&Eject");
         file->AppendSubMenu(tape, "&Tape"); file->AppendSeparator();
-        // Show these shortcuts without native menu accelerators: Windows
-        // accelerators bypass the canvas's IsAutoRepeat guard.
         file->Append(Screenshot, "Save &Screenshot (F6)"); file->AppendSeparator();
-        file->Append(Reset, "&Reset\tCtrl+R"); file->AppendSeparator(); file->Append(wxID_EXIT, "E&xit");
+        file->Append(Reset, "&Reset (Ctrl+R)"); file->AppendSeparator(); file->Append(wxID_EXIT, "E&xit");
         bar->Append(file, "&File");
         auto* machine = new wxMenu;
         machine->AppendCheckItem(TogglePause, "&Pause (Ctrl+P / Pause)", "Pause or resume emulation and audio");
@@ -226,7 +229,7 @@ private:
         memory->AppendRadioItem(Ram16, "16 KB"); memory->AppendRadioItem(Ram32, "32 KB");
         machine->AppendSubMenu(memory, "&Memory"); machine->AppendSeparator();
         machine->AppendCheckItem(Speed, "&2x Speed");
-        machine->AppendCheckItem(Graphics, "&Graphics Keyboard\tF12");
+        machine->AppendCheckItem(Graphics, "&Graphics Keyboard (F12)");
         machine->Append(Keyboard, "&Keyboard Mapping...");
         machine->AppendCheckItem(Snes, "&SNES Adapter");
         bar->Append(machine, "&Machine");
@@ -235,21 +238,14 @@ private:
         view->AppendRadioItem(Scale2, "&2x (640 x 480)");
         view->AppendRadioItem(Scale3, "&3x (960 x 720)");
         view->AppendRadioItem(ScaleFit, "&Fit to Screen"); view->AppendSeparator();
-        view->AppendCheckItem(Fullscreen, "&Fullscreen\tF11"); view->AppendSeparator();
-        view->AppendCheckItem(Crt, "&CRT (mono monitor)\tF10");
+        view->AppendCheckItem(Fullscreen, "&Fullscreen (F11 / Alt+Enter)"); view->AppendSeparator();
+        view->AppendCheckItem(Crt, "&CRT (mono monitor) (F10)");
         auto* monitor = new wxMenu;
         monitor->AppendRadioItem(Green, "Green phosphor"); monitor->AppendRadioItem(White, "Black && white");
         view->AppendSubMenu(monitor, "&Monitor"); view->Append(CrtSettings, "CRT Monitor &Settings...");
         bar->Append(view, "&View");
         auto* help = new wxMenu; help->Append(wxID_ABOUT, "&About Pet-GPT..."); bar->Append(help, "&Help");
         SetMenuBar(bar);
-        wxAcceleratorEntry accelerators[] = {
-            wxAcceleratorEntry(wxACCEL_CTRL, 'O', Load), wxAcceleratorEntry(wxACCEL_CTRL, 'E', Eject),
-            wxAcceleratorEntry(wxACCEL_CTRL, 'R', Reset), wxAcceleratorEntry(wxACCEL_ALT, WXK_RETURN, Fullscreen),
-            wxAcceleratorEntry(wxACCEL_NORMAL, WXK_F11, Fullscreen), wxAcceleratorEntry(wxACCEL_NORMAL, WXK_F10, Crt),
-            wxAcceleratorEntry(wxACCEL_NORMAL, WXK_F12, Graphics)
-        };
-        SetAcceleratorTable(wxAcceleratorTable(sizeof(accelerators) / sizeof(accelerators[0]), accelerators));
     }
 
     void Initialize() {
@@ -315,7 +311,11 @@ private:
         }
     }
 
-    wxImage CaptureScreen() {
+    // clearStaleErrors: discard GL errors left by earlier frames so the caller's
+    // glGetError() reports only this capture. The smoke check keeps them, since
+    // catching rendering errors is its purpose.
+    wxImage CaptureScreen(bool clearStaleErrors = false) {
+        if (clearStaleErrors) { canvas_->SetCurrent(*context_); while (glGetError() != GL_NO_ERROR) {} }
         PrepareViewport(); emu_present(); glFinish();
         const auto size = canvas_->GetClientSize();
         const double dpi = canvas_->GetContentScaleFactor();
@@ -331,7 +331,7 @@ private:
     }
 
     void SaveScreenshot() {
-        const wxImage image = CaptureScreen();
+        const wxImage image = CaptureScreen(/*clearStaleErrors=*/true);
         if (!image.IsOk() || glGetError() != GL_NO_ERROR) {
             host_message("Screenshot failed", "Unable to capture the PET display.", true); return;
         }
@@ -521,7 +521,8 @@ private:
         case Screenshot: SaveScreenshot(); break;
         case Load: {
             const auto directory = get_config_string(std::string("paths"), std::string("lastromdir"), std::string());
-            wxFileDialog dialog(this, "Load PET software", wxString::FromUTF8(directory), "",
+            // First load: start in the programs folder (~/Pet-GPT/files on Linux).
+            wxFileDialog dialog(this, "Load PET software", wxString::FromUTF8(directory.empty() ? data_path("files") : directory), "",
                 "PET software (*.prg;*.t64;*.tap;*.d64;*.d71)|*.prg;*.PRG;*.t64;*.T64;*.tap;*.TAP;*.d64;*.D64;*.d71;*.D71|All files|*",
                 wxFD_OPEN | wxFD_FILE_MUST_EXIST);
             if (dialog.ShowModal() == wxID_OK) {

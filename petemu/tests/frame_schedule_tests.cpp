@@ -12,6 +12,13 @@ int main() {
     require(options.rom == "/tmp/first.prg" && options.monitorId.empty() && options.monitor == 2, "absolute Linux path and explicit monitor override");
     options = parse_host_options({"pet-gpt", "-disk", "image.d64", "-scale", "FIT", "-?"});
     require(options.rom.empty() && options.scale == 0 && options.help, "disk argument is not also loaded as a program; legacy help");
+    require(options.disk == "image.d64" && options.model == 0, "disk path captured; no model given");
+    options = parse_host_options({"pet-gpt", "--disk=My Disk.D64", "-8032"});
+    require(options.disk == "My Disk.D64" && options.model == 8, "--disk=value keeps case and spaces; -8032");
+    options = parse_host_options({"pet-gpt", "-DISK", "a.d64", "--4032"});
+    require(options.disk == "a.d64" && options.model == 12, "upper-case -DISK; double-dash model flag");
+    options = parse_host_options({"pet-gpt", "-basic4", "-PET2001"});
+    require(options.model == 1, "last model flag wins, any case");
     require(host_effective_scale(3, 700, 500, 320, 240) == 2, "large requested scale falls back to lower preset");
     require(host_effective_scale(1, 300, 220, 320, 240) == 0, "tiny monitor falls back to Fit");
     FrameSchedule schedule;

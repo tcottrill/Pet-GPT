@@ -442,6 +442,12 @@ static void audio_thread_func() {
 	LOG_INFO("Audio thread: started");
 	std::unique_lock<std::mutex> lock(audioCVMutex);
 
+	// Idle (paused, menu open, minimized) is reported once when it starts and
+	// once when it ends. Logging every 1 s timeout added a line per second for
+	// as long as the emulator stayed paused.
+	bool idle = false;
+	auto idleSince = std::chrono::steady_clock::now();
+
 	while (!audioThreadExit.load(std::memory_order_acquire)) {
 		// Wait with timeout to detect long idle times
 		bool woke = audioCV.wait_for(lock, std::chrono::seconds(1), [] {
@@ -452,8 +458,18 @@ static void audio_thread_func() {
 		if (audioThreadExit.load(std::memory_order_acquire)) break;
 		
 		if (!woke) {
-			LOG_INFO("Audio thread: waited >1s without signal (emulator paused?)");
+			if (!idle) {
+				idle = true;
+				idleSince = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+				LOG_INFO("Audio thread: idle, no frame signal for >1s (emulator paused?)");
+			}
 			continue;
+		}
+		if (idle) {
+			idle = false;
+			const auto idleMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - idleSince).count();
+			LOG_INFO("Audio thread: resumed after %.1f s idle", idleMs / 1000.0);
 		}
 
 		// Double-check exit flag before processing

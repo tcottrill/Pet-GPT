@@ -109,11 +109,21 @@ Selection order is:
 2. Without the override, resources start beside the executable. Installed Linux
    layouts can use `../share/pet-gpt` relative to it.
 3. An existing writable `pet.ini` in the resource directory enables portable mode.
-   Otherwise wxWidgets' platform user data directory is used for settings and files.
-4. Resources present in the writable user data directory take precedence over the
-   resource directory. This permits private user ROM sets with a system installation.
+   Otherwise settings and user content go to per-user folders:
+   - Windows: wxWidgets' user data directory, `%APPDATA%\Pet-GPT`, for both.
+   - Linux: split the way AAE and Dolphin do it, because the program's own folder
+     and dot-folders are hidden on SteamOS. `pet.ini` and the log go to
+     `$XDG_DATA_HOME/pet-gpt` (default `~/.local/share/pet-gpt`); `files/`, `roms/`
+     and `screenshots/` go to the visible `~/Pet-GPT`, which gets a `README.txt`.
+     An older single folder, `~/.Pet-GPT`, is moved into this layout on first start
+     without overwriting anything; leftovers are reported in the log and the old
+     folder is removed only once empty.
+4. Resources present in the user folders take precedence over the resource
+   directory. This permits private user ROM sets with a system installation.
 
-The application creates the writable `files/` directory. Existing installations
+The routing lives in `system/portable_paths.cpp` (`pet_paths::route`); `paths_tests`
+covers the layout and the migration. The application creates the writable `files/`
+directory. Existing installations
 can retain their numeric keyboard mappings and `pet.ini` keys. Do not copy private
 ROMs or user disks into public packages. A writable `PETGPT_DATA_DIR` is also useful
 for isolated tests without modifying an existing installation.

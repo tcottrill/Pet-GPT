@@ -49,7 +49,22 @@ int main(int argc,char** argv){
  check("Cancel discards draft",pet_keyboard_bindings()['A']==PET_KEY_DEFAULT);
  check("wx punctuation identity",pet_key_from_wx(';')==VK_OEM_1&&pet_key_from_wx('?')==VK_OEM_2);
  wxKeyEvent press(wxEVT_KEY_DOWN);press.m_keyCode='A';pet_keyboard_handle_wx(press,true);check("wx keydown published",IsKeyDown('A'));
- wxKeyEvent shortcut(wxEVT_KEY_DOWN);shortcut.m_keyCode='O';shortcut.SetControlDown(true);pet_keyboard_handle_wx(shortcut,true);check("Shortcut releases PET input",IsKeyUp('A')&&IsKeyUp('O'));
+ wxKeyEvent ctrl(wxEVT_KEY_DOWN);ctrl.m_keyCode=WXK_CONTROL;ctrl.SetControlDown(true);pet_keyboard_handle_wx(ctrl,true);check("Ctrl alone keeps held keys",IsKeyDown('A'));
+ wxKeyEvent shortcut(wxEVT_KEY_DOWN);shortcut.m_keyCode='O';shortcut.SetControlDown(true);pet_keyboard_handle_wx(shortcut,true);check("Shortcut does not leak a PET key",IsKeyUp('O')&&IsKeyDown('A'));
+ pet_keyboard_wx_release_all();
+ // AltGr (Ctrl+Alt) composes a layout character; it reaches the PET as the
+ // key that types it, and the physical key's release lets go of it.
+ wxKeyEvent altgr(wxEVT_KEY_DOWN);altgr.m_keyCode='Q';altgr.SetControlDown(true);altgr.SetAltDown(true);
+ pet_keyboard_handle_wx(altgr,true);check("AltGr key-down waits for its character",IsKeyUp('Q')&&IsKeyUp('2'));
+ wxKeyEvent at(wxEVT_CHAR);at.m_keyCode='@';at.m_uniChar='@';at.SetControlDown(true);at.SetAltDown(true);
+ pet_keyboard_handle_wx_char(at);check("AltGr @ types shifted 2",IsKeyDown('2')&&IsKeyDown(VK_SHIFT)&&IsKeyUp('Q'));
+ wxKeyEvent altgrUp(wxEVT_KEY_UP);altgrUp.m_keyCode='Q';pet_keyboard_handle_wx(altgrUp,false);check("AltGr key-up releases it",IsKeyUp('2')&&IsKeyUp(VK_SHIFT));
+ wxKeyEvent plainChar(wxEVT_CHAR);plainChar.m_keyCode='x';plainChar.m_uniChar='x';
+ pet_keyboard_handle_wx_char(plainChar);check("Unrelated char event ignored",IsKeyUp('X'));
+ int vk=0;bool sh=false;
+ check("Reverse map: letter",pet_keyboard_vk_for_char('a',&vk,&sh)&&vk=='A'&&!sh);
+ check("Reverse map: bracket",pet_keyboard_vk_for_char('[',&vk,&sh)&&vk==VK_OEM_4&&!sh);
+ check("Reverse map: pipe",pet_keyboard_vk_for_char('|',&vk,&sh)&&vk==VK_OEM_5&&sh);
  RawInput_SetKey(VK_SHIFT,true);RawInput_ReleaseAll();check("Focus release clears modifiers",IsKeyUp(VK_SHIFT));
  wxTheApp->OnExit();wxEntryCleanup();printf("Keyboard dialog failures: %d\n",failures);return failures?1:0;
 }

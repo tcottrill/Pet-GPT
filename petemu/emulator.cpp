@@ -41,6 +41,7 @@
 #include "joystick.h"        // XInput/WinMM gamepad layer
 #include "iniFile.h"         // pet.ini config
 #include "snes_adapter.h"    // SNES button bit positions
+#include "wx/host_options.h" // shared command-line parser (header only, no wx)
 
 #pragma warning( disable : 4996 4244)
 
@@ -133,20 +134,12 @@ UINT32 dwResult = 0;
 UINT32 dwDisplayInterval = 0;
 UINT32 dwIntTotal = 0;
 
-// Simple boolean flag scan (e.g., -basic4)
-static bool arg_has(int argc, char** argv, const char* key) {
-	for (int i = 1; i < argc; ++i) {
-		if (std::string(argv[i]) == key) return true;
-	}
-	return false;
-}
-
-// Simple arg scan
-static std::string arg_get(int argc, char** argv, const char* key) {
-	for (int i = 1; i + 1 < argc; ++i) {
-		if (std::string(argv[i]) == key) return std::string(argv[i + 1]);
-	}
-	return {};
+// Command line: the same parser as the frontend (wx/host_options.h, header
+// only), so -DISK, --disk=x.d64 and --8032 work here exactly as they do there.
+static HostOptions parse_core_options(int argc, char** argv) {
+	std::vector<std::string> args;
+	for (int i = 0; i < argc; ++i) if (argv[i]) args.emplace_back(argv[i]);
+	return parse_host_options(args);
 }
 
 static bool ends_with_icase(const std::string& s, const char* suffix) {
@@ -285,12 +278,8 @@ bool emu_init(int argc, char** argv)
 	g_pet->bus().setRamSize((size_t)g_ram_kb * 1024);
 
 	// --- Load ROM set from disk ---
-	int want = arg_has(argc, argv, "-pet2001") || arg_has(argc, argv, "-basic1") ? 1
-	         : arg_has(argc, argv, "-4032") ? 12
-	         : arg_has(argc, argv, "-8032") ? 8
-	         : arg_has(argc, argv, "-basic4") ? 4
-	         : arg_has(argc, argv, "-basic2") ? 2
-	         : get_config_int("machine", "basic", 2);
+	const HostOptions options = parse_core_options(argc, argv);
+	int want = options.model ? options.model : get_config_int("machine", "basic", 2);
 	if (!load_basic_set(want)) { host_message("Missing ROMs", "Cannot load the selected PET ROM set. Check the roms directory.", true); emu_end(); return false; }
 
 	// --- Sanity: verify ROM mapping and vectors ---
@@ -324,7 +313,7 @@ bool emu_init(int argc, char** argv)
 	g_pet->bus().io().setIeeeHostRoot(filesRoot);   // always mount the folder
 
 	// Parse: -disk "filename.xxx" (resolved relative to ./files)
-	const std::string diskArg = arg_get(argc, argv, "-disk");
+	const std::string diskArg = options.disk;
 	if (!diskArg.empty()) {
 		const std::string hostPath = filesRoot + "/" + diskArg;
 

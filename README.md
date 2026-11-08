@@ -185,8 +185,19 @@ PETGPT_DATA_DIR="$HOME/PET-data" ./build/linux/bin/pet-gpt
 ```
 
 Without this override, an existing writable `pet.ini` beside the resources enables
-portable mode. Installed builds otherwise use the platform user data directory for
-settings and files; user-supplied ROMs there override installed resources. See
+portable mode. Otherwise:
+
+| | Settings (`pet.ini`) and log | Programs, ROMs, screenshots |
+|---|---|---|
+| **Windows** | `%APPDATA%\Pet-GPT` | `%APPDATA%\Pet-GPT\files`, `roms`, `screenshots` |
+| **Linux** | `~/.local/share/pet-gpt` (`$XDG_DATA_HOME/pet-gpt`) | `~/Pet-GPT/files`, `roms`, `screenshots` |
+
+On Linux the folders you add to are in plain sight in `~/Pet-GPT` (the program's
+own folder, and dot-folders, are hidden on SteamOS), and a `README.txt` there says
+what goes where. Resetting the settings folder never touches them. A folder from an
+older build, `~/.Pet-GPT`, is moved into this layout on first start; nothing that
+already exists is overwritten, and anything left over is listed in the log.
+User-supplied ROMs override installed resources. See
 [path selection](docs/porting.md#resources-settings-and-user-files) for details.
 
 ### `roms/` — your Commodore ROM dumps (Pet-GPT ships none)
@@ -344,8 +355,8 @@ lives in `pet.ini` (`[input] snes_invert`).
 | `Esc` | Leave fullscreen, or quit |
 
 Screenshots include the current CRT appearance and save automatically under
-`screenshots` in the writable data directory (beside the executable in a portable
-installation). Each capture gets a unique filename; the saved path appears in
+`screenshots` (`~/Pet-GPT/screenshots` on Linux, the data folder on Windows, beside
+the executable in a portable installation). Each capture gets a unique filename; the saved path appears in
 the window title. Pausing shows `[Paused]` in the title and keeps the current
 picture visible. Plain `P` remains available to PET software.
 

@@ -53,6 +53,10 @@ std::wstring pet_keyboard_action_name(int action);
 // Preview uses exactly the same matrix builder as live input, without hotkeys
 // or changes to the active bindings. A draft allows Cancel to discard edits.
 std::wstring pet_keyboard_label(int vk, bool shift, const PetKeyBindings* draft = nullptr);
+// Host key (and whether Shift is needed) that the symbolic translation turns
+// into this printable ASCII character. Used for characters a host layout
+// composes another way (AltGr on international keyboards). False if none.
+bool pet_keyboard_vk_for_char(unsigned char ch, int* vk, bool* shift) noexcept;
 
 class PetMachine;
 

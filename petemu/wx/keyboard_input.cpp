@@ -2,7 +2,10 @@
 
 #include <wx/window.h>
 #include <wx/event.h>
+#include <map>
+#include <utility>
 #include "../sys_input/rawinput.h"
+#include "../petsrc/pet_kbd_input.h"
 int pet_key_from_wx(int c) {
  if(c>='a' && c<='z') return c-32;
  if((c>='A' && c<='Z') || (c>='0' && c<='9')) return c;
@@ -36,18 +39,73 @@ int pet_key_from_wx(int c) {
  default:return 0;
  }
 }
+
+namespace {
+// AltGr on international layouts (Windows reports it as Ctrl+Alt) composes
+// characters such as '@' on a German keyboard. The key event only carries the
+// unmodified key, so the key-down is skipped to let wx produce the composed
+// character, which becomes the PET key that types it. The physical key code is
+// remembered so its key-up releases what was pressed.
+int altgr_pending=0;
+std::map<int,std::pair<int,bool>> altgr_held;   // wx key code -> (vk, forced shift)
+
+bool is_non_shift_modifier(int code) {
+ switch(code) {
+ case WXK_CONTROL: case WXK_ALT: case WXK_WINDOWS_LEFT: case WXK_WINDOWS_RIGHT:
+ case WXK_WINDOWS_MENU: return true;
+ default: return false;
+ }
+}
+}
+
 void pet_keyboard_handle_wx(wxKeyEvent& e,bool down) {
- const int vk=pet_key_from_wx(e.GetKeyCode());
- if(!down) {RawInput_ReleaseKey(vk);return;}
- // Menu accelerators must never leak a PET letter, RETURN, or custom binding.
- if(e.ControlDown() || e.AltDown() || e.MetaDown()) {RawInput_ReleaseAll();return;}
+ const int code=e.GetKeyCode();
+ const int vk=pet_key_from_wx(code);
+ if(!down) {
+  const auto held=altgr_held.find(code);
+  if(held!=altgr_held.end()) {
+   RawInput_ReleaseKey(held->second.first);
+   if(held->second.second) RawInput_SetKey(VK_SHIFT,e.ShiftDown());
+   altgr_held.erase(held);
+   return;
+  }
+  RawInput_ReleaseKey(vk);
+  return;
+ }
+ altgr_held.erase(code);   // a stale AltGr entry must not capture this key's release
+ // Ctrl/Alt/Win on their own mean nothing to the PET; they must not drop keys
+ // that are already held (a game key held while Ctrl is pressed).
+ if(is_non_shift_modifier(code)) return;
+ if(e.ControlDown() && e.AltDown() && !e.MetaDown()) { altgr_pending=code; e.Skip(); return; }
+ // Menu accelerators and host shortcuts must never leak a PET letter, RETURN,
+ // or custom binding.
+ if(e.ControlDown() || e.AltDown() || e.MetaDown()) return;
+ altgr_pending=0;
  RawInput_SetKey(VK_SHIFT,e.ShiftDown());
  RawInput_SetKey(vk,true);
 }
-void wx_bind_pet_keyboard(wxWindow* window) {
- window->Bind(wxEVT_KEY_DOWN,[](wxKeyEvent& e){pet_keyboard_handle_wx(e,true);});
- window->Bind(wxEVT_KEY_UP,[](wxKeyEvent& e){pet_keyboard_handle_wx(e,false);});
- window->Bind(wxEVT_KILL_FOCUS,[](wxFocusEvent& e){RawInput_ReleaseAll();e.Skip();});
+
+void pet_keyboard_handle_wx_char(wxKeyEvent& e) {
+ const int code=altgr_pending;
+ altgr_pending=0;
+ if(!code) { e.Skip(); return; }
+ const wxChar ch=e.GetUnicodeKey();
+ int vk=0; bool shift=false;
+ if(ch<32 || ch>126 || !pet_keyboard_vk_for_char(static_cast<unsigned char>(ch),&vk,&shift)) return;
+ altgr_held[code]={vk,shift};
+ RawInput_SetKey(VK_SHIFT,shift);
+ RawInput_SetKey(vk,true);
 }
 
+void pet_keyboard_wx_release_all() {
+ altgr_pending=0;
+ altgr_held.clear();
+ RawInput_ReleaseAll();
+}
 
+void wx_bind_pet_keyboard(wxWindow* window) {
+ window->Bind(wxEVT_KEY_DOWN,[](wxKeyEvent& e){pet_keyboard_handle_wx(e,true);});
+ window->Bind(wxEVT_CHAR,[](wxKeyEvent& e){pet_keyboard_handle_wx_char(e);});
+ window->Bind(wxEVT_KEY_UP,[](wxKeyEvent& e){pet_keyboard_handle_wx(e,false);});
+ window->Bind(wxEVT_KILL_FOCUS,[](wxFocusEvent& e){pet_keyboard_wx_release_all();e.Skip();});
+}

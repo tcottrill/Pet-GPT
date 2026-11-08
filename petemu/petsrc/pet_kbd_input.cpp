@@ -296,6 +296,23 @@ static bool vk_to_ascii(unsigned vk, const unsigned char state[256], unsigned ch
     }
     return true;
 }
+bool pet_keyboard_vk_for_char(unsigned char ch, int* vk, bool* shift) noexcept
+{
+    if (ch < 32 || ch > 126 || !vk || !shift) return false;
+    unsigned char state[256] = {};
+    for (int pass = 0; pass < 2; ++pass) {          // prefer the unshifted key
+        state[VK_SHIFT] = pass ? 0x80 : 0;
+        for (int v = 1; v < 256; ++v) {
+            if (v >= VK_NUMPAD0 && v <= VK_DIVIDE) continue;   // main keyboard first
+            unsigned char out = 0;
+            if (vk_to_ascii(static_cast<unsigned>(v), state, out) && out == ch) {
+                *vk = v; *shift = pass != 0; return true;
+            }
+        }
+    }
+    return false;
+}
+
 // -----------------------------------------------------------------------------
 // Graphics mode toggle: true => Shift+letter asserts PET Shift (graphics chars)
 // Business mode       : false => letters do not assert PET Shift
