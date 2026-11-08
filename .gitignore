@@ -1,0 +1,42 @@
+# Visual Studio / build output
+.vs/
+*.user
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.exe
+*.exe.manifest
+*.exp
+*.lib
+*.res
+x64/
+Debug/
+Release/
+
+# Logs
+*.log
+emulatorlog.txt
+*-log.txt
+
+# Archives / manual backups
+*.7z
+
+# ROM / disk / media data (copyrighted dumps & runtime data, not source)
+roms/
+files/
+*.bin
+*.d64
+*.prg
+*.tap
+*.crt
+*.pet
+
+# Local source snapshots (not published)
+backups/
+build/
+*.legacy
+*.sdl-discarded
+
+# Local runtime preferences
+PetGPT/pet.ini

@@ -1,0 +1,184 @@
+Pet-GPT - Commodore PET/CBM Emulator
+Version 2.7 - The One with the configurable keyboard!
+=====================================================
+
+Configurable keyboard (NEW)
+- Machine > Keyboard Mapping... opens a Windows-style keyboard diagram. PC key
+  names are shown on top with their PET functions underneath. The window fits
+  the current monitor and can be resized or maximized; keys, labels and
+  controls scale together.
+- Remap by pressing a key: click the PC key you want to change (it turns
+  yellow), then press the key whose PET function you want. For example, click A
+  and press B to make the physical A key type PET B. Only the clicked key
+  changes, and Escape cancels. The assignment dropdown is still there for
+  picking a PET function directly.
+- Show Shift mappings previews the shifted functions for the current PET model
+  and typing mode.
+- Apply or OK saves the layout to pet.ini ([input] keyboard_bindings); Cancel
+  discards changes since the last Apply. Clear a key, restore one key, or
+  restore all defaults. Shift stays a modifier, reserved host/system keys stay
+  gray and cannot be remapped, and Ctrl+O/E/R and Alt+Enter remain emulator
+  shortcuts.
+
+Screen size, multi-monitor and DPI (NEW)
+- Per-monitor DPI awareness: the title bar, menus and dialogs stay sharp and
+  rescale when the window moves between monitors with different scaling, and
+  the window keeps its size when dragged across.
+- Scale presets are now DPI-aware logical sizes: 1x = 320x240, 2x = 640x480,
+  3x = 960x720 (so on a 4K monitor at 150% they are 480x360 / 960x720 /
+  1440x1080 pixels). Presets that don't fit the current monitor are grayed
+  out; on a smaller monitor the window steps down to the largest preset that
+  fits, and the chosen preset comes back when you move to a bigger one.
+- Fit now sizes the window to the largest 4:3 area that fits the monitor's
+  work area.
+- Choose the start monitor: pet.ini [video] starting_monitor (1 = primary,
+  2..N = the others left to right) or starting_monitor_id (a stable device id,
+  listed under "Monitor list" in petemu-log.txt), or -monitor N /
+  -monitorid <id> on the command line. Monitor numbering no longer changes
+  when the graphics driver re-enumerates displays.
+- Plugging or unplugging a display re-fits fullscreen and brings an
+  off-screen window back into view.
+
+Other
+- PetEmu.exe now carries version information (2.7.0.0). The first 2.6 build
+  lacked it and some antivirus heuristics flagged it.
+- New keyboard and keyboard-dialog tests. Run petemu\tests\run_tests.bat.
+
+Download: PetGPT_2.7_Release.zip contains PetEmu.exe, pet.ini, download-roms.ps1,
+the roms\ folder layout, and a couple of sample programs in files\. No Commodore
+ROMs are included; run download-roms.ps1 to fetch them. Upgrading from 2.6:
+keep your roms\ folder; your old pet.ini works as is.
+
+
+Version 2.6 - The one with the features!
+========================================
+
+New machines
+- Five machine models, all from Machine > Model (or the command line):
+  - PET 2001 (original 1977): BASIC 1, 8 KB, original character ROM  (-pet2001)
+  - PET 2001N / 3000: BASIC 2, discrete video                        (-basic2)
+  - PET 4000 9-inch: BASIC 4, discrete video                         (-basic4)
+  - PET 4000 12-inch (NEW): BASIC 4, 40-column 6545 CRTC, 60 Hz      (-4032)
+  - CBM 8032: BASIC 4, 80-column 6545 CRTC, 60 Hz                    (-8032)
+- The 4000 family covers 4016/4032 by RAM size (default 32 KB). The 2001 is fixed
+  at 8 KB and the 8032 at 32 KB. Banked 8096/8296 models are not implemented.
+- pet.ini [machine] basic accepts 1 / 2 / 4 / 8 / 12. The old values 2/4/8 keep
+  their meaning.
+
+Tape and program loading
+- TAP cassette playback (NEW): load or drag a .tap onto the window to attach it
+  to cassette port 1, type LOAD, then File > Tape (cassette 1) > Play. The real
+  PET ROM reads it at tape speed, and tape motor control pauses playback between
+  reads. Stop, Rewind and Eject are on the same menu. Reset keeps the tape position.
+  Supports read-only TAP v0 and v1, including extended v1 pulses and older
+  C64-clock captures of PET tapes. Not supported yet: TAP v2 half-wave images,
+  recording/SAVE, and cassette port 2. A bad image leaves the current tape and
+  machine untouched.
+- T64 archives (NEW): a single-program archive loads straight into RAM, and a
+  multi-program archive shows a picker. Programs keep their original load address.
+- File > Load, the file dialog and drag-and-drop now accept .prg, .t64, .tap,
+  .d64 and .d71.
+
+ROMs
+- ROM sets are now one folder per model: roms\pet2001, pet2001n, pet4000-9,
+  pet4000-12 and cbm8032.
+- download-roms.ps1 now sits next to PetEmu.exe and fetches all five sets from
+  zimmers.net. The old set names (Basic2, Basic4, 8032) still work as aliases.
+- Upgrading from 2.5: rename roms\basic2 -> pet2001n, basic4 -> pet4000-9 and
+  8032 -> cbm8032, or just run download-roms.ps1 again.
+
+Accuracy and robustness
+- 6502: correct cycle counts for the indexed undocumented NOPs, a JAM'd CPU keeps
+  time without taking interrupts, and NMOS decimal-mode N/V flags for ADC/RRA now
+  match the reference core.
+- VIA 6522: shift-register external-clock modes, and SR writes now re-arm the
+  transfer correctly.
+- PIA 6520: CA2/CB2 strobe outputs now idle high until a port access.
+- CRTC video: screen RAM wraps correctly when software scrolls the CRTC display,
+  switching models resets the video hardware properly, screen RAM survives a
+  reset, and switching to the 8032 no longer flashes a screen of '@' characters.
+- Disk drive: disk writes are transactional, so a failed write restores the image
+  instead of half-writing it. Looping directory and file chains are detected.
+  The virtual drive refuses paths that try to escape the ./files folder.
+- Keyboard: the Left arrow now works as cursor-left, Shift+Home clears the screen
+  (CLR), and keyboard reads are thread-safe, so keys no longer get dropped or
+  stick between the window and the emulation thread.
+
+Testing
+- New suites for TAP playback, T64 archives, keyboard, 6502 CPU and machine
+  models, alongside the existing VIA, SNES, CB2 sound, D64/D71, host viewport,
+  video, CRTC and PRG-relink suites. Everything passes.
+  Run petemu\tests\run_tests.bat.
+
+Download: PetGPT_2.6_Release.zip contains PetEmu.exe, pet.ini, download-roms.ps1,
+the roms\ folder layout, and a couple of sample programs in files\. No Commodore
+ROMs are included; run download-roms.ps1 to fetch them.
+
+
+Pet-GPT - Commodore PET 2001 Emulator
+Version 2.5
+=====================================
+
+New machines & display
+- PET 8032 support: selectable 40- and 80-column modes driven by a functional
+  MOS 6545 CRTC (geometry-driven), a 2 KB screen window, and the business
+  keyboard matrix. In 80-column mode the frame timing is derived from the CRTC
+  registers (~60.06 Hz), so a 50 Hz editor ROM would run at 50 Hz.
+- Mono monitor CRT shader (VICE-style): horizontal softness + halation glow,
+  green-phosphor or black-&-white, plus beam overdrive (contrast) and
+  black-level lift (brightness). Live tuning: F9 selects a knob, PgUp/PgDn
+  adjust, F8 dumps the current values to the log. Persists to pet.ini
+  (View > CRT Monitor Settings).
+- Display aspect ratio fixed to a proper 4:3 - fullscreen no longer stretches
+  the image wide.
+- 2x speed toggle (Machine > 2x Speed) for slow text adventures.
+
+Disk drive (HLE IEEE-488, device 8)
+- .d71 (1571 double-sided, 70-track) images, read AND write, including the
+  split BAM - needed by the Infocom-patched games.
+- DOS block / direct-access commands: OPEN "#" buffer channels, U1/U2 block
+  read/write, B-P buffer pointer, B-A/B-F block allocate/free, UI/UJ soft
+  reset - the API the Zork-style interpreters use instead of named files.
+- Named-file reads now cover SEQ, PRG and USR as data, honor the file-type
+  suffix (,S / ,P / ,U), and accept CBM wildcards (* ?) in OPEN.
+- Write-mode fixes: the shorthand OPEN"NAME,W" (and ",A" append) now arm the
+  writer correctly, save-with-replace "@0:NAME" resolves to the right name, and
+  the error channel (15) re-latches to "00, OK" after a full read like real DOS.
+- Replacing a file on a near-full disk now reclaims the old file's blocks
+  instead of spuriously reporting DISK FULL.
+- Character-ROM fix: the text charset bank now loads correctly, so lowercase and
+  the proper uppercase glyphs render (e.g. the "A Bright Shining Star" demo).
+
+Hardware accuracy
+- 6502 core synced with six AAE fixes (2-byte NOPs, KIL/JAM, RTI immediate IRQ,
+  NMOS decimal flag, silent NOPs, SHx/AHX); the PET and AAE cores are now
+  byte-identical.
+- VIA 6522 tier-2 datasheet pass, done test-first (suite grew 26 -> 69 checks):
+  fixed a scrambled CA2 mode decode and swapped DDR registers, port-access flag
+  clears, one-shot/PB7/handshake behavior.
+- PIA 6520 flag clearing, screen-RAM mirroring, and PRG/ROM-load hardening;
+  40-track D64 images mount write-protected rather than corrupting.
+
+UI & housekeeping
+- SNES user-port adapter is now a menu toggle (Machine > SNES Adapter), not just
+  an ini setting.
+- ROMs are organized into self-contained per-set subfolders (roms/basic2,
+  roms/basic4, roms/8032); a download-roms.ps1 script fetches them from
+  zimmers.net into the right place.
+- .d71 files are recognized by File > Load, drag-and-drop, and -disk.
+- Graphics-keyboard toggle moved from F11 to F12 (F11 is now fullscreen); many
+  graphics-keyboard fixes landed as part of the VIA work.
+
+Testing
+- Standalone unit-test suite restored and expanded to eight suites - VIA 6522,
+  SNES adapter, CB2 sound, D64/D71 disk, host viewport, PET video, MOS 6545
+  CRTC, and PRG relink - plus a headless IEEE bus-level LOAD harness (boot +
+  real image + typed LOAD"*",8,1 + RAM byte-compare). Run petemu\tests\run_tests.bat.
+
+
+Version 2.0
+=====================================
+- Ground-up rewrite: cycle-driven 6502, accurate VIA 6522 with CB2 shift-
+  register sound, rewritten PIA 6520 x2, full PCM sound (Faulty Robots etc.),
+  SNES user-port gamepad support, a fully bug-fixed HLE IEEE-488 disk drive
+  (D64 + host-folder virtual drive), and a native Win32/OpenGL 3.3 host shell.

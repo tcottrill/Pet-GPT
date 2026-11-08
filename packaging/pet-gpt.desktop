@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Pet-GPT
+Comment=Commodore PET and CBM emulator
+Exec=pet-gpt %f
+Icon=pet-gpt
+Terminal=false
+Categories=Game;Emulator;
+StartupNotify=true
