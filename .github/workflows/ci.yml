@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Tests that need Commodore ROMs (tape_rom_roundtrip, ieee_rom_drive) are only
+# registered when PET_TEST_ROM_DIR is set. CI must never set it: ROMs are
+# copyrighted and are not in the repository. Those tests are therefore absent
+# from CI runs, not skipped.
+
+jobs:
+  core:
+    # Emulation core and its tests only. PET_BUILD_GUI=OFF leaves out the
+    # wxWidgets frontend, the audio/controller backends, OpenGL, and every test
+    # that needs them (frontend, keyboard, keyboard dialog, audio, pad map,
+    # paths). It needs only a C/C++ compiler, CMake and a threads library.
+    name: core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure
+        run: cmake -S . -B build/core -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DPET_BUILD_GUI=OFF
+      - name: Build
+        run: cmake --build build/core --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build/core -C Release --output-on-failure
+
+  gui:
+    # Full application build, including wxWidgets (fetched by CMake) and all
+    # GUI-dependent tests. The first run compiles wxWidgets and takes a while;
+    # build/_deps is cached afterwards.
+    name: gui (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      # Package list from docs/porting.md (Linux build) plus the Mesa DRI
+      # driver so the GL tests can create a context under Xvfb.
+      - name: Install Linux build packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config libgtk-3-dev libgl1-mesa-dev libegl1-mesa-dev libasound2-dev libwayland-dev wayland-protocols libxkbcommon-dev xvfb xauth libgl1-mesa-dri
+
+      - name: Cache FetchContent downloads and wxWidgets build
+        uses: actions/cache@v4
+        with:
+          path: build/ci/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+          restore-keys: |
+            deps-${{ runner.os }}-
+
+      - name: Configure
+        run: cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build/ci --config Release --parallel
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        run: ctest --test-dir build/ci -C Release --output-on-failure
+      - name: Test (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a ctest --test-dir build/ci --output-on-failure

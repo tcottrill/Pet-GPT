@@ -520,10 +520,16 @@ void PetIEEE::reset() {
 	// hostRoot=""). The mount is established once in emu_init and replaced only
 	// by an explicit setHostRoot()/setD64Image() call.
 
-	// Channels
+	// Channels. A file left open for write must not be committed into whatever
+	// disk is mounted later, so every channel is dropped (the media stays).
 	last_listen_sa = 0xFF;
-	for (auto& st : streams) st.reset();
+	clear_channels();
 	current_talk_sa = 0xFF;
+	listen_addressed_ = false;
+	talk_addressed_ = false;
+	// A bus reset (IFC) restarts the drive's DOS, which reports its power-on
+	// message. This also keeps the error channel readable at all times.
+	set_status(73, "CBM DOS V2.6 4040", 0, 0);
 	da_active_.fill(false);
 	da_ptr_.fill(0);
 
@@ -536,6 +542,22 @@ void PetIEEE::reset() {
 }
 
 // -----------------------------------------------------------------------------
+// clear_channels: forget every open channel without committing it
+// -----------------------------------------------------------------------------
+void PetIEEE::clear_channels() {
+	for (auto& st : streams) st.reset();
+	for (size_t i = 0; i < seq_write_buf_.size(); ++i) {
+		seq_write_buf_[i].clear();
+		seq_write_name_[i].clear();
+	}
+	seq_write_active_.fill(false);
+	seq_write_type_.fill(0);
+	da_active_.fill(false);
+	da_ptr_.fill(0);
+	cmd15_buf_.clear();
+}
+
+// -----------------------------------------------------------------------------
 // Mount points
 // -----------------------------------------------------------------------------
 // Layer: host backend mgmt
@@ -545,14 +567,23 @@ void PetIEEE::setHostRoot(const std::string& dir) {
 
 // Layer: D64 backend mgmt
 bool PetIEEE::setD64Image(const std::string& path) {
-	d64Path = path;
-	d64.clear();
-	if (path.empty()) return true;
-	if (!read_all_file(std::filesystem::u8path(path), d64)) {
+	if (path.empty()) {   // eject
+		clear_channels();
+		d64Path.clear();
+		d64.clear();
+		d64_tracks_ = 35;
+		d64_image_tracks_ = 35;
+		return true;
+	}
+
+	// Read and validate into a temporary buffer first: a failed mount must leave
+	// the previously mounted disk (and its open channels) exactly as they were.
+	std::vector<uint8_t> img;
+	if (!read_all_file(std::filesystem::u8path(path), img)) {
 		LOG_ERROR("IEEE: failed to read D64 image: %s", path.c_str());
 		return false;
 	}
-	const size_t n = d64.size();
+	const size_t n = img.size();
 
 	// Standard sizes:
 	//  - 174,848  = 35-track (1541/.d64), no error map
@@ -563,18 +594,25 @@ bool PetIEEE::setD64Image(const std::string& path) {
 	const bool is35 = (n == 174848 || n == 175531);
 	const bool is71 = (n == 349696 || n == 351062);
 	const bool is40 = (n == 196608 || n == 197376);
+	if (!is35 && !is71 && !is40) {
+		LOG_ERROR("IEEE: %s is not a known disk image size (%zu bytes); mount rejected", path.c_str(), n);
+		return false;
+	}
 
-	d64_tracks_ = is71 ? 70 : 35;   // 40-track & unknown use 35-track read math
+	clear_channels();
+	d64Path = path;
+	d64.swap(img);
+	d64_tracks_ = is71 ? 70 : 35;   // BAM math: 40-track images use the 35-track BAM
+	d64_image_tracks_ = is71 ? 70 : (is40 ? 40 : 35);
 
 	if (is71) {
 		LOG_INFO("[IEEE] .d71 (%zu bytes) mounted read/write (1571 double-sided, 70 tracks)", n);
 	}
-	else if (!is35) {
-		// The BAM/allocator math handles 35- and 70-track images; anything else
+	else if (is40) {
+		// The BAM/allocator math handles 35- and 70-track images; a 40-track image
 		// mounts WRITE-PROTECTED (enforced in d64_flush_image_to_disk): reads
 		// work, SAVE/SCRATCH/etc. report WRITE ERROR rather than corrupting it.
-		LOG_WARN("[IEEE] %s D64 (%zu bytes) mounted READ-ONLY (unsupported write geometry)",
-			is40 ? "40-track" : "non-standard size", n);
+		LOG_WARN("[IEEE] 40-track D64 (%zu bytes) mounted READ-ONLY (unsupported write geometry)", n);
 	}
 
 	return true;
@@ -633,30 +671,35 @@ void PetIEEE::NDACout(bool flag)
 	if (rising) {
 		hs_debug("NDAC rise");
 		if (state == STATE_LOAD && hs_ == HS_WAIT_NDAC_H) {
-			// Finish current byte
+			// Either way the byte comes off the bus.
 			dav_i = true;
 			eoi_i = true;
-			if (data_index < load_data.size()) {
-				data_index++;
+			if (nrfd_o) {
+				// Not an acceptance. A listener that has taken a byte pulls NRFD
+				// low before it raises NDAC (IEEE-488 acceptor handshake; PET
+				// KERNAL $F1A8). NDAC rising with NRFD still high is the
+				// controller letting go of both lines before it asserts ATN, as
+				// BASIC 2 does ahead of UNTALK ($F0BC..$F0E7, where it then waits
+				// for DAV high). The byte is kept for the next TALK. Counting it
+				// lost one byte per partial read, and presenting the next one
+				// here left DAV low and hung the PET.
+				hs_ = HS_WAIT_NRFD_L;
+				hs_debug("NDAC rise with NRFD high -> byte withdrawn");
 			}
-			// WARNING: This creates high log traffic; disable if too verbose
-			//LOG_DEBUG("HS NDAC rise: byte accepted, idx now %zu of %zu", (size_t)data_index, load_data.size());
-
-			if (data_index < load_data.size()) {
-				if (nrfd_o) {
-					LOG_DEBUG("HS NDAC fast-path: NRFD already high -> present next");
-					hs_present_byte_();
-					hs_ = HS_WAIT_NDAC_H;
-					hs_debug("NDAC fast-path -> WAIT_NDAC_H");
+			else {
+				if (data_index < load_data.size()) {
+					data_index++;
 				}
-				else {
+				// WARNING: This creates high log traffic; disable if too verbose
+				//LOG_DEBUG("HS NDAC rise: byte accepted, idx now %zu of %zu", (size_t)data_index, load_data.size());
+				if (data_index < load_data.size()) {
 					hs_ = HS_WAIT_NRFD_H;
 					hs_debug("NDAC rise -> WAIT_NRFD_H");
 				}
-			}
-			else {
-				hs_ = HS_IDLE;
-				hs_debug("NDAC rise -> IDLE (out of data)");
+				else {
+					hs_ = HS_IDLE;
+					hs_debug("NDAC rise -> IDLE (out of data)");
+				}
 			}
 		}
 	}
@@ -679,6 +722,13 @@ void PetIEEE::NRFDout(bool flag)
 
 	// Ignore data handshaking while ATN is low (command phase)
 	if (!atn) return;
+
+	// After a withdrawn byte the listener must go not-ready before its next
+	// "ready" counts, so a line that simply stays released is not answered.
+	if (!flag && state == STATE_LOAD && hs_ == HS_WAIT_NRFD_L) {
+		hs_ = HS_WAIT_NRFD_H;
+		hs_debug("NRFD fall -> WAIT_NRFD_H");
+	}
 
 	if (rising) {
 		hs_debug("NRFD rise");
@@ -751,6 +801,10 @@ void PetIEEE::ATNout(bool flag)
 		else {
 			hs_ = HS_IDLE;
 			hs_debug("ATN rise (idle)");
+			// Every device acknowledges command bytes, but only the addressed
+			// listener keeps NDAC low afterwards. Releasing it lets the PET see
+			// DEVICE NOT PRESENT for the device numbers this drive does not own.
+			if (!listen_addressed_ && state != STATE_LOAD) { ndac_i = true; nrfd_i = true; }
 		}
 	}
 	atn = flag;
@@ -765,6 +819,13 @@ void PetIEEE::DAVout(bool flag)
 #if IEEE_TRACE
 	LOG_DEBUG("IEEE DAVout: %d -> %d (controller)", dav_o ? 1 : 0, flag ? 1 : 0);
 #endif
+	// Data byte (ATN high) for a device other than this drive: leave NRFD and
+	// NDAC released so the PET sees DEVICE NOT PRESENT.
+	const bool foreign_data = atn && !listen_addressed_ && state != STATE_LOAD;
+	if (foreign_data) {
+		dav_o = flag;
+		return;
+	}
 	if (dav_o && !flag) {
 		// falling edge: controller put a byte on DIO (during ATN low)
 		ndac_i = true;
@@ -777,8 +838,9 @@ void PetIEEE::DAVout(bool flag)
 		ieee_trace_bus_snapshot("SNAP DAV-DN", this);
 	}
 	else if (!dav_o && flag) {
-		// rising edge
-		ndac_i = false;
+		// rising edge. After an address for another device nobody holds the
+		// lines, so the PET sees DEVICE NOT PRESENT on the next command byte.
+		ndac_i = foreign_cmd_;
 		nrfd_i = true;
 #if IEEE_TRACE
 		LOG_DEBUG("IEEE DAV rising: cmd phase complete");
@@ -815,6 +877,15 @@ void PetIEEE::dataIn(uint8_t d8)
 		// -----------------------
 		// Address/command phase (controller drives ATN low)
 		// -----------------------
+		// Primary addresses decide whose secondaries follow. Without this the
+		// drive answered secondaries meant for the printer or a second drive.
+		if (d8 >= 0x20 && d8 <= 0x3E) listen_addressed_ = (d8 == (uint8_t)(0x20 + MY_ADDRESS));
+		else if (d8 >= 0x40 && d8 <= 0x5E) talk_addressed_ = (d8 == (uint8_t)(0x40 + MY_ADDRESS));
+		else if (d8 == 0x3F) listen_addressed_ = false;
+		else if (d8 == 0x5F) talk_addressed_ = false;
+		foreign_cmd_ = (d8 >= 0x20 && d8 <= 0x3E && d8 != (uint8_t)(0x20 + MY_ADDRESS)) ||
+		               (d8 >= 0x40 && d8 <= 0x5E && d8 != (uint8_t)(0x40 + MY_ADDRESS));
+
 		switch (state) {
 		case STATE_IDLE:
 			if (d8 == (uint8_t)(0x20 + MY_ADDRESS)) {
@@ -839,7 +910,7 @@ void PetIEEE::dataIn(uint8_t d8)
 				}
 				state = STATE_IDLE;
 			}
-			else if (d8 >= 0x60 && d8 <= 0x6F) {
+			else if (d8 >= 0x60 && d8 <= 0x6F && talk_addressed_) {
 				// TALK-secondary: choose the SA to serve when in TALK (handled below)
 				current_talk_sa = (uint8_t)(d8 & 0x0F);
 				tracef("TALK SA=%u", current_talk_sa);
@@ -861,83 +932,26 @@ void PetIEEE::dataIn(uint8_t d8)
 				}
 				///////////////////////////////////////////////////////////////////////////////////////////////
 				else {
-					// Fall back to single-shot LOAD by filename if available
-					if (!filename.empty()) {
+					// Fall back to single-shot LOAD by filename if available.
+					// Only LOAD (SA 0) does this; a data or status channel with
+					// nothing to send must stay silent, not replay the last program.
+					if (current_talk_sa == 0 && !filename.empty()) {
 						std::vector<uint8_t> pay;
 						uint16_t addr = 0x0801;
 						const std::string nameClean = normalize_name_for_prg(filename);
 
-						// ---------------------------------------------------------------------
-						// Directory: "$" or "$..." after optional drive prefix
-						// ---------------------------------------------------------------------
-						if (!nameClean.empty() && nameClean[0] == '$') {
-							// Optional listing filter after '$': "$:A*", "$0:A*", "$A*".
-							std::string dirPat = nameClean.substr(1); // drop '$'
-							if (dirPat.size() >= 2 && (dirPat[0] == '0' || dirPat[0] == '1') && dirPat[1] == ':')
-								dirPat.erase(0, 2);
-							else if (!dirPat.empty() && dirPat[0] == ':')
-								dirPat.erase(0, 1);
-
-							std::vector<uint8_t> dirprg;
-							bool ok = false;
-							if (isD64Mounted()) ok = buildDirectoryPRG_D64(dirprg, 0x0401, dirPat);
-							else                ok = buildDirectoryPRG_Folder(dirprg, 0x0401, dirPat);
-
-							if (ok && dirprg.size() >= 2) {
-								addr = (uint16_t)dirprg[0] | ((uint16_t)dirprg[1] << 8);
-								pay.assign(dirprg.begin() + 2, dirprg.end());
-
-								LOG_DEBUG(
-									"DIR LOAD OK: addr=%04X size=%zu isD64=%d",
-									(unsigned)addr, pay.size(), isD64Mounted() ? 1 : 0
-								);
-								set_status(0, "OK", 0, 0);  // Directory OK
-
-								// Arm directory as a TALK stream
-								ieeeLoadData(addr, pay);
-								state = STATE_LOAD;
-								dav_i = true;
-								eoi_i = true;
-								hs_ = HS_WAIT_NRFD_H;
-								last_nrfd_ = nrfd_o;
-								last_ndac_ = ndac_o;
-								hs_debug("ARM (DIR)");
-							}
-							else {
-								// Directory build failed -> standard CBM error 62
-								not_found_handler("DIR", nameClean, 0x0801);
-							}
-						}
-
-						// ---------------------------------------------------------------------
-						// Regular PRG: "NAME"
-						// ---------------------------------------------------------------------
-						else if (!nameClean.empty()) {
-							bool ok = false;
-							if (isD64Mounted()) ok = loadHostPRG_D64(nameClean, pay, addr);
-							else                ok = loadHostPRG_Folder(nameClean, pay, addr);
-
-							if (ok) {
-								LOG_DEBUG(
-									"PRG LOAD OK: name=\"%s\" addr=%04X size=%zu hostRoot=\"%s\" isD64=%d",
-									nameClean.c_str(), (unsigned)addr, pay.size(),
-									hostRoot.c_str(), isD64Mounted() ? 1 : 0
-								);
-								set_status(0, "OK", 0, 0);  // Successful LOAD
-
-								ieeeLoadData(addr, pay);
-								state = STATE_LOAD;
-								dav_i = true;
-								eoi_i = true;
-								hs_ = HS_WAIT_NRFD_H;
-								last_nrfd_ = nrfd_o;
-								last_ndac_ = ndac_o;
-								hs_debug("ARM (PRG)");
-							}
-							else {
-								// File Not Found -> standard CBM error 62
-								not_found_handler("PRG", nameClean, addr);
-							}
+						// Directory ("$...") or program by name; a failure reports
+						// 62 through not_found_handler and leaves the bus silent.
+						if (resolve_load_name(nameClean, pay, addr)) {
+							// Arm the program or directory as a TALK stream
+							ieeeLoadData(addr, pay);
+							state = STATE_LOAD;
+							dav_i = true;
+							eoi_i = true;
+							hs_ = HS_WAIT_NRFD_H;
+							last_nrfd_ = nrfd_o;
+							last_ndac_ = ndac_o;
+							hs_debug(nameClean[0] == '$' ? "ARM (DIR)" : "ARM (PRG)");
 						}
 					}
 				}
@@ -1003,6 +1017,8 @@ void PetIEEE::dataIn(uint8_t d8)
 				}
 				(void)close_seq_write_channel(sa);   // commit SEQ if armed
 				streams[sa].reset();                  // close any read stream bound to this SA
+				// The error channel always has a status to report, open or not.
+				if (sa == 15) set_status(0, "OK", 0, 0);
 				da_active_[sa] = false;               // release '#' buffer channel
 				// remain in STATE_LISTEN until UNLISTEN arrives
 			}
@@ -1110,18 +1126,19 @@ void PetIEEE::dataIn(uint8_t d8)
 				}
 
 				if (wantWrite) {
-					open_seq_write_channel(sa, filename, writeType, wantAppend);
+					open_seq_write_channel(sa, filename, writeType, wantAppend, has_replace_flag(filename));
 					filename.clear();
 					state = STATE_IDLE;
 					break;
 				}
 
 				// Else try named-file READ on this SA (if mounted)
-				if (isD64Mounted() && sa >= 2 && sa <= 15) {
+				if ((isD64Mounted() || !hostRoot.empty()) && sa >= 2 && sa <= 15) {
 					const std::string clean = normalize_open_name_for_seq(filename);
 					tracef("OPEN normalized: \"%s\"", clean.c_str());
 
-					if (openD64SEQ_for_read(clean, sa, typeFilter)) {
+					if (isD64Mounted() ? openD64SEQ_for_read(clean, sa, typeFilter)
+					                   : openFolder_for_read(clean, sa, typeFilter)) {
 						const auto& st = streams[sa];
 						tracef("SEQ armed SA=%u, bytes=%zu", sa, st.data.size());
 						if (!st.data.empty()) {
@@ -1163,13 +1180,23 @@ void PetIEEE::dataIn(uint8_t d8)
 				state = STATE_IDLE;
 				current_talk_sa = 0xFF;
 			}
+			else if (d8 >= 0x40 && d8 <= 0x5E && !talk_addressed_) {
+				// Another device was told to talk: this one stops.
+				state = STATE_IDLE;
+				current_talk_sa = 0xFF;
+			}
+			else if (d8 == (uint8_t)(0x20 + MY_ADDRESS)) {
+				// Addressed to listen without an UNTALK first (interrupted LOAD).
+				state = STATE_LISTEN;
+				last_listen_sa = 0xFF;
+				current_talk_sa = 0xFF;
+			}
 			break;
 
 		case STATE_SAVE:
 		{
 			// Address phase: UNLISTEN marks end of modern KERNAL SAVE.
 			if (d8 == 0x3F) { // UNLISTEN -> SAVE complete
-				const bool isD64 = isD64Mounted();
 				LOG_DEBUG(
 					"IEEE PRG SAVE UNLISTEN: state=%d last_listen_sa=%u filename=\"%s\" "
 					"raw_bytes=%zu isD64=%d",
@@ -1177,29 +1204,12 @@ void PetIEEE::dataIn(uint8_t d8)
 					(unsigned)last_listen_sa,
 					filename.c_str(),
 					save_data.size(),
-					isD64 ? 1 : 0
+					isD64Mounted() ? 1 : 0
 				);
 
-				// Normalize the SAVE name the same way LOAD does: strip quotes,
-				// "@"/"@0:" save-with-replace, "0:"/"1:" drive prefix and ",P,W"
-				// mode tokens. Without this, SAVE"0:NAME" / SAVE"@0:NAME" stored a
-				// garbled name that LOAD"NAME" could never find.
-				const std::string saveNorm = normalize_name_for_prg(filename);
-				const std::string& saveName = saveNorm.empty() ? filename : saveNorm;
-
-				if (isD64) {
-					// For D64, the KERNAL has already included the load address.
-					std::vector<uint8_t> out(save_data.begin(), save_data.end());
-					LOG_DEBUG("IEEE PRG SAVE -> D64: name=\"%s\" size=%zu",
-						saveName.c_str(), out.size());
-					d64_save_prg(saveName, out);
-				}
-				else {
-					// Virtual drive: write exact PRG stream as received.
-					LOG_DEBUG("IEEE PRG SAVE -> folder: name=\"%s.prg\" size=%zu",
-						saveName.c_str(), save_data.size());
-					saveFile(saveName, save_data);
-				}
+				// Name normalisation, "@" replace and the image/folder choice
+				// live in commit_prg_save (shared with hostSaveFile).
+				commit_prg_save(filename, save_data);
 
 				state = STATE_IDLE;
 			}
@@ -1295,16 +1305,145 @@ void PetIEEE::dataIn(uint8_t d8)
 }
 
 // -----------------------------------------------------------------------------
-// arm_not_found_stub
-// Arm a one-byte IEEE TALK response so the PET KERNAL terminates cleanly.
-// This is used for PRG, DIR, and SEQ missing file cases.
+// resolve_load_name
+// Name -> program bytes for a LOAD: "$" (optionally "$0", "$:A*", "$0:A*",
+// "$A*") builds the directory, anything else loads a PRG. Mounted image first,
+// else the host folder. No bus effects; the TALK path arms the stream itself.
+// -----------------------------------------------------------------------------
+bool PetIEEE::resolve_load_name(const std::string& nameClean, std::vector<uint8_t>& payload, uint16_t& addr)
+{
+	// ---------------------------------------------------------------------
+	// Directory: "$" or "$..." after optional drive prefix
+	// ---------------------------------------------------------------------
+	if (!nameClean.empty() && nameClean[0] == '$') {
+		// Optional listing filter after '$': "$:A*", "$0:A*", "$A*".
+		std::string dirPat = nameClean.substr(1); // drop '$'
+		if (dirPat.size() >= 2 && (dirPat[0] == '0' || dirPat[0] == '1') && dirPat[1] == ':')
+			dirPat.erase(0, 2);
+		else if (!dirPat.empty() && dirPat[0] == ':')
+			dirPat.erase(0, 1);
+		else if (dirPat == "0" || dirPat == "1")
+			dirPat.clear();   // "$0" / "$1": drive number, list everything
+
+		std::vector<uint8_t> dirprg;
+		bool ok = false;
+		if (isD64Mounted()) ok = buildDirectoryPRG_D64(dirprg, 0x0401, dirPat);
+		else                ok = buildDirectoryPRG_Folder(dirprg, 0x0401, dirPat);
+
+		if (ok && dirprg.size() >= 2) {
+			addr = (uint16_t)dirprg[0] | ((uint16_t)dirprg[1] << 8);
+			payload.assign(dirprg.begin() + 2, dirprg.end());
+
+			LOG_DEBUG(
+				"DIR LOAD OK: addr=%04X size=%zu isD64=%d",
+				(unsigned)addr, payload.size(), isD64Mounted() ? 1 : 0
+			);
+			set_status(0, "OK", 0, 0);  // Directory OK
+			return true;
+		}
+		// Directory build failed -> standard CBM error 62
+		not_found_handler("DIR", nameClean, 0x0801);
+		return false;
+	}
+
+	// ---------------------------------------------------------------------
+	// Regular PRG: "NAME"
+	// ---------------------------------------------------------------------
+	if (!nameClean.empty()) {
+		bool ok = false;
+		if (isD64Mounted()) ok = loadHostPRG_D64(nameClean, payload, addr);
+		else                ok = loadHostPRG_Folder(nameClean, payload, addr);
+
+		if (ok) {
+			LOG_DEBUG(
+				"PRG LOAD OK: name=\"%s\" addr=%04X size=%zu hostRoot=\"%s\" isD64=%d",
+				nameClean.c_str(), (unsigned)addr, payload.size(),
+				hostRoot.c_str(), isD64Mounted() ? 1 : 0
+			);
+			set_status(0, "OK", 0, 0);  // Successful LOAD
+			return true;
+		}
+		// File Not Found -> standard CBM error 62
+		not_found_handler("PRG", nameClean, addr);
+		return false;
+	}
+
+	return false;   // empty name: nothing to load, nothing reported
+}
+
+// -----------------------------------------------------------------------------
+// commit_prg_save
+// Store a received PRG (load address first) under rawName on the mounted image
+// or the host folder. Returns true when the file was written.
+// -----------------------------------------------------------------------------
+bool PetIEEE::commit_prg_save(const std::string& rawName, const std::string& prgWithHeader)
+{
+	// Normalize the SAVE name the same way LOAD does: strip quotes,
+	// "@"/"@0:" save-with-replace, "0:"/"1:" drive prefix and ",P,W"
+	// mode tokens. Without this, SAVE"0:NAME" / SAVE"@0:NAME" stored a
+	// garbled name that LOAD"NAME" could never find.
+	const std::string saveNorm = normalize_name_for_prg(rawName);
+	const std::string& saveName = saveNorm.empty() ? rawName : saveNorm;
+	// "@" (save-with-replace) is stripped by the normaliser, so read it
+	// from the raw name. Without it an existing file gives 63,FILE EXISTS.
+	const bool replaceSave = has_replace_flag(rawName);
+
+	if (isD64Mounted()) {
+		// For D64, the KERNAL has already included the load address.
+		std::vector<uint8_t> out(prgWithHeader.begin(), prgWithHeader.end());
+		LOG_DEBUG("IEEE PRG SAVE -> D64: name=\"%s\" size=%zu",
+			saveName.c_str(), out.size());
+		return d64_save_prg(saveName, out, replaceSave);
+	}
+
+	// Virtual drive: write exact PRG stream as received.
+	LOG_DEBUG("IEEE PRG SAVE -> folder: name=\"%s.prg\" size=%zu",
+		saveName.c_str(), prgWithHeader.size());
+	saveFile(saveName, prgWithHeader, replaceSave);
+	// The folder path reports through the channel-15 status on every outcome.
+	return status15_.compare(0, 3, "00,") == 0;
+}
+
+// -----------------------------------------------------------------------------
+// hostLoadFile / hostSaveFile
+// LOAD and SAVE by name with no bus traffic, for a machine core whose ROM cannot
+// drive the disk itself (PET 2001, BASIC 1). Called while the bus is idle; the
+// bus state is left alone (a failed LOAD goes through not_found_handler, which
+// keeps it idle with DAV and EOI released).
+// -----------------------------------------------------------------------------
+bool PetIEEE::hostLoadFile(const std::string& rawName, std::vector<uint8_t>& payload, uint16_t& addr)
+{
+	payload.clear();
+	addr = 0x0801;
+	const std::string nameClean = normalize_name_for_prg(rawName);
+	if (nameClean.empty()) {
+		not_found_handler("PRG", nameClean, addr);
+		return false;
+	}
+	return resolve_load_name(nameClean, payload, addr);
+}
+
+bool PetIEEE::hostSaveFile(const std::string& rawName, const std::vector<uint8_t>& prgWithHeader)
+{
+	if (normalize_name_for_prg(rawName).empty()) {
+		set_status(34, "SYNTAX ERROR", 0, 0);
+		return false;
+	}
+	return commit_prg_save(rawName, std::string(prgWithHeader.begin(), prgWithHeader.end()));
+}
+
+// -----------------------------------------------------------------------------
+// not_found_handler
+// Report 62,FILE NOT FOUND and stay silent on the bus, as a real drive does.
+// With no talker the KERNAL's byte read times out, which is what makes BASIC
+// print ?FILE NOT FOUND ERROR. (An earlier version sent a one-byte stub
+// program instead, so a failed LOAD looked like a success and moved BASIC's
+// end-of-program pointer.)
 //
 // type   - "PRG", "DIR", "SEQ", etc. (for logging/debug)
 // name   - filename attempted
-// addr   - load address to pass to ieeeLoadData()
-//          (ignored for SEQ; 0x0000 is safe; PRG uses 0x0801; DIR uses 0x0401)
 // -----------------------------------------------------------------------------
-void PetIEEE::not_found_handler(const char* type, const std::string& name, uint16_t addr)
+void PetIEEE::not_found_handler(const char* type, const std::string& name, uint16_t)
 {
 	LOG_ERROR(
 		"%s LOAD FAILED: name=\"%s\" hostRoot=\"%s\" isD64=%d",
@@ -1317,18 +1456,8 @@ void PetIEEE::not_found_handler(const char* type, const std::string& name, uint1
 	// 62,FILE NOT FOUND,00,00
 	set_status(62, "FILE NOT FOUND", 0, 0);
 
-	// Tiny 1-byte stub payload for the TALK handshake
-	static const std::vector<uint8_t> nfPay = { 0x00 };
-	ieeeLoadData(addr, nfPay);
-
-	state = STATE_LOAD;
+	state = STATE_IDLE;
 	dav_i = true;
 	eoi_i = true;
-	hs_ = HS_WAIT_NRFD_H;
-	last_nrfd_ = nrfd_o;
-	last_ndac_ = ndac_o;
-
-	char buf[64];
-	snprintf(buf, sizeof(buf), "ARM (%s NOT FOUND stub)", type);
-	hs_debug(buf);
+	hs_ = HS_IDLE;
 }

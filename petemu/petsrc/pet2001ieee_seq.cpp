@@ -34,11 +34,16 @@ std::string PetIEEE::to_pet_upper_a0_padded_16(const std::string& ascii)
 }
 
 // --- SEQ/PRG/USR write (or append): open on SA ------------------------------
+// Works on the mounted D64, or on the host folder when no disk is mounted
+// (NAME.seq / NAME.prg / NAME.usr). Without "@" an existing name is refused
+// with 63,FILE EXISTS and nothing is armed, like a real drive.
 bool PetIEEE::open_seq_write_channel(uint8_t sa, const std::string& rawName,
-                                     uint8_t type, bool append)
+                                     uint8_t type, bool append, bool replace)
 {
-	if (!isD64Mounted()) {
-		LOG_WARN("write open ignored: no D64 mounted");
+	const bool onDisk = isD64Mounted();
+	if (!onDisk && hostRoot.empty()) {
+		LOG_WARN("write open ignored: no D64 mounted and no host folder");
+		set_status(74, "DRIVE NOT READY", 0, 0);
 		return false;
 	}
 
@@ -50,16 +55,51 @@ bool PetIEEE::open_seq_write_channel(uint8_t sa, const std::string& rawName,
 		LOG_WARN("write open: empty normalized name from '%s'", rawName.c_str());
 		return false;
 	}
+	if (name.find_first_of("*?") != std::string::npos) {
+		set_status(33, "SYNTAX ERROR", 0, 0);
+		return false;
+	}
+	if (type == 0) type = 0x81;
+
+	// Existing file? (D64: any type, as the directory has one name per file.)
+	bool exists = false, locked = false;
+	uint8_t existingType = 0;
+	if (onDisk) {
+		if (!writable_disk_size(d64.size())) { set_status(26, "WRITE PROTECT ON", 0, 0); return false; }
+		D64Catalog cat{};
+		int idx = -1;
+		if (!d64_parse_bam(cat) || !d64_parse_directory(cat)) { set_status(74, "DRIVE NOT READY", 0, 0); return false; }
+		if (d64_find_dir_entry(cat, name, idx) && idx >= 0) {
+			exists = true;
+			locked = (cat.entries[idx].fileType & 0x40) != 0;
+			existingType = (uint8_t)(cat.entries[idx].fileType & 0x0F);
+		}
+	}
+	else {
+		// Refuse path syntax now, not silently at CLOSE.
+		std::filesystem::path probe;
+		if (!host_file_path(hostRoot, name + ".seq", probe)) { set_status(33, "SYNTAX ERROR", 0, 0); return false; }
+		HostEntry he;
+		if (folder_find(name, 0, false, he)) { exists = true; existingType = he.type; }
+	}
+	if (exists && (locked || (!append && !replace))) {
+		set_status(63, "FILE EXISTS", 0, 0);
+		return false;
+	}
+	if (exists && append && existingType != (uint8_t)(type & 0x0F)) {
+		set_status(64, "FILE TYPE MISMATCH", 0, 0);
+		return false;
+	}
 
 	seq_write_buf_[sa].clear();
 
 	// Append (",A"): pre-load the existing file so the commit extends it.
-	// openD64SEQ_for_read fills streams[sa]; move those bytes into the write
+	// The reader fills streams[sa]; move those bytes into the write
 	// buffer, then clear the read stream. A missing file appends to empty
 	// (CBM-DOS creates it), matching real drive behavior.
 	if (append) {
 		const uint8_t tf = (uint8_t)(type & 0x0F); // 1 SEQ / 2 PRG / 3 USR
-		if (openD64SEQ_for_read(name, sa, tf)) {
+		if (onDisk ? openD64SEQ_for_read(name, sa, tf) : openFolder_for_read(name, sa, tf)) {
 			seq_write_buf_[sa] = streams[sa].data;
 			LOG_DEBUG("write open (append): SA=%u preloaded %zu bytes",
 				(unsigned)sa, seq_write_buf_[sa].size());
@@ -67,14 +107,15 @@ bool PetIEEE::open_seq_write_channel(uint8_t sa, const std::string& rawName,
 	}
 
 	seq_write_name_[sa] = name;
-	seq_write_type_[sa] = type ? type : 0x81;
+	seq_write_type_[sa] = type;
 	seq_write_active_[sa] = true;
 
 	// This SA is not a talk stream; keep read-stream state isolated.
 	streams[sa].reset();
 
-	LOG_DEBUG("write open: SA=%u name='%s' type=%02X append=%d",
-		(unsigned)sa, name.c_str(), (unsigned)seq_write_type_[sa], append ? 1 : 0);
+	set_status(0, "OK", 0, 0);
+	LOG_DEBUG("write open: SA=%u name='%s' type=%02X append=%d replace=%d",
+		(unsigned)sa, name.c_str(), (unsigned)seq_write_type_[sa], append ? 1 : 0, replace ? 1 : 0);
 	return true;
 }
 
@@ -89,7 +130,7 @@ void PetIEEE::accept_byte_for_possible_seq_write(uint8_t sa, uint8_t b)
 	seq_write_buf_[sa].push_back(b);
 }
 
-// --- SEQ,S,W: close/commit SA to the mounted D64 -----------------------------
+// --- SEQ,S,W: close/commit SA to the mounted D64 (or host folder) -----------------------------
 bool PetIEEE::close_seq_write_channel(uint8_t sa)
 {
 	sa &= 0x0F;
@@ -107,10 +148,10 @@ bool PetIEEE::close_seq_write_channel(uint8_t sa)
 
 	// d64_save_file sets the CLOSED bit and updates BAM/dir; if the file
 	// already exists it is replaced (append preloaded the old contents above).
-	const bool ok = d64_save_file(fname,
-		bytes.empty() ? nullptr : bytes.data(),
-		bytes.size(),
-		type);
+	// The "exists / @" decision was made at OPEN, so the commit always replaces.
+	const bool ok = isD64Mounted()
+		? d64_save_file(fname, bytes.empty() ? nullptr : bytes.data(), bytes.size(), type, true)
+		: folder_write_file(fname, bytes, type, true);
 
 	if (!ok) {
 		LOG_ERROR("SEQ,S,W commit failed for '%s' (%zu bytes)", fname.c_str(), bytes.size());

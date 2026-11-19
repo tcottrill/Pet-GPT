@@ -101,6 +101,16 @@ struct PetIEEE_TestAccess {
         e.atn = false;
         e.dataIn(0x5F);                                     // UNTALK
     }
+    // SAVE"name",8 : LISTEN, OPEN on SA 1 with the name, UNLISTEN, then the
+    // KERNAL's LISTEN/SA $61/bytes/UNLISTEN; the commit happens on UNLISTEN.
+    static void bus_save(PetIEEE& e, const std::string& name, const std::vector<uint8_t>& b) {
+        open_ch(e, 1, name);
+        bus_cmd(e, 0x28); bus_cmd(e, 0x61);
+        for (uint8_t by : b) bus_data(e, by);
+        bus_cmd(e, 0x3F);
+    }
+    static const std::string& cmd15_pending(PetIEEE& e) { return e.cmd15_buf_; }
+    static bool write_active(PetIEEE& e, int sa) { return e.seq_write_active_[sa]; }
     static bool bam_free(PetIEEE& e, int t, int s) {
         D64Catalog c; if (!e.d64_parse_bam(c)) return false; return e.d64_bam_is_free(c, t, s);
     }
@@ -1027,8 +1037,523 @@ static void test_unicode_host_directory() {
     CHECK_EQ(e.scratch_host_patterns({"HELLO"}),1);
 }
 
+// ---------------------------------------------------------------------------
+// Second batch: data files on the folder drive, atomic image writes, mount
+// validation, 40-track geometry, overwrite protection, stale channels, folder
+// listing/LOAD agreement.
+// ---------------------------------------------------------------------------
+static std::string slurp(const std::filesystem::path& p) {
+    const auto v = read_file(p.string());
+    return std::string(v.begin(), v.end());
+}
+
+static void test_folder_data_files() {
+    ReviewFixture f;
+    const auto root = f.dir / "root";
+    PetIEEE e; e.setHostRoot(root.string());
+    // OPEN 2,8,2,"SCORES,S,W": PRINT#2 ... CLOSE 2 creates a host file.
+    PetIEEE_TestAccess::open_ch(e, 2, "SCORES,S,W");
+    CHECK(status_code(e) == 0);
+    PetIEEE_TestAccess::put_data(e, 2, vbytes("123\r456\r"));
+    CHECK(!std::filesystem::exists(root / "SCORES.seq"));   // not until CLOSE
+    PetIEEE_TestAccess::close_ch(e, 2);
+    CHECK(slurp(root / "SCORES.seq") == "123\r456\r");
+    // Read it back (typed and untyped), and append to it.
+    PetIEEE_TestAccess::open_ch(e, 3, "SCORES,S,R");
+    CHECK(PetIEEE_TestAccess::stream_data(e, 3) == vbytes("123\r456\r"));
+    PetIEEE_TestAccess::open_ch(e, 4, "SCORES");
+    CHECK(PetIEEE_TestAccess::stream_data(e, 4) == vbytes("123\r456\r"));
+    PetIEEE_TestAccess::open_ch(e, 5, "SCORES,S,A");
+    PetIEEE_TestAccess::put_data(e, 5, vbytes("789\r"));
+    PetIEEE_TestAccess::close_ch(e, 5);
+    CHECK(slurp(root / "SCORES.seq") == "123\r456\r789\r");
+    // USR and PRG data files keep their types apart.
+    PetIEEE_TestAccess::open_ch(e, 6, "BLOB,U,W");
+    PetIEEE_TestAccess::put_data(e, 6, vbytes("U"));
+    PetIEEE_TestAccess::close_ch(e, 6);
+    PetIEEE_TestAccess::open_ch(e, 7, "CODE,P,W");
+    PetIEEE_TestAccess::put_data(e, 7, vbytes("P"));
+    PetIEEE_TestAccess::close_ch(e, 7);
+    CHECK(std::filesystem::exists(root / "BLOB.usr"));
+    CHECK(std::filesystem::exists(root / "CODE.prg"));
+    std::vector<uint8_t> dir; CHECK(PetIEEE_TestAccess::build_dir_folder(e, dir, ""));
+    CHECK(bytes_contain(dir, "\"SCORES\""));
+    CHECK(bytes_contain(dir, "SEQ"));
+    CHECK(bytes_contain(dir, "USR"));
+    CHECK(bytes_contain(dir, "PRG"));
+    // A missing file for read is 62; nothing is created by a read.
+    PetIEEE_TestAccess::open_ch(e, 9, "NOSUCH,S,R");
+    CHECK(status_code(e) == 62);
+    CHECK(!std::filesystem::exists(root / "NOSUCH.seq"));
+    // Scratch removes data files too.
+    CHECK(PetIEEE_TestAccess::cmd(e, "S:BLOB"));
+    CHECK(!std::filesystem::exists(root / "BLOB.usr"));
+    // Names cannot leave the folder.
+    CHECK(write_file((f.dir / "OUTSIDE.seq").string(), {1}));
+    PetIEEE_TestAccess::open_ch(e, 2, "../OUTSIDE,S,W");
+    PetIEEE_TestAccess::put_data(e, 2, vbytes("X"));
+    PetIEEE_TestAccess::close_ch(e, 2);
+    CHECK(slurp(f.dir / "OUTSIDE.seq") == "\x01");
+    PetIEEE_TestAccess::open_ch(e, 2, "A:B,S,W");
+    CHECK(status_code(e) != 0);
+}
+
+static void test_atomic_image_write() {
+    ReviewFixture f;
+    const auto path = (f.dir / "disk.d64").string();
+    CHECK(write_file(path, make_blank_d64()));
+    PetIEEE e; CHECK(e.setD64Image(path));
+    CHECK(PetIEEE_TestAccess::save_prg(e, "ONE", {1,4,1}));
+    CHECK(read_file(path) == PetIEEE_TestAccess::image(e));
+    CHECK(!std::filesystem::exists(path + ".tmp~"));           // temp renamed away
+    // Make the temporary file impossible to create: the original must survive.
+    const auto before = read_file(path);
+    std::filesystem::create_directory(path + ".tmp~");
+    CHECK(!PetIEEE_TestAccess::save_prg(e, "TWO", {1,4,2}));
+    CHECK_EQ(status_code(e), 25);
+    CHECK(read_file(path) == before);
+    std::filesystem::remove(path + ".tmp~");
+    // A rename failure (target is a directory) leaves no temp file behind.
+    const auto dirTarget = (f.dir / "asdir").string();
+    std::filesystem::create_directory(dirTarget);
+    PetIEEE_TestAccess::image_path(e, dirTarget);
+    CHECK(!PetIEEE_TestAccess::save_prg(e, "THREE", {1,4,3}));
+    CHECK(!std::filesystem::exists(dirTarget + ".tmp~"));
+    // Folder saves replace atomically too.
+    PetIEEE h; h.setHostRoot((f.dir / "root").string());
+    PetIEEE_TestAccess::host_save(h, "KEEP");
+    CHECK(!std::filesystem::exists(f.dir / "root/KEEP.prg.tmp~"));
+    CHECK(std::filesystem::exists(f.dir / "root/KEEP.prg"));
+}
+
+static void test_mount_validation() {
+    ReviewFixture f;
+    const auto a = (f.dir / "a.d64").string();
+    auto imgA = make_blank_d64();
+    CHECK(write_file(a, imgA));
+    PetIEEE e; CHECK(e.setD64Image(a));
+    CHECK(PetIEEE_TestAccess::save_prg(e, "KEEPME", {1,4,9}));
+    const auto mounted = PetIEEE_TestAccess::image(e);
+    // Wrong sizes, empty and missing files are refused and change nothing.
+    const auto junk = (f.dir / "junk.d64").string();
+    CHECK(write_file(junk, std::vector<uint8_t>(1000, 0)));
+    CHECK(!e.setD64Image(junk));
+    CHECK(write_file(junk, std::vector<uint8_t>(174849, 0)));
+    CHECK(!e.setD64Image(junk));
+    CHECK(write_file(junk, {}));
+    CHECK(!e.setD64Image(junk));
+    CHECK(!e.setD64Image((f.dir / "missing.d64").string()));
+    CHECK(e.isD64Mounted());
+    CHECK(e.getD64Image() == a);
+    CHECK(PetIEEE_TestAccess::image(e) == mounted);
+    std::vector<uint8_t> pay; uint16_t addr = 0;
+    CHECK(PetIEEE_TestAccess::load_prg(e, "KEEPME", pay, addr));
+    // Every listed size is accepted.
+    for (size_t n : {size_t(174848), size_t(175531), size_t(349696), size_t(351062), size_t(196608), size_t(197376)}) {
+        auto img = make_blank_d64(); img.resize(n);
+        CHECK(write_file(junk, img)); PetIEEE g; CHECK(g.setD64Image(junk));
+    }
+}
+
+static void test_40_track_geometry() {
+    ReviewFixture f;
+    auto img = make_blank_d64();
+    img.resize(196608, 0);
+    // Tracks 36..40 hold 17 sectors each, directly after track 35's 683 sectors.
+    auto off40 = [](int t, int s) { return (size_t)((683 + (t - 36) * 17 + s) * 256); };
+    uint8_t* ent = img.data() + soff(18, 1) + 2;
+    ent[0] = 0x82; ent[1] = 38; ent[2] = 3;
+    memset(ent + 3, 0xA0, 16); memcpy(ent + 3, "FAR", 3);
+    uint8_t* sec = img.data() + off40(38, 3);
+    sec[0] = 0; sec[1] = 5; sec[2] = 0x01; sec[3] = 0x08; sec[4] = 0xAA; sec[5] = 0xBB;
+    // A chain that ends on the very last sector of track 40 (sector 16).
+    uint8_t* e2 = img.data() + soff(18, 1) + 2 + 32;
+    e2[0] = 0x82; e2[1] = 40; e2[2] = 16;
+    memset(e2 + 3, 0xA0, 16); memcpy(e2 + 3, "LAST", 4);
+    uint8_t* s2 = img.data() + off40(40, 16);
+    s2[0] = 0; s2[1] = 4; s2[2] = 0x01; s2[3] = 0x08; s2[4] = 0x77;
+    const auto path = (f.dir / "forty.d64").string();
+    CHECK(write_file(path, img));
+    PetIEEE e; CHECK(e.setD64Image(path));
+    std::vector<uint8_t> pay; uint16_t addr = 0;
+    CHECK(PetIEEE_TestAccess::load_prg(e, "FAR", pay, addr));
+    CHECK_EQ(addr, 0x0801);
+    CHECK(pay == (std::vector<uint8_t>{0xAA, 0xBB}));
+    CHECK(PetIEEE_TestAccess::load_prg(e, "LAST", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0x77}));
+    uint8_t buf[256];
+    CHECK(PetIEEE_TestAccess::read_sector(e, 40, 16, buf));
+    CHECK(!PetIEEE_TestAccess::read_sector(e, 40, 17, buf));   // 17 sectors: 0..16
+    CHECK(!PetIEEE_TestAccess::read_sector(e, 41, 0, buf));
+    // Still read-only.
+    CHECK(!PetIEEE_TestAccess::save_prg(e, "NEW", {1,4,5}));
+    CHECK(PetIEEE_TestAccess::image(e) == img);
+    // A 35-track image has no tracks 36+ (it used to alias the .d71 mirror).
+    PetIEEE g; CHECK(write_file(path, make_blank_d64())); CHECK(g.setD64Image(path));
+    CHECK(!PetIEEE_TestAccess::read_sector(g, 36, 0, buf));
+}
+
+static void test_overwrite_protection() {
+    ReviewFixture f;
+    // ---- D64 backend ----
+    const auto path = (f.dir / "ow.d64").string();
+    CHECK(write_file(path, make_blank_d64()));
+    PetIEEE e; CHECK(e.setD64Image(path));
+    PetIEEE_TestAccess::bus_save(e, "PROG", {1,8,0xAA});
+    CHECK_EQ(status_code(e), 0);
+    PetIEEE_TestAccess::bus_save(e, "PROG", {1,8,0xBB});          // no "@"
+    CHECK_EQ(status_code(e), 63);
+    std::vector<uint8_t> pay; uint16_t addr = 0;
+    CHECK(PetIEEE_TestAccess::load_prg(e, "PROG", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0xAA}));                    // old file kept
+    PetIEEE_TestAccess::bus_save(e, "@0:PROG", {1,8,0xCC});        // replace
+    CHECK_EQ(status_code(e), 0);
+    CHECK(PetIEEE_TestAccess::load_prg(e, "PROG", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0xCC}));
+    // OPEN ...,W: refused without "@", channel not armed, nothing committed.
+    PetIEEE_TestAccess::open_ch(e, 3, "DATA,S,W");
+    PetIEEE_TestAccess::put_data(e, 3, vbytes("ONE"));
+    PetIEEE_TestAccess::close_ch(e, 3);
+    PetIEEE_TestAccess::open_ch(e, 3, "DATA,S,W");
+    CHECK_EQ(status_code(e), 63);
+    CHECK(!PetIEEE_TestAccess::write_active(e, 3));
+    PetIEEE_TestAccess::put_data(e, 3, vbytes("TWO"));
+    PetIEEE_TestAccess::close_ch(e, 3);
+    CHECK(PetIEEE_TestAccess::open_read(e, "DATA", 4, 0));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 4) == vbytes("ONE"));
+    PetIEEE_TestAccess::open_ch(e, 3, "@:DATA,S,W");
+    PetIEEE_TestAccess::put_data(e, 3, vbytes("TWO"));
+    PetIEEE_TestAccess::close_ch(e, 3);
+    CHECK(PetIEEE_TestAccess::open_read(e, "DATA", 4, 0));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 4) == vbytes("TWO"));
+    // Append to an existing file needs no "@".
+    PetIEEE_TestAccess::open_ch(e, 3, "DATA,S,A");
+    CHECK_EQ(status_code(e), 0);
+    PetIEEE_TestAccess::close_ch(e, 3);
+    // Locked files (type bit 6) are neither replaced nor scratched.
+    CHECK(PetIEEE_TestAccess::save_prg(e, "LOCK", {1,8,0x11}));
+    auto img = read_file(path);
+    uint8_t* dir = img.data() + soff(18, 1);
+    for (int i = 0; i < 8; ++i)
+        if (dir[2 + i*32] == 0x82 && memcmp(dir + 2 + i*32 + 3, "LOCK", 4) == 0) dir[2 + i*32] |= 0x40;
+    CHECK(write_file(path, img));
+    PetIEEE l; CHECK(l.setD64Image(path));
+    PetIEEE_TestAccess::bus_save(l, "@0:LOCK", {1,8,0x22});
+    CHECK_EQ(status_code(l), 63);                                  // CBM DOS: name still taken
+    PetIEEE_TestAccess::open_ch(l, 3, "@LOCK,S,W");
+    CHECK_EQ(status_code(l), 63);
+    CHECK(PetIEEE_TestAccess::cmd(l, "S:LOCK"));
+    CHECK(PetIEEE_TestAccess::status(l).find("01,FILES SCRATCHED,00") != std::string::npos);
+    CHECK(PetIEEE_TestAccess::load_prg(l, "LOCK", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0x11}));
+    CHECK(PetIEEE_TestAccess::image(l) == img);
+
+    // ---- folder backend ----
+    const auto root = f.dir / "root";
+    PetIEEE h; h.setHostRoot(root.string());
+    PetIEEE_TestAccess::bus_save(h, "PROG", {1,8,0xAA});
+    CHECK(slurp(root / "PROG.prg") == std::string("\x01\x08\xAA", 3));
+    PetIEEE_TestAccess::bus_save(h, "PROG", {1,8,0xBB});
+    CHECK_EQ(status_code(h), 63);
+    CHECK(slurp(root / "PROG.prg") == std::string("\x01\x08\xAA", 3));
+    PetIEEE_TestAccess::bus_save(h, "@0:PROG", {1,8,0xCC});
+    CHECK_EQ(status_code(h), 0);
+    CHECK(slurp(root / "PROG.prg") == std::string("\x01\x08\xCC", 3));
+    PetIEEE_TestAccess::open_ch(h, 3, "DATA,S,W");
+    PetIEEE_TestAccess::put_data(h, 3, vbytes("ONE"));
+    PetIEEE_TestAccess::close_ch(h, 3);
+    PetIEEE_TestAccess::open_ch(h, 3, "DATA,S,W");
+    CHECK_EQ(status_code(h), 63);
+    PetIEEE_TestAccess::put_data(h, 3, vbytes("TWO"));
+    PetIEEE_TestAccess::close_ch(h, 3);
+    CHECK(slurp(root / "DATA.seq") == "ONE");
+    PetIEEE_TestAccess::open_ch(h, 3, "@0:DATA,S,W");
+    PetIEEE_TestAccess::put_data(h, 3, vbytes("TWO"));
+    PetIEEE_TestAccess::close_ch(h, 3);
+    CHECK(slurp(root / "DATA.seq") == "TWO");
+}
+
+static void test_stale_channels() {
+    ReviewFixture f;
+    const auto pa = (f.dir / "a.d64").string(), pb = (f.dir / "b.d64").string();
+    CHECK(write_file(pa, make_blank_d64()));
+    CHECK(write_file(pb, make_blank_d64()));
+    // reset(): a file left open for write is dropped, not committed later.
+    PetIEEE e; CHECK(e.setD64Image(pa));
+    PetIEEE_TestAccess::open_ch(e, 3, "STALE,S,W");
+    PetIEEE_TestAccess::put_data(e, 3, vbytes("DATA"));
+    CHECK(PetIEEE_TestAccess::write_active(e, 3));
+    PetIEEE_TestAccess::bus_cmd(e, 0x28); PetIEEE_TestAccess::bus_cmd(e, 0x6F);
+    PetIEEE_TestAccess::bus_data(e, 'S');                          // half-typed command text
+    CHECK(!PetIEEE_TestAccess::cmd15_pending(e).empty());
+    e.reset();
+    CHECK(!PetIEEE_TestAccess::write_active(e, 3));
+    CHECK(PetIEEE_TestAccess::cmd15_pending(e).empty());
+    CHECK(e.isD64Mounted());                                       // media survives reset
+    PetIEEE_TestAccess::close_ch(e, 3);
+    CHECK(!PetIEEE_TestAccess::open_read(e, "STALE", 4, 0));
+    // Disk swap: the write opened on A must not land on B (or A).
+    PetIEEE_TestAccess::open_ch(e, 3, "SWAP,S,W");
+    PetIEEE_TestAccess::put_data(e, 3, vbytes("DATA"));
+    CHECK(e.setD64Image(pb));
+    CHECK(!PetIEEE_TestAccess::write_active(e, 3));
+    PetIEEE_TestAccess::close_ch(e, 3);
+    CHECK(!PetIEEE_TestAccess::open_read(e, "SWAP", 4, 0));
+    PetIEEE a2; CHECK(a2.setD64Image(pa));
+    CHECK(!PetIEEE_TestAccess::open_read(a2, "SWAP", 4, 0));
+    CHECK(!PetIEEE_TestAccess::open_read(a2, "STALE", 4, 0));
+    // Eject drops channels as well.
+    PetIEEE_TestAccess::open_ch(e, 3, "EJ,S,W");
+    CHECK(e.setD64Image(""));
+    CHECK(!PetIEEE_TestAccess::write_active(e, 3));
+}
+
+static void test_folder_listing_matches_load() {
+    ReviewFixture f;
+    const auto root = f.dir / "root";
+    auto put = [&](const char* n, std::vector<uint8_t> b) { CHECK(write_file((root / n).string(), b)); };
+    put("zed.prg",   {1,8,0x5A});
+    put("AAA.d64",   {1,8,1});
+    put("BBB.tap",   {1,8,2});
+    put("notes.txt", {1,8,3});
+    put("mid",       {1,8,0x4D});                                  // extensionless = PRG
+    put("ABCDEFGHIJKLMNOPQRST.prg", {1,8,0x4C});                   // 20 characters
+    PetIEEE e; e.setHostRoot(root.string());
+    std::vector<uint8_t> dir; CHECK(PetIEEE_TestAccess::build_dir_folder(e, dir, ""));
+    const std::string txt((const char*)dir.data(), dir.size());
+    CHECK(txt.find("AAA") == std::string::npos);                   // .d64/.tap/.txt are not files
+    CHECK(txt.find("BBB") == std::string::npos);
+    CHECK(txt.find("NOTES") == std::string::npos);
+    CHECK(txt.find("\"ABCDEFGHIJKLMNOP\"") != std::string::npos);  // cut to 16
+    const size_t pl = txt.find("\"ABCDEFGHIJKLMNOP\""), pm = txt.find("\"MID\""), pz = txt.find("\"ZED\"");
+    CHECK(pl != std::string::npos && pm != std::string::npos && pz != std::string::npos);
+    CHECK(pl < pm && pm < pz);                                     // sorted by name
+    std::vector<uint8_t> pay; uint16_t addr = 0;
+    // The name as listed loads the 20-character file; so does the full name.
+    CHECK(PetIEEE_TestAccess::host_load(e, "ABCDEFGHIJKLMNOP", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0x4C}));
+    CHECK(PetIEEE_TestAccess::host_load(e, "ABCDEFGHIJKLMNOPQRST", pay, addr));
+    CHECK(PetIEEE_TestAccess::host_load(e, "MID", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0x4D}));
+    CHECK(PetIEEE_TestAccess::host_load(e, "ZED", pay, addr));
+    CHECK(!PetIEEE_TestAccess::host_load(e, "AAA", pay, addr));
+    CHECK(!PetIEEE_TestAccess::host_load(e, "NOTES", pay, addr));
+    // "*" is the first listed program, never the .d64 that sorts before it.
+    CHECK(PetIEEE_TestAccess::host_load(e, "*", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0x4C}));
+    CHECK(PetIEEE_TestAccess::host_load(e, "M*", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0x4D}));
+}
+
+// ---------------------------------------------------------------------------
+// The PET's side of the bus, driven through the public line API in the order
+// the BASIC 2 KERNAL (901465-03) does it. Addresses name the ROM routines the
+// steps were read from. A write to $E840 updates ATN and NRFD together, as in
+// Pet2001IO.
+// ---------------------------------------------------------------------------
+struct Kernal2Bus {
+    PetIEEE& e;
+    bool atn = true, nrfd = true;
+    bool stalled = false;   // the KERNAL would wait for DAV high forever
+    bool eoi = false;       // EOI seen with the last byte received
+    void orb(bool a, bool n) { atn = a; nrfd = n; e.ATNout(a); e.NRFDout(n); }
+    void send(uint8_t byte) {                       // $F0EE
+        e.DAVout(true); e.DIOout((uint8_t)(byte ^ 0xFF));
+        e.DAVout(false); e.DAVout(true); e.DIOout(0xFF);
+    }
+    void command(uint8_t byte) {                    // $F0BC
+        orb(atn, true);                             // release NRFD...
+        e.NDACout(true);                            // ...and NDAC
+        if (!e.DAVin()) { stalled = true; return; } // $F0E4: LDA $E840 / BPL
+        orb(false, true);
+        send(byte);
+    }
+    void open(uint8_t sa, const std::string& name) {
+        command(0x28); send((uint8_t)(0xF0 | sa)); orb(true, nrfd);
+        for (char c : name) send((uint8_t)c);
+        command(0x3F); orb(true, nrfd);
+    }
+    void talk(uint8_t sa) {                         // $F0B6, then $F164
+        command(0x48); send((uint8_t)(0x60 | sa));
+        orb(atn, false); e.NDACout(false);          // $F146
+        orb(true, nrfd);                            // $F12D
+    }
+    void untalk() { command(0x5F); orb(true, nrfd); } // $F17F
+    int get() {                                     // $F18C; -1 = timed out, no byte
+        e.NDACout(false);
+        orb(atn, true);
+        if (e.DAVin()) return -1;
+        orb(atn, false);
+        eoi = !e.EOIin();
+        const int byte = (uint8_t)(e.DIOin() ^ 0xFF);
+        e.NDACout(true);
+        if (!e.DAVin()) { stalled = true; return -2; }
+        e.NDACout(false);
+        return byte;
+    }
+};
+
+// A program that reads a record and leaves the rest for later (INPUT# per
+// record, or a GET# loop) hands the bus back with bytes still unread. BASIC 2
+// releases NRFD and NDAC before it asserts ATN; the drive took that for
+// "ready" plus "accepted", put up another byte and the PET waited for ever.
+// With one byte left it did not hang but lost that byte.
+static void test_partial_read_hands_the_bus_back() {
+    ReviewFixture f;
+    const auto root = f.dir / "root";
+    CHECK(write_file((root / "DATA.seq").string(), vbytes("1\rXY\r")));
+    PetIEEE e; e.setHostRoot(root.string());
+    Kernal2Bus pet{ e };
+    pet.open(2, "DATA,S,R");
+    CHECK(status_code(e) == 0);
+    pet.talk(2);                                    // INPUT#2,A
+    CHECK_EQ(pet.get(), '1');
+    CHECK_EQ(pet.get(), '\r');
+    pet.untalk();                                   // three bytes unread
+    CHECK(!pet.stalled);
+    pet.talk(2); CHECK_EQ(pet.get(), 'X'); CHECK(!pet.eoi); pet.untalk();  // GET#2 (two unread)
+    CHECK(!pet.stalled);
+    pet.talk(2); CHECK_EQ(pet.get(), 'Y'); CHECK(!pet.eoi); pet.untalk();  // GET#2 (one unread)
+    CHECK(!pet.stalled);
+    pet.talk(2); CHECK_EQ(pet.get(), '\r'); CHECK(pet.eoi); pet.untalk();  // last byte carries EOI
+    CHECK(!pet.stalled);
+    pet.talk(2); CHECK_EQ(pet.get(), -1); pet.untalk();                     // nothing left: silence
+    CHECK(!pet.stalled);
+}
+
+// hostLoadFile / hostSaveFile: LOAD and SAVE by name without bus traffic (the
+// PET 2001 BASIC 1 ROM cannot drive the disk itself). The bus must stay idle.
+static bool drive_idle(PetIEEE& e) {
+    return e.getState() == PetIEEE::STATE_IDLE && e.DAVin() && e.EOIin();
+}
+
+static void test_host_load_save_folder() {
+    ReviewFixture f;
+    const auto root = f.dir / "root";
+    CHECK(write_file((root / "hello.prg").string(), { 0x01, 0x04, 0x0A, 0x0B, 0x0C }));
+    PetIEEE e; e.setHostRoot(root.string());
+    std::vector<uint8_t> pay; uint16_t addr = 0;
+
+    // Missing name: false and 62,FILE NOT FOUND.
+    CHECK(!e.hostLoadFile("GHOST", pay, addr));
+    CHECK_EQ(status_code(e), 62);
+    CHECK(drive_idle(e));
+
+    // By name: the load address comes back separately, the payload without it.
+    CHECK(e.hostLoadFile("HELLO", pay, addr));
+    CHECK_EQ(addr, 0x0401);
+    CHECK(pay == std::vector<uint8_t>({ 0x0A, 0x0B, 0x0C }));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(drive_idle(e));
+
+    // Directory: "$" and the drive-number form "$0".
+    for (const char* dn : { "$", "$0" }) {
+        pay.clear(); addr = 0;
+        CHECK(e.hostLoadFile(dn, pay, addr));
+        CHECK_EQ(addr, 0x0401);
+        CHECK(bytes_contain(pay, "HELLO"));
+        CHECK(drive_idle(e));
+    }
+    // A filtered listing that matches nothing still lists, but not HELLO.
+    pay.clear();
+    CHECK(e.hostLoadFile("$:Z*", pay, addr));
+    CHECK(!bytes_contain(pay, "HELLO"));
+
+    // SAVE creates NAME.prg with exactly the given bytes.
+    const std::vector<uint8_t> first = { 0x01, 0x04, 0x11, 0x22, 0x33 };
+    CHECK(e.hostSaveFile("NEW", first));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(read_file((root / "NEW.prg").string()) == first);
+    CHECK(drive_idle(e));
+
+    // Saved program loads back by name.
+    CHECK(e.hostLoadFile("NEW", pay, addr));
+    CHECK_EQ(addr, 0x0401);
+    CHECK(pay == std::vector<uint8_t>({ 0x11, 0x22, 0x33 }));
+
+    // Second SAVE without "@": 63,FILE EXISTS and the file stays as it was.
+    const std::vector<uint8_t> second = { 0x01, 0x04, 0x44, 0x55 };
+    CHECK(!e.hostSaveFile("NEW", second));
+    CHECK_EQ(status_code(e), 63);
+    CHECK(read_file((root / "NEW.prg").string()) == first);
+    CHECK(drive_idle(e));
+
+    // "@0:" replaces.
+    CHECK(e.hostSaveFile("@0:NEW", second));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(read_file((root / "NEW.prg").string()) == second);
+    CHECK(drive_idle(e));
+
+    // Empty name: 34,SYNTAX ERROR, nothing written.
+    CHECK(!e.hostSaveFile("", second));
+    CHECK_EQ(status_code(e), 34);
+    CHECK(!std::filesystem::exists(root / "UNTITLED.prg"));
+    CHECK(!e.hostSaveFile("\"\"", second));
+    CHECK_EQ(status_code(e), 34);
+    CHECK(drive_idle(e));
+
+    // No folder and no image: not written.
+    PetIEEE none;
+    CHECK(!none.hostSaveFile("X", first));
+    CHECK_EQ(status_code(none), 74);                // DRIVE NOT READY
+    CHECK(!none.hostLoadFile("X", pay, addr));
+    CHECK_EQ(status_code(none), 62);
+    CHECK(drive_idle(none));
+}
+
+static void test_host_load_save_d64() {
+    ReviewFixture f;
+    const auto path = (f.dir / "host.d64").string();
+    CHECK(write_file(path, make_blank_d64()));
+    PetIEEE e; CHECK(e.setD64Image(path));
+    std::vector<uint8_t> pay; uint16_t addr = 0;
+
+    const std::vector<uint8_t> prg = { 0x3C, 0x03, 0xA9, 0x00, 0x60 };
+    CHECK(e.hostSaveFile("0:PROG", prg));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(drive_idle(e));
+
+    CHECK(e.hostLoadFile("PROG", pay, addr));
+    CHECK_EQ(addr, 0x033C);
+    CHECK(pay == std::vector<uint8_t>({ 0xA9, 0x00, 0x60 }));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(drive_idle(e));
+
+    pay.clear();
+    CHECK(e.hostLoadFile("$", pay, addr));
+    CHECK_EQ(addr, 0x0401);
+    CHECK(bytes_contain(pay, "PROG"));
+    CHECK(drive_idle(e));
+
+    CHECK(!e.hostLoadFile("GHOST", pay, addr));
+    CHECK_EQ(status_code(e), 62);
+    CHECK(drive_idle(e));
+
+    // No "@": 63, the image keeps the first program.
+    CHECK(!e.hostSaveFile("PROG", { 0x01, 0x04, 0xEE }));
+    CHECK_EQ(status_code(e), 63);
+    CHECK(e.hostLoadFile("PROG", pay, addr));
+    CHECK(pay == std::vector<uint8_t>({ 0xA9, 0x00, 0x60 }));
+
+    // The save reached the image file on disk, not only the drive's copy.
+    PetIEEE again; CHECK(again.setD64Image(path));
+    CHECK(again.hostLoadFile("PROG", pay, addr));
+    CHECK_EQ(addr, 0x033C);
+    CHECK(pay == std::vector<uint8_t>({ 0xA9, 0x00, 0x60 }));
+}
+
 int main(int argc, char** argv) {
+    test_partial_read_hands_the_bus_back();
+    test_host_load_save_folder();
+    test_host_load_save_d64();
     test_unicode_host_directory();
+    test_folder_data_files();
+    test_atomic_image_write();
+    test_mount_validation();
+    test_40_track_geometry();
+    test_overwrite_protection();
+    test_stale_channels();
+    test_folder_listing_matches_load();
     if (argc > 1 && std::string(argv[1]) == "--cycles") {
         test_cyclic_disk_chains_are_rejected();
         return g_fail ? 1 : 0;

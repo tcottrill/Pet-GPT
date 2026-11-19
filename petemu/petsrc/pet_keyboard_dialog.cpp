@@ -13,7 +13,7 @@ namespace {
 constexpr int keyBase=5000;
 wxString reserved_label(int vk) {
  switch(vk) {
- case VK_ESCAPE:return "Exit";case VK_F6:return "Screenshot";case VK_PAUSE:return "Pause";case VK_F8:return "Log CRT";case VK_F9:return "CRT knob";
+ case VK_ESCAPE:return "Exit fullscreen";case VK_F6:return "Screenshot";case VK_PAUSE:return "Pause";case VK_F8:return "Log CRT";case VK_F9:return "CRT knob";
  case VK_F10:return "CRT";case VK_F11:return "Fullscreen";case VK_F12:return "Gfx mode";
  case VK_PRIOR:return "CRT +";case VK_NEXT:return "CRT -";
  case VK_LSHIFT:case VK_RSHIFT:case VK_LMENU:case VK_RMENU:return "Modifier";

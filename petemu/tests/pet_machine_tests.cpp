@@ -63,6 +63,29 @@ int main() {
         CHECK(v.framebuffer()[0]==black);
         v.setVideoBlank(false); CHECK(v.framebuffer()[0]!=black);
     }
+    {
+        // BASIC 1 disk traps: only active on a ROM with the BASIC 1 bytes at the
+        // trapped addresses, and only while enabled.
+        PetMachine machine;
+        CHECK(!machine.basic1DiskTrapsActive());     // no ROM installed
+        static uint8_t f000[4096] = {};
+        const uint8_t load[] = {0x20,0x62,0xF4,0x20,0xB6,0xF0,0x20,0x22,0xF4,0x20,0x39,0xF3,0x20,0x87,0xF1};
+        const uint8_t save[] = {0x20,0x1C,0xF7,0x20,0x62,0xF4,0x20,0xBA,0xF0};
+        memcpy(f000+0x375,load,sizeof load);
+        f000[0x3CC]=0xAD; f000[0x3CD]=0x0B; f000[0x3CE]=0x02;
+        f000[0x579]=0xA0; f000[0x57A]=0x24;
+        memcpy(f000+0x6C0,save,sizeof save);
+        f000[0x735]=0x60;
+        CHECK(machine.loadRom(f000,sizeof f000,0xF000));
+        CHECK(machine.basic1DiskTrapsActive());
+        machine.setBasic1DiskTraps(false);
+        CHECK(!machine.basic1DiskTrapsActive());
+        machine.setBasic1DiskTraps(true);
+        CHECK(machine.basic1DiskTrapsActive());
+        f000[0x735]=0xEA;                           // one byte off: another ROM
+        CHECK(machine.loadRom(f000,sizeof f000,0xF000));
+        CHECK(!machine.basic1DiskTrapsActive());
+    }
     // Debug CRT counts live allocations, including the CPU and its internal storage.
 #if defined(_MSC_VER) && defined(_DEBUG)
     _CrtMemState before{},after{},delta{};

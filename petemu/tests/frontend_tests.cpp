@@ -8,6 +8,7 @@
 #undef wxIMPLEMENT_APP
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #ifdef __WXMSW__
 #include "system/monitor_select.h"
 #endif
@@ -278,13 +279,188 @@ int main(int argc, char** argv) {
             check("plain P still reaches PET input", IsKeyDown('P'));
             RawInput_ReleaseAll();
         }
+        // ROM availability: greyed model menu items and the availability query.
+        {
+            const std::filesystem::path roms = std::filesystem::u8path(std::string(directory.utf8_string())) / "roms";
+            const std::filesystem::path set = roms / "cbm8032", hidden = roms / "cbm8032.hidden";
+            std::error_code ec;
+            check("every ROM set reports available", pet_rom_set_available(1) && pet_rom_set_available(2) && pet_rom_set_available(4) &&
+                pet_rom_set_available(12) && pet_rom_set_available(8));
+            check("unknown model is not available", !pet_rom_set_available(3));
+            check("Model8 enabled when its ROMs exist", frame->GetMenuBar()->IsEnabled(Model8));
+            if (pet_get_basic() != 8) {
+                std::filesystem::rename(set, hidden, ec);
+                if (!ec) {
+                    command(Reset); // any command refreshes the menus
+                    check("missing ROM set reported unavailable", !pet_rom_set_available(8));
+                    check("model without ROMs is greyed out", !frame->GetMenuBar()->IsEnabled(Model8));
+                    check("model with ROMs stays enabled", frame->GetMenuBar()->IsEnabled(Model2));
+                    std::filesystem::rename(hidden, set, ec);
+                    command(Reset);
+                    check("restored ROM set enabled again", pet_rom_set_available(8) && frame->GetMenuBar()->IsEnabled(Model8));
+                } else std::puts("NOTE: could not move the cbm8032 ROM folder; greyed-model check skipped");
+            }
+        }
+        // Loading a program: BASIC autoruns, machine code gets a SYS hint in the title.
+        {
+            const auto dir = std::filesystem::temp_directory_path() / "pet-gpt-frontend-prg";
+            std::filesystem::create_directories(dir);
+            auto write = [&](const char* name, std::vector<unsigned char> bytes) {
+                const auto path = dir / name;
+                std::ofstream out(path, std::ios::binary); out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+                return path.u8string();
+            };
+            // 10 PRINT"HI"
+            const std::string basic = write("hello.prg", {0x01, 0x04, 0x0C, 0x04, 0x0A, 0x00, 0x99, 0x22, 0x48, 0x49, 0x22, 0x00, 0x00, 0x00});
+            const std::string ml = write("code.prg", {0x00, 0x10, 0xEA, 0x60});
+            pet_set_basic(2);
+            const bool basic1 = pet_get_basic() == 1;
+            const int buffer = basic1 ? 0x020F : 0x026F, count = basic1 ? 0x020D : 0x9E;
+            set_config_bool("machine", "autorun", false);
+            pet_load_software(basic.c_str());
+            check("autorun off leaves the keyboard buffer empty", pet_peek(count) == 0);
+            check("BASIC hint says type RUN", frame->GetTitle().Contains("type RUN"));
+            set_config_bool("machine", "autorun", true);
+            pet_load_software(basic.c_str());
+            check("autorun queues RUN + Return", pet_peek(count) == 4 && pet_peek(buffer) == 'R' && pet_peek(buffer + 1) == 'U' &&
+                pet_peek(buffer + 2) == 'N' && pet_peek(buffer + 3) == 13);
+            for (int i = 0; i < 120; ++i) emu_run_frame();
+            check("autorun buffer consumed by the KERNAL", pet_peek(count) == 0);
+            bool printed = false;   // screen rows are 40 codes wide; H=8, I=9 at row start
+            for (int row = 0; row < 25; ++row) printed = printed || (pet_peek(0x8000 + row * 40) == 8 && pet_peek(0x8000 + row * 40 + 1) == 9);
+            check("autorun actually ran the program", printed);
+            pet_load_software(ml.c_str());
+            check("machine code is not auto-run", pet_peek(count) == 0);
+            check("machine code hint names SYS 4096", frame->GetTitle().Contains("SYS 4096"));
+            std::filesystem::remove_all(dir);
+        }
+        // Unsupported files, .p00, drag and drop, File > Recent and the new menu items.
+        {
+            const auto dir = std::filesystem::temp_directory_path() / "pet-gpt-frontend-recent";
+            std::error_code ec; std::filesystem::remove_all(dir, ec);
+            std::filesystem::create_directories(dir);
+            auto write = [&](const char* name, std::vector<unsigned char> bytes) {
+                const auto path = dir / name;
+                std::ofstream out(path, std::ios::binary); out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+                return path.u8string();
+            };
+            auto full = [](const std::string& path) { return wxFileName(wxString::FromUTF8(path)).GetFullPath().ToStdString(wxConvUTF8); };
+            const std::vector<unsigned char> hello = {0x01, 0x04, 0x0C, 0x04, 0x0A, 0x00, 0x99, 0x22, 0x48, 0x49, 0x22, 0x00, 0x00, 0x00};
+            const std::string basic = write("hello.prg", hello), ml = write("code.prg", {0x00, 0x10, 0xEA, 0x60});
+            set_config_bool("machine", "autorun", false);
+
+            auto fileMenu = [&] { return frame->GetMenuBar()->GetMenu(0); };
+            wxMenu* recentMenu = nullptr;
+            for (auto* item : fileMenu()->GetMenuItems()) if (item->GetSubMenu() && item->GetItemLabelText() == "Recent") recentMenu = item->GetSubMenu();
+            check("File > Recent submenu exists", recentMenu != nullptr);
+            check("Open Files/ROM/Screenshots folder items exist", frame->GetMenuBar()->FindItem(OpenFiles) && frame->GetMenuBar()->FindItem(OpenRoms) && frame->GetMenuBar()->FindItem(OpenShots));
+            check("Help > Quick Start exists", frame->GetMenuBar()->FindItem(QuickStart) != nullptr);
+            const wxString quick = QuickStartText();
+            check("Quick Start covers disks, tapes and keys", quick.Contains("LOAD\"$\",8") && quick.Contains("LIST") && quick.Contains("File > Tape > Play") &&
+                quick.Contains("Caps Lock") && quick.Contains("Keyboard Mapping") && quick.Contains(wxString::FromUTF8(data_path("roms"))));
+            const auto filesFolder = std::filesystem::u8path(data_path("files"));
+            command(OpenFiles);
+            check("Open Files Folder creates the folder", std::filesystem::is_directory(filesFolder));
+
+            // Recent list: ordering, de-duplication, cap, persistence.
+            command(RecentClear);
+            check("Clear empties the list", RecentLoad().empty() && !frame->GetMenuBar()->FindItem(RecentClear)->IsEnabled());
+            check("loading a PRG succeeds", frame->LoadPath(wxString::FromUTF8(basic)));
+            check("loading machine code succeeds", frame->LoadPath(wxString::FromUTF8(ml)));
+            check("loading the first again succeeds", frame->LoadPath(wxString::FromUTF8(basic)));
+            auto list = RecentLoad();
+            check("recent list is most recent first without duplicates", list.size() == 2 && list[0] == full(basic) && list[1] == full(ml));
+            SetIniFile(data_path("pet.ini").c_str());
+            check("recent list persists in pet.ini [recent]", RecentLoad() == list && get_config_string(std::string("recent"), std::string("file1"), std::string()) == full(basic));
+            check("recent menu shows the entries", recentMenu && frame->GetMenuBar()->FindItem(RecentFirst) && frame->GetMenuBar()->FindItem(RecentFirst)->GetHelp() == wxString::FromUTF8(full(basic)) &&
+                frame->GetMenuBar()->FindItem(RecentFirst + 1)->GetHelp() == wxString::FromUTF8(full(ml)) && !frame->GetMenuBar()->FindItem(RecentFirst + 2) && frame->GetMenuBar()->FindItem(RecentClear)->IsEnabled());
+            for (int i = 0; i < 10; ++i) RecentAdd(full(write(("extra" + std::to_string(i) + ".prg").c_str(), hello)));
+            list = RecentLoad();
+            check("recent list is capped at 8", list.size() == size_t(kRecentMax) && list[0] == full((dir / "extra9.prg").u8string()));
+            RecentSave({}); RecentAdd(full(basic)); RecentAdd(full(ml));
+            frame->LoadPath(wxString::FromUTF8(basic)); // rebuild the menu from the ini
+            // Choosing an entry loads it through the same path as File > Load, and moves it to the top.
+            command(RecentFirst + 1);
+            check("Recent entry loads the program", frame->GetTitle().Contains("SYS 4096"));
+            check("loaded Recent entry moves to the top", RecentLoad().front() == full(ml));
+            // A file that has gone is reported and removed.
+            const std::string gone = write("gone.prg", hello);
+            frame->LoadPath(wxString::FromUTF8(gone));
+            std::filesystem::remove(dir / "gone.prg");
+            const int exitBefore = applicationExitCode; lastMessageTitle.clear();
+            command(RecentFirst);
+            check("missing Recent file is reported", lastMessageTitle == "File not found" && lastMessageText.Contains("gone.prg"));
+            list = RecentLoad();
+            check("missing Recent file is removed", std::find(list.begin(), list.end(), full(gone)) == list.end() && list.size() == 2);
+            check("missing Recent file is not a host error", applicationExitCode == exitBefore);
+
+            // Unsupported extensions leave the machine alone and report an error.
+            check("load basic before the unsupported test", pet_load_software(basic.c_str()));
+            for (int i = 0; i < 30; ++i) emu_run_frame();
+            const wxString noteBefore = frame->GetTitle();
+            const int ramBefore = pet_peek(0x2000), linkBefore = pet_peek(0x0401);
+            const auto recentBefore = RecentLoad();
+            for (const char* name : {"picture.jpg", "notes.txt", "archive.zip"}) {
+                const std::string bad = write(name, {0x00, 0x20, 0x5A, 0x5B});
+                lastMessageTitle.clear(); applicationExitCode = 0;
+                check("unsupported extension is refused", !pet_load_software(bad.c_str()));
+                check("unsupported extension reports an error", lastMessageTitle == "Unsupported file type" && applicationExitCode == 1 &&
+                    lastMessageText.Contains(wxString(".") + wxFileName(name).GetExt()) && lastMessageText.Contains(".d71"));
+                applicationExitCode = 0;
+                check("unsupported file did not load or reset", pet_peek(0x2000) == ramBefore && pet_peek(0x0401) == linkBefore && frame->GetTitle() == noteBefore);
+                check("unsupported file did not join Recent", !frame->LoadPath(wxString::FromUTF8(bad)) && RecentLoad() == recentBefore);
+                applicationExitCode = 0;
+            }
+            check("extensionless file is accepted", pet_load_software(write("NOEXT", {0x00, 0x10, 0xEA, 0x60}).c_str()) && frame->GetTitle().Contains("SYS 4096"));
+
+            // PC64 .p00: 26-byte header, then a PRG.
+            std::vector<unsigned char> p00 = {'C', '6', '4', 'F', 'i', 'l', 'e', 0};
+            for (int i = 0; i < 16; ++i) p00.push_back(i < 4 ? 'T' : 0);
+            p00.push_back(0); p00.push_back(0);
+            p00.insert(p00.end(), {0x00, 0x30, 0x42, 0x43});
+            check("p00 loads", pet_load_software(write("game.p00", p00).c_str()));
+            check("p00 payload lands at its load address", pet_peek(0x3000) == 0x42 && pet_peek(0x3001) == 0x43 && frame->GetTitle().Contains("SYS 12288"));
+            p00[0] = 'X'; lastMessageTitle.clear();
+            check("p00 without the C64File header is refused", !pet_load_software(write("bad.p00", p00).c_str()) && lastMessageTitle == "Cannot load P00");
+            applicationExitCode = 0;
+
+            // Drag and drop loads after OnDropFiles returns, and the first file wins.
+            pet_load_software(basic.c_str());
+            auto* target = canvas ? dynamic_cast<ProgramDropTarget*>(canvas->GetDropTarget()) : nullptr;
+            check("canvas has the program drop target", target != nullptr);
+            if (target) {
+                wxArrayString dropped; dropped.Add(wxString::FromUTF8(ml)); dropped.Add(wxString::FromUTF8(basic)); dropped.Add(wxString::FromUTF8(basic));
+                check("drop is accepted", target->OnDropFiles(0, 0, dropped));
+                check("drop does not load inside OnDropFiles", pet_peek(0x1000) != 0xEA);
+                check("dropped file loads afterwards", eventually([&] { return pet_peek(0x1000) == 0xEA; }));
+                check("extra dropped files are noted", eventually([&] { return frame->GetTitle().Contains("2 other dropped file(s) ignored"); }));
+            }
+            command(RecentClear);
+            std::filesystem::remove_all(dir, ec);
+#ifdef __WXMSW__
+            // WM_DEVICECHANGE only raises a flag for poll_joystick(); must be harmless to send.
+            SendMessage(static_cast<HWND>(frame->GetHandle()), WM_DEVICECHANGE, 0x0007, 0);
+            emu_run_frame();
+#endif
+            set_config_bool("machine", "autorun", true);
+        }
         if (canvas) {
+            // Escape while windowed is a PET key: it must not quit or leave anything.
+            check("window starts windowed for the Escape test", !frame->IsFullScreen());
+            wxKeyEvent escape(wxEVT_KEY_DOWN); escape.m_keyCode = WXK_ESCAPE;
+            canvas->GetEventHandler()->ProcessEvent(escape);
+            check("Escape while windowed does not close the window", frame != nullptr && applicationExitCode == 0);
+            check("Escape while windowed reaches the PET keyboard", IsKeyDown(VK_ESCAPE));
+            wxKeyEvent escapeUp(wxEVT_KEY_UP); escapeUp.m_keyCode = WXK_ESCAPE;
+            canvas->GetEventHandler()->ProcessEvent(escapeUp);
+            check("Escape release reaches the PET keyboard", IsKeyUp(VK_ESCAPE));
+            for (int i = 0; i < 3; ++i) check("emulator keeps running with Escape down", emu_run_frame());
             command(Fullscreen);
             RawInput_SetKey(VK_ESCAPE, true);
-            wxKeyEvent escape(wxEVT_KEY_DOWN); escape.m_keyCode = WXK_ESCAPE;
             canvas->GetEventHandler()->ProcessEvent(escape);
             check("Escape leaves standalone fullscreen", frame && !frame->IsFullScreen());
             check("Escape key consumed", IsKeyUp(VK_ESCAPE));
+            check("Escape leaving fullscreen does not close the window", frame != nullptr && applicationExitCode == 0);
         }
         check("no host errors during UI operations", applicationExitCode == 0);
         // Do not resume the timer: close through the real close event while the

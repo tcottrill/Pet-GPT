@@ -3,7 +3,7 @@
 The application uses a shared wxWidgets frontend and the existing PET machine,
 6502 core, devices, and OpenGL CRT renderer. CMake is the supported build system.
 The historical Visual Studio/WinMain shell is retired from the active build.
-The supplied working directory has no Git metadata; building does not require it.
+Building does not require Git.
 
 ## Host architecture
 
@@ -200,7 +200,8 @@ may require administrator privileges; a user prefix avoids that requirement.
 
 ## Verification status
 
-Verification on 2026-11-07 uses MSVC on Windows and GCC on Ubuntu/WSLg, with the
+This section is the single status record for the project; other documents link here
+instead of repeating test counts. As last recorded, verification on 2026-11-07 uses MSVC on Windows and GCC on Ubuntu/WSLg, with the
 local wxWidgets 3.3.4 source override from `skein-downloader/vendor/wxWidgets`.
 
 - Both platforms: 25 CTest tests passed, including actual frontend menu/dialog

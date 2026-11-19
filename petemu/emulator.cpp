@@ -157,19 +157,28 @@ static bool ends_with_icase(const std::string& s, const char* suffix) {
 static int g_basic_set = 2;  // IDs: 1=2001, 2=2001N, 4=4000-9, 8=8032, 12=4000-12
 static int g_ram_kb    = 32; // configured RAM size in KB (4/8/16/32)
 
+// Each ROM set lives in its own self-contained subfolder (own copy of the
+// shared character ROMs too), so a set can be swapped or archived as a unit.
+static std::string rom_dir_for(int which) {
+	return (which == 8) ? resource_path("roms/cbm8032") + "/"
+	     : (which == 12) ? resource_path("roms/pet4000-12") + "/"
+	     : (which == 4) ? resource_path("roms/pet4000-9") + "/"
+	     : (which == 1) ? resource_path("roms/pet2001") + "/"
+	                    : resource_path("roms/pet2001n") + "/";
+}
+
+bool pet_rom_set_available(int which) {
+	if (which != 1 && which != 2 && which != 4 && which != 8 && which != 12) return false;
+	return pet_romset_present(which, rom_dir_for(which));
+}
+
 static bool load_basic_set(int which) {
 	if (!g_pet) {
 		LOG_ERROR("[PET] load_basic_set: g_pet is null");
 		return false;
 	}
 	if (which != 1 && which != 2 && which != 4 && which != 8 && which != 12) which = 2;
-	// Each ROM set lives in its own self-contained subfolder (own copy of the
-	// shared character ROMs too), so a set can be swapped or archived as a unit.
-	const std::string romdir = (which == 8) ? resource_path("roms/cbm8032") + "/"
-	                          : (which == 12) ? resource_path("roms/pet4000-12") + "/"
-	                          : (which == 4) ? resource_path("roms/pet4000-9") + "/"
-	                          : (which == 1) ? resource_path("roms/pet2001") + "/"
-	                                         : resource_path("roms/pet2001n") + "/";
+	const std::string romdir = rom_dir_for(which);
 	// BASIC 4 maps $B000-$BFFF; BASIC 2 does not. Unmap it when switching
 	// down, or stale BASIC-4 bytes stay readable (and write-protected) there
 	// and ROM-detection code misidentifies the machine.
@@ -260,8 +269,7 @@ bool emu_run_frame()
 
 	mixer_update();
 
-	if (focused && IsKeyDown(VK_ESCAPE)) return false; // host decides: fullscreen->windowed, else quit
-	return true;
+	return true; // Escape is a host/PET key now, never a quit request
 }
 
 bool emu_init(int argc, char** argv)
@@ -280,7 +288,20 @@ bool emu_init(int argc, char** argv)
 	// --- Load ROM set from disk ---
 	const HostOptions options = parse_core_options(argc, argv);
 	int want = options.model ? options.model : get_config_int("machine", "basic", 2);
-	if (!load_basic_set(want)) { host_message("Missing ROMs", "Cannot load the selected PET ROM set. Check the roms directory.", true); emu_end(); return false; }
+	if (want != 1 && want != 2 && want != 4 && want != 8 && want != 12) want = 2;
+	// Never a dead end: start the requested model, else the first complete set
+	// found, else let the frontend help the user get ROMs and retry.
+	std::error_code romDirError;
+	std::filesystem::create_directories(std::filesystem::u8path(data_path("roms")), romDirError);
+	int started = 0;
+	for (;;) {
+		if (load_basic_set(want)) started = want;
+		else for (int m : { 2, 4, 12, 8, 1 })
+			if (m != want && pet_rom_set_available(m) && load_basic_set(m)) { started = m; break; }
+		if (started) break;
+		LOG_ERROR("[PET] no complete ROM set found under %s", data_path("roms").c_str());
+		if (!host_rom_setup()) { emu_end(); return false; }
+	}
 
 	// --- Sanity: verify ROM mapping and vectors ---
 	auto& mem = g_pet->bus();
@@ -340,6 +361,8 @@ bool emu_init(int argc, char** argv)
 	g_gl = PetGL::create(640, 480, "Commodore PET/CBM", /*onKey*/nullptr);
 	if (!g_gl) {
 		LOG_ERROR("PetGL::create failed");
+		host_message("Pet-GPT startup", ("The display could not be initialised (the OpenGL renderer failed to start). "
+			"Try updating your graphics driver.\n\nDetails are in the log file:\n" + data_path("petemu-log.txt")).c_str(), true);
 		emu_end(); return false;
 	}
 
@@ -372,6 +395,13 @@ bool emu_init(int argc, char** argv)
 	g_pet->io().setSnesEnabled(g_snes_enabled);
 	LOG_INFO("SNES adapter: %s (invert=%d), joystick driver=%s",
 		g_snes_enabled ? "enabled" : "disabled", snesInvert ? 1 : 0, joystick_driver_name());
+	if (started != want) {
+		static const char* names[] = { "", "PET 2001 (BASIC 1)", "PET 2001-N (BASIC 2)", "", "PET 4000 (BASIC 4)", "", "", "", "CBM 8032", "", "", "", "PET 4032 (12-inch CRTC)" };
+		LOG_WARN("[PET] model %d ROMs missing; started model %d instead", want, started);
+		const std::string text = std::string("The ROMs for the ") + names[want] + " are missing, so Pet-GPT started the " + names[started] +
+			" instead. Add the missing ROM set to the roms folder to use that model.";
+		host_message("ROM set not found", text.c_str(), false);
+	}
 	return true;
 }
 
@@ -418,6 +448,7 @@ bool pet_set_basic(int which) {
 }
 
 int pet_get_basic() { return g_basic_set; }
+int pet_peek(int addr) { return g_pet ? g_pet->bus().readByte((uint16_t)addr) : -1; }
 
 void pet_set_ram(int kb) {
 	if (g_basic_set == 8) kb = 32;
@@ -501,11 +532,19 @@ static bool reset_and_wait_for_ready()
 	return false;
 }
 
-void pet_load_software(const char* utf8_path) {
-	if (!g_pet || !utf8_path) return;
+bool pet_load_software(const char* utf8_path) {
+	if (!g_pet || !utf8_path) return false;
 	std::string p = utf8_path;
-	std::string ext; { size_t d = p.find_last_of('.'); if (d != std::string::npos) ext = p.substr(d + 1); }
+	const std::string name = std::filesystem::u8path(p).filename().u8string();
+	std::string ext; { size_t d = name.find_last_of('.'); if (d != std::string::npos) ext = name.substr(d + 1); }
 	std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return (char)tolower(c); });
+	// Anything else would be injected as a PRG and could reset the machine with garbage.
+	if (!(ext.empty() || ext == "prg" || ext == "p00" || ext == "t64" || ext == "tap" || ext == "d64" || ext == "d71")) {
+		LOG_ERROR("[PET] unsupported file type '.%s': %s", ext.c_str(), p.c_str());
+		host_message("Unsupported file type", ("\"" + name + "\" has the extension \"." + ext + "\", which Pet-GPT cannot load.\n\n"
+			"Supported: .prg, .p00, .t64, .tap, .d64, .d71, or a file with no extension.").c_str(), true);
+		return false;
+	}
 	if (ext == "tap") {
 		std::vector<uint8_t> file;
 		std::string error;
@@ -516,30 +555,43 @@ void pet_load_software(const char* utf8_path) {
 			host_message("Cannot attach tape", error.c_str(), true);
 		} else {
 			LOG_INFO("[PET] attached TAP '%s' to cassette 1", p.c_str());
-			host_message("Tape attached", "Tape attached to cassette 1. Type LOAD, press Return, then choose File > Tape > Play. After loading, type RUN. Rewind before loading again.", false);
+			host_status(("Tape " + name + " attached: type LOAD, press Return, then File > Tape > Play; type RUN when it finishes").c_str());
 		}
-		return;
+		return error.empty();
 	}
 
 	if (ext == "d64" || ext == "d71") {
-		if (g_pet->bus().io().setIeeeD64Image(p))
+		if (g_pet->bus().io().setIeeeD64Image(p)) {
 			LOG_INFO("[PET] mounted %s '%s'", ext.c_str(), p.c_str());
-		else {
+			host_status(("Disk " + name + " mounted: LOAD\"$\",8 lists it, LOAD\"*\",8 loads the first program").c_str());
+		} else {
 			LOG_ERROR("[PET] failed to mount %s '%s'", ext.c_str(), p.c_str());
 			host_message("Cannot mount disk", "The disk image could not be read or has an unsupported format.", true);
+			return false;
 		}
-		return;
+		return true;
 	}
 	// .prg: deposit the program directly into PET RAM at its own load address
 	// (equivalent to LOAD"name",8,1). The CPU executes from the same RAM buffer
 	// PetMem::writeByte() stores into, so the bytes are visible immediately.
 	std::vector<uint8_t> file;
-	if (!ieee_helpers::read_all_file(std::filesystem::u8path(p), file) || file.size() <= 2) {
+	const bool readOk = ieee_helpers::read_all_file(std::filesystem::u8path(p), file);
+	if (readOk && ext == "p00") {
+		// PC64 container: "C64File\0", 16-byte name, NUL, record size; then a normal PRG.
+		static const char magic[8] = { 'C', '6', '4', 'F', 'i', 'l', 'e', 0 };
+		if (file.size() < 26 || std::memcmp(file.data(), magic, 8) != 0) {
+			LOG_ERROR("[PET] P00 '%s': bad header", p.c_str());
+			host_message("Cannot load P00", "This is not a valid PC64 (.p00) file: the C64File header is missing.", true);
+			return false;
+		}
+		file.erase(file.begin(), file.begin() + 26);
+	}
+	if (!readOk || file.size() <= 2) {
 		// <= 2: a load address with zero payload is a truncated/corrupt PRG;
 		// injecting it would leave BASIC with VARTAB==TXTTAB and garbage links.
 		LOG_ERROR("[PET] failed to read software '%s' (missing or empty)", p.c_str());
 		host_message("Cannot load program", "The file could not be read or is empty/truncated.", true);
-		return;
+		return false;
 	}
 	if (ext == "t64") {
 		std::vector<t64::Program> programs;
@@ -547,7 +599,7 @@ void pet_load_software(const char* utf8_path) {
 		if (!t64::read(file, programs, error)) {
 			LOG_ERROR("[PET] T64 '%s': %s", p.c_str(), error.c_str());
 			host_message("Cannot load T64", error.c_str(), true);
-			return;
+			return false;
 		}
         std::vector<std::string> labels;
         for (const auto& program : programs) {
@@ -556,7 +608,7 @@ void pet_load_software(const char* utf8_path) {
             labels.push_back(program.name + detail);
         }
         int choice = programs.size()>1 ? host_select_program(labels) : 0;
-        if(choice<0 || size_t(choice)>=programs.size()) return;
+        if(choice<0 || size_t(choice)>=programs.size()) return false;
         file = std::move(programs[size_t(choice)].prg);
 	}
 
@@ -574,7 +626,7 @@ void pet_load_software(const char* utf8_path) {
 		          "not loaded (Machine > Memory to raise it)",
 		          p.c_str(), (unsigned)endAddr, mem.ramConfiguredBytes() / 1024);
 		host_message("Not enough PET memory", "This program exceeds the configured RAM. Choose a larger size in Machine > Memory and try again.", true);
-		return;
+		return false;
 	}
 
 	// Reboot to a clean BASIC before injecting, so loading a new program can't
@@ -616,11 +668,21 @@ void pet_load_software(const char* utf8_path) {
 
 		LOG_INFO("[PET] loaded BASIC PRG '%s' @ $%04X (%zu bytes); VARTAB=$%04X - type RUN",
 		         p.c_str(), loadAddr, nbytes, vartab);
+		if (get_config_bool("machine", "autorun", true)) {
+			// Type RUN + Return through the KERNAL keyboard buffer (BASIC 1 keeps it elsewhere).
+			const uint16_t buf = g_basic_set == 1 ? 0x020F : 0x026F, count = g_basic_set == 1 ? 0x020D : 0x009E;
+			const uint8_t run[4] = { 'R', 'U', 'N', 13 };
+			for (int i = 0; i < 4; ++i) mem.writeByte((uint16_t)(buf + i), run[i]);
+			mem.writeByte(count, 4);
+			host_status(("Loaded " + name + ": running").c_str());
+		} else host_status(("Loaded " + name + ": type RUN to start").c_str());
 	}
 	else {
 		LOG_INFO("[PET] loaded ML PRG '%s' @ $%04X (%zu bytes) - run with SYS %u",
 		         p.c_str(), loadAddr, nbytes, (unsigned)loadAddr);
+		host_status(("Loaded " + name + ": type SYS " + std::to_string((unsigned)loadAddr) + " to start").c_str());
 	}
+	return true;
 }
 
 void emu_end()

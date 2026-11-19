@@ -75,14 +75,47 @@ namespace ieee_helpers {
         return !out.empty();
     }
 
+    // Atomic replace: write a temporary file beside the target, then rename it
+    // over the original (std::filesystem::rename replaces an existing file on
+    // Windows and POSIX). A failed write or rename removes the temporary file
+    // and leaves the original untouched.
     inline bool write_all_file(const std::filesystem::path& p,
         const std::vector<uint8_t>& bytes)
     {
-        std::ofstream f(p, std::ios::binary);
-        if (!f) return false;
-        f.write(reinterpret_cast<const char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size()));
-        return static_cast<bool>(f);
+        std::filesystem::path tmp = p;
+        tmp += ".tmp~";
+        {
+            std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+            if (!f) return false;
+            f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+            f.flush();
+            if (!f) {
+                f.close();
+                std::error_code rm;
+                std::filesystem::remove(tmp, rm);
+                return false;
+            }
+        }
+        std::error_code ec;
+        std::filesystem::rename(tmp, p, ec);
+        if (ec) {
+            std::error_code rm;
+            std::filesystem::remove(tmp, rm);
+            return false;
+        }
+        return true;
+    }
+
+    // True when an OPEN/SAVE name starts with the save-with-replace "@" (after
+    // quotes and leading spaces). normalize_*() strips the "@", so this must be
+    // asked of the RAW name first.
+    inline bool has_replace_flag(const std::string& raw)
+    {
+        size_t i = 0;
+        if (i < raw.size() && raw[i] == '\"') ++i;
+        while (i < raw.size() && raw[i] == ' ') ++i;
+        return i < raw.size() && raw[i] == '@';
     }
 
     // If you still want the external loader:

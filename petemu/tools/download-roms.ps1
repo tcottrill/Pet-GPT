@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-  Downloads the Commodore PET ROM images PetEmu needs and installs them into
+  Downloads the Commodore PET ROM images Pet-GPT needs and installs them into
   the per-ROM-set folders it expects.
 
 .DESCRIPTION
-  PetEmu does not ship ROM firmware in the repo (it's copyrighted Commodore
+  Pet-GPT does not ship ROM firmware in the repo (it's copyrighted Commodore
   software). This script fetches the .bin files from the public zimmers.net
   CBM firmware archive and drops them into:
     <RomsDir>\pet2001\     (original 2001, BASIC 1, 8 KB)
@@ -15,9 +15,11 @@
   Every filename here is the same one used on zimmers.net -- no renaming.
 
 .PARAMETER RomsDir
-  Destination roms folder. Defaults to a "roms" folder next to this script,
-  so running it from inside x64\Release (or a distributed copy of the
-  emulator) just works.
+  Destination roms folder. By default this is the folder Pet-GPT itself reads:
+  a "roms" folder next to this script when a pet.ini or a roms folder is there
+  (portable layout; a script in a "tools" sub-folder looks one level up),
+  otherwise %APPDATA%\Pet-GPT\roms on Windows and ~/Pet-GPT/roms elsewhere.
+  Pet-GPT's ROM setup dialog passes this explicitly.
 
 .PARAMETER Sets
   Which ROM sets to fetch: Pet2001, Pet2001N, Pet4000-9, Pet4000-12, CBM8032.
@@ -31,10 +33,15 @@
 .EXAMPLE
   .\download-roms.ps1 -Sets Basic4,8032
 .EXAMPLE
-  .\download-roms.ps1 -RomsDir "C:\Source2026\Pet-GPT-2026\x64\Release\roms" -Force
+  .\download-roms.ps1 -RomsDir "D:\PET\roms" -Force
 #>
 param(
-    [string]$RomsDir = (Join-Path $PSScriptRoot "roms"),
+    [string]$RomsDir = $(
+        $base = if ((Split-Path $PSScriptRoot -Leaf) -eq "tools") { Split-Path $PSScriptRoot -Parent } else { $PSScriptRoot }
+        if ((Test-Path (Join-Path $base "pet.ini")) -or (Test-Path (Join-Path $base "roms"))) { Join-Path $base "roms" }
+        elseif ($env:APPDATA) { Join-Path $env:APPDATA "Pet-GPT\roms" }
+        else { Join-Path $HOME "Pet-GPT/roms" }
+    ),
     [ValidateSet("Pet2001", "Pet2001N", "Pet4000-9", "Pet4000-12", "CBM8032", "Basic2", "Basic4", "8032")]
     [string[]]$Sets = @("Pet2001", "Pet2001N", "Pet4000-9", "Pet4000-12", "CBM8032"),
     [switch]$Force

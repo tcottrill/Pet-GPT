@@ -22,3 +22,7 @@ bool load_pet4_romset(PetMachine& pet, const std::string& dir, bool crtc = false
 
 // BASIC 4, 8032 (80-column, 60Hz business editor).
 bool load_pet8032_romset(PetMachine& pet, const std::string& dir);
+
+// True when every file the loader for model `which` (1, 2, 4, 12, 8) needs is
+// in `dir` (trailing separator) with an acceptable size. Touches no machine.
+bool pet_romset_present(int which, const std::string& dir);

@@ -219,3 +219,39 @@ bool load_pet8032_romset(PetMachine& pet, const std::string& dir)
 	LOG_INFO("ROMs installed: 8032 (BASIC4 B/C/D, EDIT-4-80-B 60Hz, KERNAL-4)");
 	return true;
 }
+
+// Same files and size rules as the loaders above, without reading or installing.
+bool pet_romset_present(int which, const std::string& dir)
+{
+	auto size = [&](const char* name) -> uintmax_t {
+		std::error_code ec;
+		const auto n = std::filesystem::file_size(std::filesystem::u8path(dir + name), ec);
+		return ec ? 0 : static_cast<uintmax_t>(n);
+	};
+	auto has = [&](const char* name, uintmax_t want) { return size(name) == want; };
+	const bool charsOld = size("characters-1.901447-08.bin") >= 0x800;
+	const bool charsNew = size("characters-2.901447-10.bin") >= 0x800;
+	const bool charsAny = size("characters-2.901447-10.bin") ? charsNew : charsOld;
+	switch (which) {
+	case 1: {
+		const char* names[] = { "rom-1-c000.901447-01.bin", "rom-1-c800.901447-02.bin", "rom-1-d000.901447-03.bin",
+			"rom-1-d800.901447-04.bin", "rom-1-e000.901447-05.bin", "rom-1-f000.901447-06.bin", "rom-1-f800.901447-07.bin" };
+		for (const char* n : names) if (!has(n, 0x800)) return false;
+		return charsOld;
+	}
+	case 2: {
+		const uintmax_t edit = size("edit-2-n.901447-24.bin");
+		return has("basic-2-c000.901465-01.bin", 0x1000) && has("basic-2-d000.901465-02.bin", 0x1000) &&
+			(edit == 0x800 || edit == 0x1000) && has("kernal-2.901465-03.bin", 0x1000) && charsAny;
+	}
+	case 4: case 12:
+		return has("basic-4-b000.901465-23.bin", 0x1000) && has("basic-4-c000.901465-20.bin", 0x1000) &&
+			has("basic-4-d000.901465-21.bin", 0x1000) && has("kernal-4.901465-22.bin", 0x1000) &&
+			has(which == 12 ? "edit-4-40-n-60Hz.901499-01.bin" : "edit-4-n.901447-29.bin", 0x800) && charsAny;
+	case 8:
+		return has("basic-4-b000.901465-19.bin", 0x1000) && has("basic-4-c000.901465-20.bin", 0x1000) &&
+			has("basic-4-d000.901465-21.bin", 0x1000) && has("edit-4-80-b-60Hz.901474-03.bin", 0x800) &&
+			has("kernal-4.901465-22.bin", 0x1000) && charsAny;
+	}
+	return false;
+}

@@ -11,6 +11,8 @@
 #include <wx/dnd.h>
 #include <wx/file.h>
 #include <wx/wfstream.h>
+#include <wx/filefn.h>
+#include <wx/utils.h>
 #include "emulator.h"
 #include "iniFile.h"
 #include "system/path_helper.h"
@@ -46,8 +48,11 @@ enum {
     Load = wxID_HIGHEST + 100, Eject, Reset, Fullscreen, Scale1, Scale2, Scale3, ScaleFit,
     Model1, Model2, Model4, Model12, Model8, Ram4, Ram8, Ram16, Ram32,
     Speed, Graphics, Snes, Keyboard, Crt, Green, White, CrtSettings,
-    TapePlay, TapeStop, TapeRewind, TapeEject, TogglePause, Screenshot
+    TapePlay, TapeStop, TapeRewind, TapeEject, TogglePause, Screenshot,
+    OpenFiles, OpenRoms, OpenShots, QuickStart, RecentClear, RecentFirst
 };
+constexpr int kRecentMax = 8;
+wxString lastMessageTitle, lastMessageText; // most recent host_message, for tests
 class PetFrame;
 PetFrame* frame = nullptr;
 bool smokeMode = false;
@@ -63,13 +68,182 @@ const char* knobNames[] = {"mono_blur_h", "mono_blur_v", "mono_halation", "mono_
                           "mono_scanline", "mono_contrast", "mono_brightness"};
 class ProgramDropTarget final : public wxFileDropTarget {
 public:
-    explicit ProgramDropTarget(std::function<void(const wxString&)> load) : load_(std::move(load)) {}
+    explicit ProgramDropTarget(std::function<void(const wxString&, size_t)> load) : load_(std::move(load)) {}
     bool OnDropFiles(wxCoord, wxCoord, const wxArrayString& paths) override {
         if (paths.empty()) return false;
-        load_(paths[0]); return true;
+        load_(paths[0], paths.size()); return true;
     }
 private:
-    std::function<void(const wxString&)> load_;
+    std::function<void(const wxString&, size_t)> load_;
+};
+
+// File > Recent: [recent] file1..file8 in pet.ini, most recent first.
+std::string RecentKey(int i) { return "file" + std::to_string(i); }
+bool SamePath(const std::string& a, const std::string& b) {
+#ifdef __WXMSW__
+    return wxString::FromUTF8(a).CmpNoCase(wxString::FromUTF8(b)) == 0;
+#else
+    return a == b;
+#endif
+}
+std::vector<std::string> RecentLoad() {
+    std::vector<std::string> list;
+    for (int i = 1; i <= kRecentMax; ++i) {
+        const std::string path = get_config_string(std::string("recent"), RecentKey(i), std::string());
+        if (!path.empty() && std::none_of(list.begin(), list.end(), [&](const std::string& p) { return SamePath(p, path); })) list.push_back(path);
+    }
+    return list;
+}
+void RecentSave(const std::vector<std::string>& list) {
+    for (int i = 1; i <= kRecentMax; ++i) {
+        const std::string value = size_t(i) <= list.size() ? list[size_t(i) - 1] : std::string();
+        if (get_config_string(std::string("recent"), RecentKey(i), std::string()) != value) set_config_string(std::string("recent"), RecentKey(i), value);
+    }
+}
+void RecentRemove(const std::string& path) {
+    auto list = RecentLoad();
+    list.erase(std::remove_if(list.begin(), list.end(), [&](const std::string& p) { return SamePath(p, path); }), list.end());
+    RecentSave(list);
+}
+void RecentAdd(const std::string& path) {
+    auto list = RecentLoad();
+    list.erase(std::remove_if(list.begin(), list.end(), [&](const std::string& p) { return SamePath(p, path); }), list.end());
+    list.insert(list.begin(), path);
+    if (list.size() > size_t(kRecentMax)) list.resize(size_t(kRecentMax));
+    RecentSave(list);
+}
+
+wxString QuickStartText() {
+    const wxString files = wxString::FromUTF8(data_path("files")), roms = wxString::FromUTF8(data_path("roms")),
+                   shots = wxString::FromUTF8(data_path("screenshots"));
+    return "LOADING A PROGRAM\n"
+        "File > Load Program / Disk / Tape... (Ctrl+O), or drag a file onto the window. Pet-GPT loads .prg, .p00, .t64, .tap, .d64 and .d71 "
+        "files; the last eight are under File > Recent.\n"
+        "A BASIC program starts by itself: Pet-GPT loads it and types RUN for you. A machine-code program names the SYS command that "
+        "starts it in the window title.\n\n"
+        "DISK IMAGES (.d64, .d71)\n"
+        "Loading a disk image mounts it as drive 8; nothing runs yet. Type LOAD\"$\",8 and press Return, then type LIST to see the "
+        "directory. To run a program, type LOAD\"NAME\",8 and press Return, then type RUN. LOAD\"*\",8 loads the first program. "
+        "File > Eject Disk (Ctrl+E) goes back to the files folder, whose programs also load by name with LOAD\"NAME\",8.\n\n"
+        "TAPES (.tap)\n"
+        "Loading a tape attaches it to the cassette. Type LOAD and press Return, then choose File > Tape > Play. When the tape has "
+        "finished, type RUN. File > Tape also has Stop, Rewind and Eject.\n\n"
+        "PET KEYS ON A PC KEYBOARD\n"
+        "RUN/STOP: Caps Lock (Caps Lock + Shift is BREAK)\n"
+        "Cursor keys: the arrow keys\n"
+        "HOME / CLR: Home / Shift+Home\n"
+        "DEL: Backspace or Delete\n"
+        "RETURN: Enter\n"
+        "Graphics characters: F12 switches between the graphics and business keyboards\n"
+        "Esc: leaves fullscreen; in a window it is the PET's ESC key. Pause or Ctrl+P pauses, Ctrl+R resets, F6 saves a screenshot.\n"
+        "Machine > Keyboard Mapping... shows the whole layout and lets you change any key.\n\n"
+        "WHERE THINGS ARE (File > Open ... Folder opens them)\n"
+        "Programs and disk images: " + files + "\nROM sets: " + roms + "\nScreenshots: " + shots;
+}
+void OpenFolder(const wxString& folder) {
+    if (!wxDirExists(folder) && !wxFileName::Mkdir(folder, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL)) {
+        host_message("Open folder", ("Unable to create the folder " + folder.ToStdString(wxConvUTF8)).c_str(), true); return;
+    }
+    if (!smokeMode && !wxLaunchDefaultApplication(folder))
+        host_message("Open folder", ("Unable to open the folder " + folder.ToStdString(wxConvUTF8)).c_str(), true);
+}
+
+class QuickStartDialog final : public wxDialog {
+public:
+    explicit QuickStartDialog(wxWindow* parent) : wxDialog(parent, wxID_ANY, "Quick Start", wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER) {
+        auto* top = new wxBoxSizer(wxVERTICAL);
+        auto* text = new wxTextCtrl(this, wxID_ANY, QuickStartText(), wxDefaultPosition, FromDIP(wxSize(620, 480)), wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP);
+        top->Add(text, 1, wxEXPAND | wxALL, FromDIP(10));
+        top->Add(CreateStdDialogButtonSizer(wxOK), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+        SetSizerAndFit(top); CentreOnParent();
+    }
+};
+
+
+const char* const romSource = "https://www.zimmers.net/anonftp/pub/cbm/firmware/computers/pet/"; // what download-roms.ps1 fetches from
+wxString FindRomScript() {
+    const wxString dir = wxFileName(wxStandardPaths::Get().GetExecutablePath()).GetPath();
+    for (const wxString& sub : {wxString(), wxString("tools")}) {
+        const wxString path = wxFileName(sub.empty() ? dir : wxFileName(dir, sub).GetFullPath(), "download-roms.ps1").GetFullPath();
+        if (wxFileExists(path)) return path;
+    }
+    return {};
+}
+wxString FindPowerShell() {
+    wxPathList paths; paths.AddEnvList("PATH");
+#ifdef __WXMSW__
+    wxString found = paths.FindValidPath("powershell.exe");
+    wxString root;
+    if (found.empty() && wxGetEnv("SystemRoot", &root)) {
+        const wxString fallback = root + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        if (wxFileExists(fallback)) found = fallback;
+    }
+    return found;
+#else
+    return paths.FindValidPath("pwsh");
+#endif
+}
+
+// Shown when no ROM set can be loaded: explains where ROMs go and offers the
+// bundled downloader, so a first run is never a dead end.
+class RomSetupDialog final : public wxDialog {
+public:
+    RomSetupDialog(wxWindow* parent, const wxString& folder)
+        : wxDialog(parent, wxID_ANY, "ROM setup", wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE),
+          folder_(folder), script_(FindRomScript()), shell_(FindPowerShell()) {
+        auto* top = new wxBoxSizer(wxVERTICAL);
+        const int width = FromDIP(520);
+        auto text = [&](const wxString& label) {
+            auto* line = new wxStaticText(this, wxID_ANY, label);
+            line->Wrap(width); top->Add(line, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(10));
+        };
+        text("Pet-GPT needs Commodore PET ROM files to start, and they are not included: they are Commodore's copyrighted "
+             "software, so you add them yourself, once.\n\nPet-GPT reads ROMs from this folder:");
+        auto* path = new wxTextCtrl(this, wxID_ANY, folder_, wxDefaultPosition, wxSize(width, -1), wxTE_READONLY);
+        top->Add(path, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(10));
+        text("Each PET model has its own sub-folder there:\n"
+             "    pet2001  (PET 2001, BASIC 1)\n    pet2001n  (PET 2001-N, BASIC 2)\n    pet4000-9  (PET 4000, BASIC 4)\n"
+             "    pet4000-12  (PET 4032, 12-inch CRTC)\n    cbm8032  (CBM 8032, 80 columns)\n"
+             "One complete model is enough to start; the README lists the exact file names.");
+        canDownload_ = !script_.empty() && !shell_.empty();
+        text(canDownload_
+            ? wxString("Download ROMs fetches them for you from zimmers.net, the public Commodore firmware archive, in a console window "
+                       "(an internet connection is needed).")
+            : wxString("Automatic download is not available here (download-roms.ps1 or PowerShell was not found). Download the .bin files "
+                       "yourself from zimmers.net (") + romSource + ") and copy them into the sub-folders above.");
+        auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+        auto* download = new wxButton(this, wxID_ANY, "&Download ROMs");
+        auto* open = new wxButton(this, wxID_ANY, "&Open ROM folder");
+        auto* retry = new wxButton(this, wxID_OK, "&Try again");
+        auto* quit = new wxButton(this, wxID_CANCEL, "E&xit");
+        download->Enable(canDownload_);
+        for (auto* button : {download, open, retry, quit}) buttons->Add(button, 0, wxRIGHT, FromDIP(6));
+        top->Add(buttons, 0, wxALL | wxALIGN_RIGHT, FromDIP(10));
+        SetSizerAndFit(top); CentreOnParent();
+        download->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Download(); });
+        open->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            wxFileName::Mkdir(folder_, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+            wxLaunchDefaultApplication(folder_);
+        });
+        retry->SetDefault();
+    }
+private:
+    wxString folder_, script_, shell_;
+    bool canDownload_ = false;
+    void Download() {
+        wxFileName::Mkdir(folder_, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+        auto quoted = [](const wxString& text) { return "\"" + text + "\""; };
+        wxString command = quoted(shell_) + " -NoProfile";
+#ifdef __WXMSW__
+        command += " -ExecutionPolicy Bypass";
+#endif
+        command += " -File " + quoted(script_) + " -RomsDir " + quoted(folder_);
+        LOG_INFO("Running ROM downloader: %s -> %s", script_.ToStdString(wxConvUTF8).c_str(), folder_.ToStdString(wxConvUTF8).c_str());
+        const long result = wxExecute(command, wxEXEC_SYNC | wxEXEC_SHOW_CONSOLE);
+        if (result == 0) { EndModal(wxID_OK); return; } // retry loading
+        wxMessageBox(wxString::Format("The download did not finish (code %ld). Check your internet connection and try again, or download the "
+                                      "files by hand from zimmers.net (%s).", result, romSource), "ROM download", wxOK | wxICON_WARNING, this);
+    }
 };
 
 class PetFrame final : public wxFrame {
@@ -167,11 +341,16 @@ public:
             canvas_->PopupMenu(&popup, event.GetPosition());
             if (!closing_) canvas_->SetFocus();
         });
-        canvas_->SetDropTarget(new ProgramDropTarget([this](const wxString& path) {
-            if (!ready_ || closing_) return;
-            Suspension suspended(*this);
-            canvas_->SetCurrent(*context_); pet_load_software(path.ToStdString(wxConvUTF8).c_str());
-            UpdateMenus(); canvas_->SetFocus();
+        // Loading can show modal boxes, which would block the Explorer window the
+        // drop came from: copy the path and load after OnDropFiles has returned.
+        canvas_->SetDropTarget(new ProgramDropTarget([this](const wxString& path, size_t count) {
+            CallAfter([this, path, count] {
+                if (!ready_ || closing_) return;
+                Suspension suspended(*this);
+                LoadPath(path);
+                if (count > 1) SetNote((titleNote_.empty() ? wxString() : titleNote_ + "; ") + wxString::Format("%zu other dropped file(s) ignored", count - 1));
+                UpdateMenus(); canvas_->SetFocus();
+            });
         }));
         Bind(wxEVT_ACTIVATE, [this](wxActivateEvent& event) {
             if (!event.GetActive()) pointerHeld_ = false;
@@ -202,12 +381,31 @@ public:
         if (paused_ > 0 && --paused_ == 0) { mixer_flush(); restore_audio(); }
         schedule_.Reset(Clock::now());
     }
+    void SetNote(const wxString& note) { titleNote_ = note; UpdateTitle(); }
+    // Every way of loading software (dialog, drop, Recent, command line) comes through here.
+    bool LoadPath(const wxString& path) {
+        canvas_->SetCurrent(*context_);
+        wxFileName name(path); name.MakeAbsolute();
+        const std::string full = name.GetFullPath().ToStdString(wxConvUTF8);
+        const bool ok = pet_load_software(full.c_str());
+        if (ok) { RecentAdd(full); RebuildRecent(); }
+        return ok;
+    }
     bool InputFocused() const { return ready_ && !closing_ && !paused_ && wxWindow::FindFocus() == canvas_; }
     // For tests: GDK on Wayland reports blank and arrow cursors identically.
     bool CursorHidden() const { return !cursorVisible_; }
 
+protected:
+#ifdef __WXMSW__
+    // A pad plugged in after launch: this only raises a flag that poll_joystick() acts on.
+    WXLRESULT MSWWindowProc(WXUINT message, WXWPARAM wParam, WXLPARAM lParam) override {
+        if (message == WM_DEVICECHANGE) joystick_device_change();
+        return wxFrame::MSWWindowProc(message, wParam, lParam);
+    }
+#endif
 private:
     using Clock = std::chrono::steady_clock;
+    wxMenu* recent_{};
     wxGLCanvas* canvas_{};
     std::unique_ptr<wxGLContext> context_;
     CrtDialog* crt_{};
@@ -265,12 +463,15 @@ private:
         // guard, so a held key would repeat the command (fullscreen flipping
         // back and forth, repeated resets). HandleShortcut runs them all.
         file->Append(Load, "&Load Program / Disk / Tape... (Ctrl+O)");
+        recent_ = new wxMenu; file->AppendSubMenu(recent_, "Rece&nt"); RebuildRecent();
         file->Append(Eject, "&Eject Disk (Ctrl+E)");
         auto* tape = new wxMenu;
         tape->AppendCheckItem(TapePlay, "&Play"); tape->Append(TapeStop, "&Stop");
         tape->Append(TapeRewind, "&Rewind"); tape->Append(TapeEject, "&Eject");
         file->AppendSubMenu(tape, "&Tape"); file->AppendSeparator();
         file->Append(Screenshot, "Save &Screenshot (F6)"); file->AppendSeparator();
+        file->Append(OpenFiles, "Open Files Fol&der"); file->Append(OpenRoms, "Open ROM Folder");
+        file->Append(OpenShots, "Open Screenshots Folder"); file->AppendSeparator();
         file->Append(Reset, "&Reset (Ctrl+R)"); file->AppendSeparator(); file->Append(wxID_EXIT, "E&xit");
         bar->Append(file, "&File");
         auto* machine = new wxMenu;
@@ -301,8 +502,34 @@ private:
         monitor->AppendRadioItem(Green, "Green phosphor"); monitor->AppendRadioItem(White, "Black && white");
         view->AppendSubMenu(monitor, "&Monitor"); view->Append(CrtSettings, "CRT Monitor &Settings...");
         bar->Append(view, "&View");
-        auto* help = new wxMenu; help->Append(wxID_ABOUT, "&About Pet-GPT..."); bar->Append(help, "&Help");
+        auto* help = new wxMenu; help->Append(QuickStart, "&Quick Start...");
+        help->AppendSeparator(); help->Append(wxID_ABOUT, "&About Pet-GPT..."); bar->Append(help, "&Help");
         SetMenuBar(bar);
+    }
+
+    void RebuildRecent() {
+        while (recent_->GetMenuItemCount()) recent_->Destroy(recent_->FindItemByPosition(0));
+        const auto list = RecentLoad();
+        for (size_t i = 0; i < list.size(); ++i) {
+            const wxString path = wxString::FromUTF8(list[i]);
+            wxString name = wxFileName(path).GetFullName(); name.Replace("&", "&&");
+            recent_->Append(RecentFirst + int(i), wxString::Format("&%zu  %s", i + 1, name), path);
+        }
+        if (list.empty()) recent_->Append(wxID_ANY, "(none)")->Enable(false);
+        recent_->AppendSeparator();
+        recent_->Append(RecentClear, "&Clear")->Enable(!list.empty());
+    }
+
+    void OpenRecent(int index) {
+        const auto list = RecentLoad();
+        if (index < 0 || size_t(index) >= list.size()) return;
+        const wxString path = wxString::FromUTF8(list[size_t(index)]);
+        if (!wxFileExists(path)) {
+            RecentRemove(list[size_t(index)]); RebuildRecent();
+            host_message("File not found", ("This file no longer exists and was removed from the Recent list:\n\n" + path.ToStdString(wxConvUTF8)).c_str(), false);
+            return;
+        }
+        LoadPath(path);
     }
 
     void Initialize() {
@@ -330,7 +557,7 @@ private:
         pet_set_monitor(get_config_bool("video", "crt_tint", true));
         if (pet_get_basic() == 1) ram_ = 8;
         if (pet_get_basic() == 8) ram_ = 32;
-        if (!startupProgram_.empty()) pet_load_software(startupProgram_.c_str());
+        if (!startupProgram_.empty()) LoadPath(wxString::FromUTF8(startupProgram_));
         UpdateMenus(); schedule_.Reset(Clock::now()); timer_.Start(4);
     }
 
@@ -359,7 +586,7 @@ private:
         PrepareViewport();
         int ran = 0;
         while (ran < count) {
-            if (!emu_run_frame()) { HandleEscape(); return; }
+            emu_run_frame();
             ++ran;
         }
         canvas_->SwapBuffers();
@@ -487,13 +714,11 @@ private:
         UpdateCursor(true);
     }
 
-    void HandleEscape() {
+    void LeaveFullscreen() {
         // Consume the polled key as well as the wx event, so leaving fullscreen
-        // cannot turn into a second Escape/quit on the following frame.
+        // cannot also type ESC into the PET on the following frame.
         RawInput_ReleaseKey(VK_ESCAPE);
-        if (IsFullScreen() && arguments_.size() <= 1) {
-            ToggleFullscreen(); schedule_.Reset(Clock::now()); UpdateMenus();
-        } else Close();
+        ToggleFullscreen(); schedule_.Reset(Clock::now()); UpdateMenus();
     }
 
     void UpdateMenus() {
@@ -502,7 +727,11 @@ private:
         bar->Check(TogglePause, userPaused_);
         ram_ = pet_get_ram();
         const int modelIds[] = {1, 2, 4, 12, 8};
+        // Same GTK radio rule as the memory group: enable all, select, then grey out
+        // the models whose ROM sets are missing (the running model stays enabled).
+        for (int i = 0; i < 5; ++i) bar->Enable(Model1 + i, true);
         for (int i = 0; i < 5; ++i) bar->Check(Model1 + i, pet_get_basic() == modelIds[i]);
+        for (int i = 0; i < 5; ++i) bar->Enable(Model1 + i, pet_get_basic() == modelIds[i] || pet_rom_set_available(modelIds[i]));
         const int sizes[] = {4, 8, 16, 32};
         // GTK ignores radio-state callbacks for disabled items. Enable the
         // entire group before changing selection so its cached state stays
@@ -550,7 +779,8 @@ private:
             if (!event.IsAutoRepeat()) { wxCommandEvent action(wxEVT_MENU, command); OnCommand(action); }
             return true;
         }
-        if (keycode == WXK_ESCAPE) { if (!event.IsAutoRepeat()) HandleEscape(); return true; }
+        // Escape only leaves fullscreen; windowed, it belongs to the PET keyboard.
+        if (keycode == WXK_ESCAPE && IsFullScreen()) { if (!event.IsAutoRepeat()) LeaveFullscreen(); return true; }
         if (keycode == WXK_F8) {
             wxString text("[video]\n");
             for (int i = 0; i < 7; ++i) text += wxString::Format("%s=%.3f\n", knobNames[i], pet_shader_get(i));
@@ -592,7 +822,8 @@ private:
         } else if (id >= Ram4 && id <= Ram32) {
             const int sizes[] = {4, 8, 16, 32}; ram_ = sizes[id - Ram4];
             pet_set_ram(ram_); set_config_int("machine", "ram", ram_);
-        } else if (id >= TapePlay && id <= TapeEject) pet_tape_command(id - TapePlay);
+        } else if (id >= RecentFirst && id < RecentFirst + kRecentMax) OpenRecent(id - RecentFirst);
+        else if (id >= TapePlay && id <= TapeEject) pet_tape_command(id - TapePlay);
         else if (id >= Scale1 && id <= ScaleFit) ApplyScale(id == ScaleFit ? 0 : id - Scale1 + 1);
         else switch (id) {
         case TogglePause:
@@ -604,14 +835,19 @@ private:
             const auto directory = get_config_string(std::string("paths"), std::string("lastromdir"), std::string());
             // First load: start in the programs folder (~/Pet-GPT/files on Linux).
             wxFileDialog dialog(this, "Load PET software", wxString::FromUTF8(directory.empty() ? data_path("files") : directory), "",
-                "PET software (*.prg;*.t64;*.tap;*.d64;*.d71)|*.prg;*.PRG;*.t64;*.T64;*.tap;*.TAP;*.d64;*.D64;*.d71;*.D71|All files|*",
+                "PET software (*.prg;*.p00;*.t64;*.tap;*.d64;*.d71)|*.prg;*.PRG;*.p00;*.P00;*.t64;*.T64;*.tap;*.TAP;*.d64;*.D64;*.d71;*.D71|All files|*",
                 wxFD_OPEN | wxFD_FILE_MUST_EXIST);
             if (dialog.ShowModal() == wxID_OK) {
                 set_config_string("paths", "lastromdir", dialog.GetDirectory().ToStdString(wxConvUTF8).c_str());
-                pet_load_software(dialog.GetPath().ToStdString(wxConvUTF8).c_str());
+                LoadPath(dialog.GetPath());
             }
             break;
         }
+        case RecentClear: RecentSave({}); RebuildRecent(); break;
+        case OpenFiles: OpenFolder(wxString::FromUTF8(data_path("files"))); break;
+        case OpenRoms: OpenFolder(wxString::FromUTF8(data_path("roms"))); break;
+        case OpenShots: OpenFolder(wxString::FromUTF8(data_path("screenshots"))); break;
+        case QuickStart: { QuickStartDialog dialog(this); dialog.ShowModal(); break; }
         case Eject: pet_eject_disk(); break;
         case Reset: pet_reset(); break;
         case wxID_EXIT: Close(); break;
@@ -716,6 +952,7 @@ public:
 } // namespace
 
 void host_message(const char* title, const char* message, bool error) {
+    lastMessageTitle = wxString::FromUTF8(title); lastMessageText = wxString::FromUTF8(message);
     if (smokeMode) {
         wxLogError("%s: %s", wxString::FromUTF8(title), wxString::FromUTF8(message));
         if (error) applicationExitCode = 1;
@@ -735,6 +972,23 @@ int host_select_program(const std::vector<std::string>& labels) {
     if (frame) frame->Resume();
     return result;
 }
+void host_status(const char* text) {
+    LOG_INFO("Status: %s", text);
+    if (frame) frame->SetNote(wxString::FromUTF8(text));
+}
+
+bool host_rom_setup() {
+    if (smokeMode) {
+        host_message("Missing ROMs", "No PET ROM set could be loaded. Check the roms directory.", true);
+        return false;
+    }
+    if (frame) frame->Pause();
+    RomSetupDialog dialog(frame, wxString::FromUTF8(data_path("roms")));
+    const bool retry = dialog.ShowModal() == wxID_OK;
+    if (frame) frame->Resume();
+    return retry;
+}
+
 bool host_is_focused() { return frame && frame->InputFocused(); }
 
 wxIMPLEMENT_APP(PetApp);

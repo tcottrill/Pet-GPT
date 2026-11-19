@@ -110,10 +110,11 @@ public:
 
 	// Save a file into the mounted D64 (PRG/SEQ/USR). If name exists, it is scratched and replaced.
 	// type: 0x82=PRG, 0x81=SEQ, 0x83=USR
-	bool d64_save_file(const std::string& petName, const uint8_t* data, size_t len, uint8_t type);
+	// replace=false (a SAVE/OPEN without "@") reports 63,FILE EXISTS and keeps the old file.
+	bool d64_save_file(const std::string& petName, const uint8_t* data, size_t len, uint8_t type, bool replace = true);
 
 	// Convenience: save PRG
-	bool d64_save_prg(const std::string& petName, const std::vector<uint8_t>& bytes);
+	bool d64_save_prg(const std::string& petName, const std::vector<uint8_t>& bytes, bool replace = true);
 
 	// Reset internal state machine and signals.
 	void reset();
@@ -164,6 +165,18 @@ public:
 	State getState() const { return state; }
 	bool isIdle() const { return state == STATE_IDLE; }
 
+	// Resolve a LOAD name on the mounted disk image, or on the host folder when no
+	// image is mounted, without any bus traffic. "$" (also "$0", "$:A*", ...) gives
+	// the directory as a program. payload excludes the 2-byte load address, which
+	// is returned in addr. On failure sets 62,FILE NOT FOUND and returns false.
+	bool hostLoadFile(const std::string& rawName, std::vector<uint8_t>& payload, uint16_t& addr);
+
+	// Store a program under rawName on the mounted disk image or host folder.
+	// prgWithHeader starts with the 2-byte load address. "@" in rawName means
+	// replace; without it an existing file gives 63,FILE EXISTS. An empty name gives
+	// 34,SYNTAX ERROR. Sets the channel-15 status. Returns true when written.
+	bool hostSaveFile(const std::string& rawName, const std::vector<uint8_t>& prgWithHeader);
+
 private:
 	// Internal state machine (Layer 3/4 control)
 	
@@ -201,6 +214,10 @@ private:
 	std::array<bool, 16>                  seq_write_active_{}; // value-init: all false
 	std::array<uint8_t, 16>              seq_write_type_{};    // 0x81 SEQ / 0x82 PRG / 0x83 USR
 
+	// Drop every open channel (write buffers, read streams, '#' buffers, pending
+	// command text) without committing anything. The mounted media stays.
+	void clear_channels();
+
 	// Direct-access ('#') buffer channels: DOS block commands U1/U2/B-P.
 	// Used by block-level software (e.g. the Zork interpreters) instead of
 	// named files: OPEN n,8,sa,"#" then U1 reads a raw sector into the
@@ -224,6 +241,11 @@ private:
 	};
 	std::array<Stream, 16> streams; // SA 0..15
 	uint8_t current_talk_sa;        // SA selected by TALK-secondary (0x60..0x6F), 0xFF if none
+	// True while the last LISTEN / TALK primary address named this device.
+	bool listen_addressed_ = false;
+	bool talk_addressed_ = false;
+	// True after a command-phase primary address meant for another device.
+	bool foreign_cmd_ = false;
 
 	// --- Handshake FSM for TALK (device is talker, PET is listener) ---
 	enum HS {
@@ -280,10 +302,43 @@ private:
 	std::string d64Path;
 	std::vector<uint8_t> d64;       // entire image; empty if not mounted
 	int d64_tracks_ = 35;           // 35 (.d64/1541) or 70 (.d71/1571); set at mount
+	int d64_image_tracks_ = 35;     // physical tracks for sector geometry: 35, 40 (17-sector tracks 36-40) or 70
 
 	// Core helpers
 	void dataIn(uint8_t d8);
-	void saveFile(const std::string& fname, const std::string& contents);
+	// Folder-drive SAVE. replace=false reports 63,FILE EXISTS when the name is taken.
+	void saveFile(const std::string& fname, const std::string& contents, bool replace = true);
+
+	// LOAD by an already-normalised name ("$..." directory or a program) on the
+	// mounted image or the host folder. Success: payload (no header), addr and
+	// status 0. Failure: not_found_handler (62). An empty name does nothing and
+	// returns false. No bus effects; shared by the TALK SA 0 path and hostLoadFile.
+	bool resolve_load_name(const std::string& nameClean, std::vector<uint8_t>& payload, uint16_t& addr);
+
+	// Commit a PRG SAVE (bytes start with the load address) under rawName: the
+	// name is normalised, "@" means replace. Shared by the bus UNLISTEN commit and
+	// hostSaveFile. Sets the channel-15 status; returns true when written.
+	bool commit_prg_save(const std::string& rawName, const std::string& prgWithHeader);
+
+	// One file of the host folder as the drive presents it: .prg and extensionless
+	// files are PRG, NAME.seq is SEQ, NAME.usr is USR. 'display' is the upper-case
+	// name cut to 16 characters, exactly what "$" lists and LOAD/OPEN accept.
+	struct HostEntry {
+		std::string display;     // upper-case, <= 16 chars
+		std::string stemUpper;   // upper-case full name without the type extension
+		std::string host;        // real file name in the folder
+		uint8_t type;            // 1 SEQ / 2 PRG / 3 USR
+		uintmax_t size;
+	};
+	// Sorted (display, type, host name); the one order used by "$", LOAD and OPEN.
+	std::vector<HostEntry> folder_list() const;
+	// First listed entry matching patU. typeFilter: 0 = any, else 1/2/3. wildcard
+	// false = exact name only (used before creating or replacing a file).
+	bool folder_find(const std::string& patU, int typeFilter, bool wildcard, HostEntry& out) const;
+	// Named data-file reader for the folder drive (twin of openD64SEQ_for_read).
+	bool openFolder_for_read(const std::string& petName, uint8_t sa, uint8_t typeFilter = 0);
+	// Write a closed data file (type 0x81/0x82/0x83). Sets the channel-15 status.
+	bool folder_write_file(const std::string& nameU, const std::vector<uint8_t>& bytes, uint8_t type, bool replace);
 
 	// One visible directory entry (shared by the D64 and folder list builders).
 	struct DirEntry { int blocks; std::string name; std::string type; };
@@ -313,7 +368,7 @@ private:
 	static std::string strip_drive_prefix(const std::string& n); // drop "0:" if present
 
 	// D64/D71 low-level
-	static int d64_sectors_per_track(int track);                      // 1..70 (side-1 mirrors side-0 zones)
+	int  d64_sectors_per_track(int track) const;                      // per mounted geometry (0 = no such track)
 	int  d64_num_tracks() const { return d64_tracks_; }               // 35 (.d64) or 70 (.d71)
 	bool d64_double_sided() const { return d64_tracks_ > 35; }
 	// 1571 split-BAM constants: side-1 free counts live in 18/0, bitmaps in 53/0.
@@ -410,8 +465,10 @@ private:
 
 	// Arm a SEQ/PRG/USR write (or append) channel. type: 0x81/0x82/0x83.
 	// append pre-loads the existing file so the commit extends it.
+	// replace: the name carried "@"; without it an existing file gives 63,FILE EXISTS
+	// and the channel is not armed. Works on the mounted D64 or the host folder.
 	bool open_seq_write_channel(uint8_t sa, const std::string& rawName,
-	                            uint8_t type = 0x81, bool append = false);
+	                            uint8_t type = 0x81, bool append = false, bool replace = false);
 
 	// D64 scratch helpers
 	int  d64_scratch_patterns(const std::vector<std::string>& patterns);

@@ -4,6 +4,7 @@ Name=Pet-GPT
 Comment=Commodore PET and CBM emulator
 Exec=pet-gpt %f
 Icon=io.github.tcottrill.Pet-GPT
+MimeType=application/x-commodore-prg;application/x-commodore-p00;application/x-commodore-t64;application/x-commodore-tap;application/x-commodore-d64;application/x-commodore-d71;
 Terminal=false
 Categories=Game;Emulator;
 Keywords=Commodore;PET;CBM;8032;6502;BASIC;

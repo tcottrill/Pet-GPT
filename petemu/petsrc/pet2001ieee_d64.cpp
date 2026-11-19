@@ -8,10 +8,16 @@ using namespace ieee_helpers;
 // D64 low-level helpers (sector math / read / write / flush)
 // -----------------------------------------------------------------------------
 // Layer: D64 fs helpers
-int PetIEEE::d64_sectors_per_track(int track) {
+int PetIEEE::d64_sectors_per_track(int track) const {
 	if (track < 1) return 0;
-	// 1571 side 1 (tracks 36..70) mirrors side 0's speed-zone geometry.
-	int z = (track >= 36 && track <= 70) ? (track - 35) : track;
+	int z = track;
+	if (track > 35) {
+		// 1571 side 1 (tracks 36..70) mirrors side 0's speed-zone geometry; the
+		// extra tracks 36..40 of a 40-track .d64 are plain 17-sector tracks.
+		if (d64_image_tracks_ == 70 && track <= 70) z = track - 35;
+		else if (d64_image_tracks_ == 40 && track <= 40) return 17;
+		else return 0;
+	}
 	if (z <= 17) return 21;
 	if (z <= 24) return 19;
 	if (z <= 30) return 18;
@@ -794,7 +800,7 @@ bool PetIEEE::d64_write_file_chain(
 // - Writes full chain first, then appends a closed directory entry.
 // -----------------------------------------------------------------------------
 bool PetIEEE::d64_save_file(const std::string& petName,
-	const uint8_t* data, size_t len, uint8_t type)
+	const uint8_t* data, size_t len, uint8_t type, bool replace)
 {
 	if (!isD64Mounted()) return false;
 	if (!writable_disk_size(d64.size())) { set_status(26, "WRITE PROTECT ON", 0, 0); return false; }
@@ -812,6 +818,15 @@ bool PetIEEE::d64_save_file(const std::string& petName,
 	// Detect existing entry but DO NOT delete it yet
 	int existingIdx = -1;
 	const bool hasExisting = d64_find_dir_entry(cat, petUp, existingIdx);
+
+	// Without "@" an existing name is 63,FILE EXISTS and the old file stays. A
+	// locked file (type bit 6) is never replaced: the drive's scratch step skips
+	// it, so the create that follows finds the name taken and gives the same 63.
+	if (hasExisting && existingIdx >= 0 &&
+		(!replace || (cat.entries[existingIdx].fileType & 0x40))) {
+		set_status(63, "FILE EXISTS", 0, 0);
+		return false;
+	}
 
 	// Count the blocks a replaced file would return to the free pool.
 	int oldBlocks = 0;
@@ -885,9 +900,9 @@ bool PetIEEE::d64_save_file(const std::string& petName,
 	return true;
 }
 
-bool PetIEEE::d64_save_prg(const std::string& petName, const std::vector<uint8_t>& bytes)
+bool PetIEEE::d64_save_prg(const std::string& petName, const std::vector<uint8_t>& bytes, bool replace)
 {
-	return d64_save_file(petName, bytes.data(), bytes.size(), 0x82);
+	return d64_save_file(petName, bytes.data(), bytes.size(), 0x82, replace);
 }
 
 // -----------------------------------------------------------------------------
@@ -1005,6 +1020,7 @@ int PetIEEE::d64_scratch_patterns(const std::vector<std::string>& patterns)
 		if ((e.fileType & 0x07) == 0) continue; // empty
 		const std::string up = to_upper_ascii(std::string(e.name));
 		if (!name_matches_any(up)) continue;
+		if (e.fileType & 0x40) continue; // locked ("<"): DOS skips it and does not count it
 
 		// Debug: before counts
 		const int dirBlocksBefore = cat.bam[17].freeCount; // track18 index is 18-1

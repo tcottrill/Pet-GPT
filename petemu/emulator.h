@@ -1,8 +1,8 @@
 #pragma once
 extern bool emu_init(int argc, char** argv);
-extern bool emu_run_frame();   // run + present one frame into the current GL viewport; false = quit
+extern bool emu_run_frame();   // run + present one frame into the current GL viewport; false = quit (none today: Escape no longer quits)
 extern void emu_end();
-extern void pet_load_software(const char* utf8_path); // .prg/.d64
+extern bool pet_load_software(const char* utf8_path); // .prg/.p00/.t64/.tap/.d64/.d71; true if loaded, mounted or attached
 extern void pet_eject_disk();                         // unmount .d64 -> ./files vdrive
 extern int  pet_get_disk_mounted();                   // 1 if a .d64 is mounted, else 0
 extern void pet_reset();
@@ -10,6 +10,8 @@ extern void pet_tape_command(int command); // 0 play, 1 stop, 2 rewind, 3 eject
 extern int pet_tape_state(); // bit 0 mounted, bit 1 playing, bit 2 end
 extern bool pet_set_basic(int which); // Model IDs: 2, 4, 8, 12
 extern int pet_get_basic();
+extern int pet_peek(int addr);                        // CPU-visible byte, for tests
+extern bool pet_rom_set_available(int which);         // model's ROM files are present; changes nothing
 extern void pet_set_ram(int kb);                      // 4/8/16/32: resize RAM + reset
 extern void pet_set_crt(int on);                      // CRT look (mono monitor shader) on/off
 extern int  pet_get_crt();                            // 1 if CRT look enabled, else 0

@@ -5,11 +5,6 @@
 <h1 align="center">Pet-GPT — Commodore PET/CBM Emulator</h1>
 
 <p align="center">
-  Note to anyone actually stumbling on this repository, this actually is a halfway decent
-  pet emulator, and the hle disk drive handles about 95% of the use cases. I am really happy with
-  it and if you give it a couple of minutes I think you will be too. The 6502 core and via6522
-  have been highly debugged and are suitable for using in just about any other C++ project.<br>
-  ...
   A modern, modular Commodore PET emulator for Windows and Linux — cycle-driven 6502, accurate
   VIA&nbsp;6522 / PIA&nbsp;6520 I/O, full CB2 sound, a mono-monitor CRT shader,
   <strong>five PET/CBM models</strong> from the original 2001 to the 80-column 8032,
@@ -38,6 +33,22 @@
 https://github.com/user-attachments/assets/0e11d07d-d96a-43b2-86fe-575940d97524
 
 <sub>If the player above doesn't load (some mirrors strip it), <a href="images/PetGPT-Robots.mp4">click here to watch the video</a>.</sub>
+
+---
+
+## 🚀 Quick start
+
+1. Download the latest release zip from the [GitHub Releases page](https://github.com/tcottrill/Pet-GPT/releases) and unzip it anywhere.
+2. Run the program.
+3. **ROMs are not included.** On the first start, when no PET ROM set can be loaded, a **ROM setup** window opens. It shows the folder Pet-GPT reads ROMs from. **Download ROMs** fetches them for you from zimmers.net (this needs an internet connection and PowerShell), or use **Open ROM folder** and copy your own ROM files into the per-model sub-folders (the exact file names are listed [below](#roms--your-commodore-rom-dumps-pet-gpt-ships-none)). Then press **Try again**.
+4. Use **File ▸ Load Program / Disk / Tape...** (`Ctrl+O`), or drag a `.prg`, `.d64` or `.tap` file (`.t64`, `.d71` also work) onto the window. A BASIC program starts by itself; for a disk or tape image the title bar tells you what to type next.
+
+<p align="center">
+  Note to anyone actually stumbling on this repository, this actually is a halfway decent
+  pet emulator, and the hle disk drive handles about 95% of the use cases. I am really happy with
+  it and if you give it a couple of minutes I think you will be too. The 6502 core and via6522
+  have been highly debugged and are suitable for using in just about any other C++ project.
+</p>
 
 ---
 
@@ -85,8 +96,10 @@ a **bug-fixed HLE disk drive**.
   starting_monitor`).
 
 > ⚠️ **ROMs are not included.** Pet-GPT ships no Commodore ROM images. You must supply your
-> own legally-obtained PET BASIC / EDIT / KERNAL / character ROMs — a bundled script can fetch
-> them for you (see [Running](#-running)).
+> own legally-obtained PET BASIC / EDIT / KERNAL / character ROMs. On a first run without ROMs
+> Pet-GPT shows a **ROM setup** window with the exact folder, a **Download ROMs** button (runs the
+> bundled script) and an **Open ROM folder** button. If the chosen model's ROMs are missing but another
+> set is present, that one starts instead, and models without ROMs are greyed out in **Machine**.
 
 ---
 
@@ -118,6 +131,8 @@ a **bug-fixed HLE disk drive**.
   - SEQ / PRG / USR named-file reads with CBM wildcards; append (`,A`) and `@`-replace.
   - **Virtual drive**: serves a host folder (`./files`) as device 8 — `LOAD"NAME",8`,
     `LOAD"$",8`, with a real 1541-style directory listing.
+  - On the original PET 2001 (BASIC 1), whose ROM disk routines never worked on the real
+    machine, Pet-GPT handles `LOAD`, `VERIFY` and `SAVE` on device 8 itself.
   - Persists across resets; ejectable back to the virtual drive at any time.
 - 🖥️ **Real desktop app** — native menus, integer & free window scaling, proper **4:3**
   presentation, Alt-Enter fullscreen, drag-and-drop loading, and `.ini`-persisted settings.
@@ -135,7 +150,7 @@ a **bug-fixed HLE disk drive**.
 | **GUI** | wxWidgets 3.3.3 (fetched by CMake, or `PET_WX_SOURCE`) |
 | **GPU** | OpenGL 3.3 core; GTK3/EGL with native Wayland preferred on Linux |
 | **Audio / input** | Native Windows backends; ALSA and evdev on Linux, optional PipeWire |
-| **Bundled** | GLEW and stb_image; no SDL or GLFW dependency |
+| **Bundled** | GLEW, stb_image and miniz; no SDL or GLFW dependency |
 
 ## 🔨 Building
 
@@ -165,10 +180,6 @@ control tests. Native Wayland rendering needs a separate Wayland smoke run.
 Executables: `build/windows/bin/Release/pet-gpt.exe` and `build/linux/bin/pet-gpt`.
 CMake fetches wxWidgets 3.3.3 on the first GUI configuration; an existing checkout
 can be supplied with `-DPET_WX_SOURCE=/path/to/wxWidgets`.
-
-Verification is still in progress: 23 Windows CTest tests and all five Windows model
-boot smoke checks have passed. Linux integration verification is pending. See
-[verification notes](docs/porting.md#verification-status) for the scope and limits.
 
 ## ▶️ Running
 
@@ -213,14 +224,18 @@ PET-data/roms/
 └─ cbm8032\     CBM 8032, BASIC 4, 80-column CRTC, 60 Hz
 ```
 
-**Optional ROM fetch script.** Supply a destination explicitly; ROMs are never
-included in builds or installed packages. From the source root in PowerShell
-(`pwsh` also works on Linux):
+**ROM fetch script.** ROMs are never included in builds or installed packages. The ROM
+setup window's **Download ROMs** button runs `download-roms.ps1` (kept next to the executable,
+or in a `tools` folder beside it) with PowerShell (`powershell.exe` on Windows, `pwsh` on Linux)
+and fetches the sets from zimmers.net into the folder Pet-GPT reads. You can also run it by
+hand; without `-RomsDir` it uses a `roms` folder beside the script when a `pet.ini` or `roms`
+folder is there (portable layout), otherwise `%APPDATA%\Pet-GPT\roms` on Windows and
+`~/Pet-GPT/roms` elsewhere. From the source root in PowerShell:
 
 ```powershell
-.\petemu\tools\download-roms.ps1 -RomsDir 'C:\PET-data\roms'
-# Linux PowerShell example:
-# pwsh ./petemu/tools/download-roms.ps1 -RomsDir "$HOME/PET-data/roms"
+.\petemu\tools\download-roms.ps1
+# Another destination:
+# .\petemu\tools\download-roms.ps1 -RomsDir 'C:\PET-data\roms'
 ```
 
 **By hand** — download the plain `.bin` files from the
@@ -262,8 +277,8 @@ build\windows\bin\Release\pet-gpt.exe
 ### 📦 T64 archives
 
 **File ▸ Load** and drag-and-drop accept `.t64` archives. A single-program archive loads
-directly; an archive with several programs shows a picker. Type `RUN` after loading a BASIC
-program. Programs keep their original load address and must be PET-compatible. T64 loading
+directly; an archive with several programs shows a picker. A BASIC program is run for you
+(`[machine] autorun`); for machine code, type the `SYS` address shown in the title bar. Programs keep their original load address and must be PET-compatible. T64 loading
 extracts the program straight into RAM — it has no cassette timing and isn't mounted on the
 disk drive; use TAP playback for software that reads more from tape.
 
@@ -352,7 +367,7 @@ lives in `pet.ini` (`[input] snes_invert`).
 | `F8` | Dump the current CRT shader values to the log |
 | `F12` | Toggle graphics ⇄ business keyboard |
 | `F11` / `Alt+Enter` | Toggle fullscreen |
-| `Esc` | Leave fullscreen, or quit |
+| `Esc` | Leave fullscreen. In a window it is a normal PET key (ESC on the 8032 keyboard); it never quits. Use **File ▸ Exit** or the window's close button. |
 
 Screenshots include the current CRT appearance and save automatically under
 `screenshots` (`~/Pet-GPT/screenshots` on Linux, the data folder on Windows, beside
@@ -389,7 +404,9 @@ View ─┬─ Scale 1× / 2× / 3× / Fit
 Help ─── About
 ```
 
-Files can also be **drag-and-dropped** onto the window.
+Files can also be **drag-and-dropped** onto the window. After loading a BASIC program Pet-GPT
+types `RUN` for you (`[machine] autorun`); loading a disk or tape image shows a hint with the
+next command to type in the title bar.
 
 ---
 
@@ -411,6 +428,7 @@ names are not stable IDs; replace them with the logged physical ID.
 | `[machine] basic` | `1`, `2`, `4`, `8`, `12` | Model: original 2001 / 2001N / 4000 9-inch / 8032 / 4000 12-inch |
 | `[machine] ram` | `4`, `8`, `16`, `32` | RAM size in KB (default 32; 2001 is fixed at 8; 8032 is fixed at 32) |
 | `[machine] speed2x` | `0`/`1` | 2× emulation speed |
+| `[machine] autorun` | `0`/`1` | After loading a BASIC `.prg`/`.t64` (load address `$0401`), type `RUN` for you (default `1`). Machine-language programs are never auto-run; the title bar shows the `SYS` address to type. |
 | `[input] snes_adapter` | `0`/`1` | emulate the user-port SNES pad |
 | `[input] snes_invert` | `0`/`1` | invert the adapter data line |
 | `[input] graphics_kbd` | `0`/`1` | Shift+letter types PET graphics chars |
@@ -436,10 +454,15 @@ dumps the current values to the log as a paste-ready block.
 ```text
 Pet-GPT/
 ├─ CMakeLists.txt              # authoritative Windows/Linux build and CTest
+├─ CONTRIBUTING.md             # building, testing, reporting bugs
+├─ THIRD-PARTY-NOTICES.md      # third-party code and its licences
+├─ changelog.txt               # version history
+├─ .github/                   # CI workflow, issue and pull request templates
 ├─ cmake/                     # dependency configuration
-├─ tools/                     # build and smoke-test helpers
-├─ docs/porting.md             # dependencies, paths, installation, verification
-├─ packaging/                 # Linux desktop integration
+├─ tools/                     # build, packaging and smoke-test helpers
+├─ docs/                      # porting.md (dependencies, paths, installation, verification), design notes
+├─ images/                    # logo, screenshots, demo video
+├─ packaging/                 # Linux desktop integration, icons, Flatpak metadata
 ├─ petemu/
 │  ├─ wx/                     # shared wx application, GL canvas, dialogs, key events
 │  ├─ emulator.cpp            # machine wiring, ROM loading, frame execution
@@ -447,9 +470,9 @@ Pet-GPT/
 │  ├─ petsrc/                 # PET devices, video, IEEE/D64/D71, keyboard
 │  ├─ cpu_cores/              # existing 6502 interpreter
 │  ├─ sys_audio/ sys_input/   # native host audio and controller backends
-│  ├─ sys_general/ sys_gl/    # logging and OpenGL support
+│  ├─ sys_general/            # logging, ini file, shared helpers
 │  ├─ tools/                 # optional ROM downloader
-│  ├─ thirdparty/            # GLEW, stb_image
+│  ├─ thirdparty/            # GLEW, stb_image, miniz
 │  └─ tests/                 # CTest regression sources
 └─ build/                     # generated builds; ROMs are user-supplied
 ```
@@ -492,7 +515,7 @@ PARTICULAR PURPOSE. See the GNU General Public License for more details.
 ```
 
 Commodore ROM images are **not** distributed with this project and remain the property of
-their respective rights holders. Bundled third-party libraries (GLEW, stb_image) retain
-their own licenses.
+their respective rights holders. Bundled third-party libraries (GLEW, stb_image, miniz) retain
+their own licenses; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 

@@ -52,6 +52,13 @@ public:
     // Optional: direct access to consolidated I/O core
     Pet2001IO& io() { return memory.io(); }
 
+    // Disk LOAD / VERIFY / SAVE on the original PET 2001 (BASIC 1). That ROM's
+    // disk code was never finished, so the machine core does these three for
+    // device 8 itself (see pet_machine.cpp). On by default; only active while the
+    // installed ROM matches the BASIC 1 KERNAL byte for byte at the trapped places.
+    void setBasic1DiskTraps(bool enabled);
+    bool basic1DiskTrapsActive() const { return basic1TrapsActive_; }
+
 private:
     // Backing 64K RAM image used as cpu.MEM (same bytes as PetMem::ram)
     //std::vector<uint8_t> ramImage;
@@ -75,6 +82,14 @@ private:
 
     // New: remember last IRQ level so we can detect rising edges
     bool last_irq_level_ = false;
+
+    // BASIC 1 disk traps: enabled by the caller, active when also the ROM
+    // signature matches (cached, so the per-instruction cost is one bool test).
+    bool basic1TrapsEnabled_ = true;
+    bool basic1TrapsActive_ = false;
+    bool basic1LoadPending_ = false;   // LOAD/VERIFY on device 8 passed $F375
+    void updateBasic1DiskTraps();      // recompute basic1TrapsActive_
+    void basic1DiskTrap();             // check the PC before each instruction
 
     // Keep cpu.MEM (ramImage) in sync with PetMems RAM + ROM overlay for cases
     // when CPU reads/writes MEM directly (reset vector, stack, etc.).
