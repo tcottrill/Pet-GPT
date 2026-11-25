@@ -436,8 +436,8 @@ names are not stable IDs; replace them with the logged physical ID.
 | `[video] fullscreen` | `0`/`1` | start fullscreen |
 | `[video] starting_monitor` | int (default `1`) | monitor to open on: `1` = primary, `2..N` = the others left-to-right |
 | `[video] starting_monitor_id` | string | Windows: physical monitor device path from the startup log; Linux: wx display name. Takes priority when connected. |
-| `[video] crt` | `0`/`1` | mono-monitor CRT shader |
-| `[video] crt_tint` | `0`/`1` | green phosphor (`1`) vs black & white (`0`) |
+| `[video] crt` | `0`/`1` (default `1`) | mono-monitor CRT shader; off draws plain white on black |
+| `[video] crt_tint` | `0`/`1` (default `1`) | green phosphor (`1`) vs black & white (`0`); needs the CRT shader |
 | `[video] mono_blur_h` · `mono_blur_v` | float | horizontal / vertical softness |
 | `[video] mono_halation` · `mono_halation_radius` | float | glow amount / radius |
 | `[video] mono_contrast` · `mono_brightness` | float | beam overdrive / black-level lift |

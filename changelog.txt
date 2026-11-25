@@ -16,6 +16,9 @@ Getting started
   it has and says so once; later starts note it in the title bar. Models
   without ROMs are greyed out in Machine > Model.
 - Help > Quick Start explains loading, disks, tapes and the PET keys.
+- A new installation starts with the CRT monitor shader in green phosphor, as
+  the release pet.ini always did. Without a pet.ini (Linux, Flatpak) it used
+  to start plain white on black. View > CRT (mono monitor) or F10 still turns it off.
 - File > Recent lists the last eight files; File > Open Files / ROM /
   Screenshots Folder opens those folders.
 

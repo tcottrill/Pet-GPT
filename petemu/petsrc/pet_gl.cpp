@@ -211,7 +211,7 @@ bool PetGL::init(int winW, int winH, const char* title,
     texW = texH = 0;
 
     // ---- CRT look: read defaults from pet.ini (host has already opened it) ----
-    m_crt       = get_config_bool ("video", "crt", false);
+    m_crt       = get_config_bool ("video", "crt", true);    // default: shader on, green phosphor
     m_tintOn    = get_config_bool ("video", "crt_tint", true);
     m_tint[0]   = get_config_float("video", "crt_tint_r", 0.30f);
     m_tint[1]   = get_config_float("video", "crt_tint_g", 1.0f);

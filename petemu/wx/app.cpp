@@ -646,7 +646,7 @@ private:
         pet_keyboard_load_settings();
         pet_set_speed(get_config_bool("machine", "speed2x", false) ? 2 : 1);
         pet_set_gfx_kbd(get_config_bool("input", "graphics_kbd", true));
-        pet_set_crt(get_config_bool("video", "crt", false));
+        pet_set_crt(get_config_bool("video", "crt", true));   // default look: CRT shader, green phosphor
         pet_set_monitor(get_config_bool("video", "crt_tint", true));
         if (pet_get_basic() == 1) ram_ = 8;
         if (pet_get_basic() == 8) ram_ = 32;
