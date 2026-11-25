@@ -3,7 +3,9 @@ set -euo pipefail
 source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${1:-$source_root/build/linux}"
 build_type="${PET_BUILD_TYPE:-Release}"
-configure_args=(-S "$source_root" -B "$build_dir" "-DCMAKE_BUILD_TYPE=$build_type" -DBUILD_TESTING=ON)
+# The Linux binary stays in the build tree (dist/ holds the Windows exe).
+configure_args=(-S "$source_root" -B "$build_dir" "-DCMAKE_BUILD_TYPE=$build_type" -DBUILD_TESTING=ON
+    "-DPETGPT_OUTPUT_DIR=$build_dir/bin")
 if [[ -n "${PET_WX_SOURCE:-}" ]]; then
     configure_args+=("-DPET_WX_SOURCE=$PET_WX_SOURCE")
 fi

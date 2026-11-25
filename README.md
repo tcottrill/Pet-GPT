@@ -147,7 +147,7 @@ a **bug-fixed HLE disk drive**.
 |---|---|
 | **OS** | Windows 10 / 11 x64, or Linux desktop with GTK3 |
 | **Toolchain** | CMake 3.24+, C++17; Visual Studio 2022 on Windows, GCC/Clang on Linux |
-| **GUI** | wxWidgets 3.3.3 (fetched by CMake, or `PET_WX_SOURCE`) |
+| **GUI** | wxWidgets 3.3.4 (fetched by CMake, or `PET_WX_SOURCE`) |
 | **GPU** | OpenGL 3.3 core; GTK3/EGL with native Wayland preferred on Linux |
 | **Audio / input** | Native Windows backends; ALSA and evdev on Linux, optional PipeWire |
 | **Bundled** | GLEW, stb_image and miniz; no SDL or GLFW dependency |
@@ -157,12 +157,16 @@ a **bug-fixed HLE disk drive**.
 CMake is the authoritative build for the shared Windows/Linux application. The old
 Visual Studio/WinMain frontend is historical code, not an alternate supported build.
 
-Windows, from the source root:
+Windows, from the source root: `build.bat` builds `dist\pet-gpt.exe` (Ninja, Release,
+static CRT: no redistributables) with the newest Visual Studio and runs CTest; with
+ROM sets in `x64\Release\roms` (or `-RomDir <dir>`) the frontend and ROM tests run on
+an isolated copy. `vs2022.bat` generates and opens `build\vs2022\PetGPT.sln`
+(Release to `dist\`, Debug to `dist\debug\`). By hand:
 
 ```powershell
-cmake -S . -B build/windows -A x64
-cmake --build build/windows --config Release --parallel
-ctest --test-dir build/windows -C Release --output-on-failure
+cmake -S . -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/windows --parallel
+ctest --test-dir build/windows --output-on-failure
 ```
 
 Linux, after installing the packages listed in [porting and build notes](docs/porting.md):
@@ -177,9 +181,16 @@ The helper scripts `tools/build-windows.ps1` and `tools/build-linux.sh` configur
 build, and run CTest. GUI tests need a desktop session; use Xvfb for headless Linux
 control tests. Native Wayland rendering needs a separate Wayland smoke run.
 
-Executables: `build/windows/bin/Release/pet-gpt.exe` and `build/linux/bin/pet-gpt`.
-CMake fetches wxWidgets 3.3.3 on the first GUI configuration; an existing checkout
-can be supplied with `-DPET_WX_SOURCE=/path/to/wxWidgets`.
+Executables: `dist/pet-gpt.exe` and `build/linux/bin/pet-gpt` (the CMake option
+`PETGPT_OUTPUT_DIR` picks another folder). CMake fetches wxWidgets 3.3.4 (checked by
+SHA-256) on the first GUI configuration; an existing checkout can be supplied with
+`-DPET_WX_SOURCE=/path/to/wxWidgets`.
+
+Release files: `tools\build-all.ps1` builds all four into `dist\release\` with
+`SHA256SUMS.txt`: the Windows installer (Inno Setup 6, per user, no administrator
+rights), the portable Windows zip, the Linux AppImage (built in an Ubuntu 22.04 root
+through WSL) and the Flatpak. `-SkipLinux` builds only the Windows two. None of them
+contains ROMs.
 
 ## ▶️ Running
 
@@ -188,7 +199,7 @@ For an explicit portable data root containing `roms/`, `files/`, and `pet.ini`:
 
 ```powershell
 $env:PETGPT_DATA_DIR = 'C:\PET-data'
-.\build\windows\bin\Release\pet-gpt.exe
+.\dist\pet-gpt.exe
 ```
 
 ```sh

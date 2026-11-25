@@ -120,7 +120,9 @@ public:
   for(auto& c:caps){
    auto label=pet_keyboard_editable(c.vk)?wxString(pet_keyboard_label(c.vk,shift,&draft)):reserved_label(c.vk);
    c.button->SetLabel(c.pc+": "+label+(draft[c.vk]!=PET_KEY_DEFAULT?" *":""));
-   c.button->SetBackgroundColour(c.vk==selected ? wxColour(219,235,254) : draft[c.vk]!=PET_KEY_DEFAULT ? wxColour(225,244,231) : wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
+   // Pale blue (selected) and green (changed) keys; deep shades of them in dark mode.
+   const bool dark=wxSystemSettings::GetAppearance().IsDark();
+   c.button->SetBackgroundColour(c.vk==selected ? (dark?wxColour(38,79,120):wxColour(219,235,254)) : draft[c.vk]!=PET_KEY_DEFAULT ? (dark?wxColour(36,84,52):wxColour(225,244,231)) : wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
    c.button->SetToolTip(c.pc+": "+label);
   }
   status->SetLabel(capturing?"Press a key whose PET function should be assigned. Escape cancels capture.":"Click a PC key, then capture a PET function or choose an assignment. Apply or OK saves changes.");

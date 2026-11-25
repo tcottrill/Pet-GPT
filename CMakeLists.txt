@@ -2,6 +2,16 @@ cmake_minimum_required(VERSION 3.24)
 project(PetGPT VERSION 2.7.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Visual Studio solutions (tools/make-vs2022.ps1): wx's projects go in solution folders.
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+# Static CRT (wx too, cmake/Dependencies.cmake): no Visual C++ redistributable needed.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# The version shown to users: 2.7 for 2.7.0, 2.7.1 for 2.7.1. The version lives only
+# in project() above; the About box, title bar, VERSIONINFO and release names read it.
+set(PETGPT_VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+if(PROJECT_VERSION_PATCH)
+  string(APPEND PETGPT_VERSION ".${PROJECT_VERSION_PATCH}")
+endif()
 option(PET_BUILD_GUI "Build the shared wxWidgets application" ON)
 include(CTest)
 if(MSVC)
@@ -75,8 +85,13 @@ if(PET_BUILD_GUI)
       petemu/sys_audio/linux/alsa_backend.cpp petemu/sys_audio/linux/audio_3d_null.cpp)
     target_link_libraries(pet_support PUBLIC ALSA::ALSA Threads::Threads)
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
-    if(PIPEWIRE_FOUND)
+    # OFF for the AppImage: Ubuntu 22.04's PipeWire headers are too old (ALSA only).
+    option(PET_USE_PIPEWIRE "Use the native PipeWire audio backend when available" ON)
+    if(PET_USE_PIPEWIRE)
+      pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
+    endif()
+    # PIPEWIRE_FOUND is cached by an earlier configure, so check the option as well.
+    if(PET_USE_PIPEWIRE AND PIPEWIRE_FOUND)
       target_compile_definitions(pet_support PRIVATE AAE_HAVE_PIPEWIRE)
       target_link_libraries(pet_support PRIVATE PkgConfig::PIPEWIRE)
     endif()
@@ -92,7 +107,27 @@ if(PET_BUILD_GUI)
     target_compile_definitions(pet_glew PUBLIC GLEW_EGL)
     target_link_libraries(pet_glew PUBLIC OpenGL::EGL)
   endif()
-  set(PET_GUI_SOURCES petemu/wx/crt_dialog.cpp
+  # PNGs compiled in as byte arrays (no committed hex headers): the 256 px app icon,
+  # which the About box scales, and the Ko-fi cup logo for the Ko-fi button (copied
+  # from FreeSnip's src/wx/res/kofi-cup.png; the rest of the button is drawn).
+  function(embed_png png header name)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${png}")
+    file(READ "${png}" hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," hex "${hex}")
+    file(RELATIVE_PATH source "${CMAKE_CURRENT_SOURCE_DIR}" "${png}")
+    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/${header}"
+      CONTENT "// Generated from ${source} by CMakeLists.txt.\nstatic const unsigned char ${name}[] = {${hex}};\n")
+  endfunction()
+  embed_png("${CMAKE_CURRENT_SOURCE_DIR}/packaging/icons/hicolor/256x256/apps/io.github.tcottrill.Pet-GPT.png" app_icon.h appIconPng)
+  embed_png("${CMAKE_CURRENT_SOURCE_DIR}/petemu/wx/res/kofi-cup.png" kofi_cup.h kofiCup)
+  # Version, generated headers and the .rc defines for the app and frontend_tests.
+  function(pet_gui_target target)
+    target_compile_definitions(${target} PRIVATE PETGPT_VERSION="${PETGPT_VERSION}"
+      PETGPT_VERSION_FULL="${PROJECT_VERSION}"
+      PETGPT_VERSION_RC=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0)
+    target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  endfunction()
+  set(PET_GUI_SOURCES petemu/wx/crt_dialog.cpp petemu/wx/about.cpp
     petemu/wx/keyboard_input.cpp petemu/petsrc/pet_keyboard_dialog.cpp
     petemu/emulator.cpp petemu/petsrc/pet_gl.cpp petemu/system/portable_paths.cpp
     petemu/system/host_view.cpp)
@@ -101,17 +136,24 @@ if(PET_BUILD_GUI)
   endif()
   add_executable(pet-gpt WIN32 petemu/wx/app.cpp ${PET_GUI_SOURCES})
   target_link_libraries(pet-gpt PRIVATE pet_support pet_glew wx::core wx::base wx::gl)
+  pet_gui_target(pet-gpt)
   if(WIN32)
     target_sources(pet-gpt PRIVATE petemu/app_resources.rc)
     if(MSVC)
       target_link_options(pet-gpt PRIVATE /MANIFEST:EMBED "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/petemu/petemu.manifest")
     endif()
+    # Visual Studio (tools/make-vs2022.ps1): F5 starts Pet-GPT from the repository.
+    set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT pet-gpt)
+    set_target_properties(pet-gpt PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
   endif()
   if(NOT WIN32)
     pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
     target_link_libraries(pet-gpt PRIVATE PkgConfig::GTK3)
   endif()
-  set_target_properties(pet-gpt PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+  # dist/pet-gpt.exe (dist/debug/ for Debug). Packaging builds, whose source tree is
+  # read-only, set their own folder.
+  set(PETGPT_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist" CACHE PATH "Folder for the built executable")
+  set_target_properties(pet-gpt PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PETGPT_OUTPUT_DIR}$<$<CONFIG:Debug>:/debug>")
   install(TARGETS pet-gpt RUNTIME DESTINATION bin)
   # The ROM setup dialog looks for the downloader next to the executable.
   add_custom_command(TARGET pet-gpt POST_BUILD
@@ -128,10 +170,12 @@ if(PET_BUILD_GUI)
     install(FILES packaging/pet-gpt.desktop DESTINATION share/applications)
     install(FILES packaging/io.github.tcottrill.Pet-GPT.xml DESTINATION share/mime/packages)
     install(FILES images/pet-gpt-logo.png DESTINATION share/pixmaps RENAME pet-gpt.png)
+    install(DIRECTORY packaging/icons/hicolor DESTINATION share/icons)
   endif()
   if(BUILD_TESTING)
     add_executable(frontend_tests petemu/tests/frontend_tests.cpp ${PET_GUI_SOURCES})
     target_link_libraries(frontend_tests PRIVATE pet_support pet_glew wx::core wx::base wx::gl)
+    pet_gui_target(frontend_tests)
     if(WIN32)
       target_sources(frontend_tests PRIVATE petemu/app_resources.rc)
     else()

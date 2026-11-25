@@ -15,15 +15,15 @@ CMake 3.24 or newer is the only supported build. The full build fetches wxWidget
 Windows (Visual Studio 2022, from the source root):
 
 ```powershell
-./tools/build-windows.ps1
+.\build.bat
 ```
 
-or by hand:
+(`vs2022.bat` makes a Visual Studio solution instead), or by hand:
 
 ```powershell
-cmake -S . -B build/windows -A x64
-cmake --build build/windows --config Release --parallel
-ctest --test-dir build/windows -C Release --output-on-failure
+cmake -S . -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/windows --parallel
+ctest --test-dir build/windows --output-on-failure
 ```
 
 Linux (install the packages listed in docs/porting.md first):
@@ -40,7 +40,7 @@ cmake --build build/linux --parallel
 ctest --test-dir build/linux --output-on-failure
 ```
 
-The executables are `build/windows/bin/Release/pet-gpt.exe` and `build/linux/bin/pet-gpt`.
+The executables are `dist/pet-gpt.exe` and `build/linux/bin/pet-gpt`.
 
 ### Core-only build
 

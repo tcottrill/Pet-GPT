@@ -26,6 +26,7 @@
 #include "petsrc/pet_keyboard_dialog.h"
 #include "keyboard_input.h"
 #include "crt_dialog.h"
+#include "about.h"
 #include "frame_schedule.h"
 #include "fullscreen_cursor.h"
 #include "host_options.h"
@@ -52,7 +53,7 @@ enum {
     Model1, Model2, Model4, Model12, Model8, Ram4, Ram8, Ram16, Ram32,
     Speed, Graphics, Snes, Keyboard, Crt, Green, White, CrtSettings,
     TapePlay, TapeStop, TapeRewind, TapeEject, TogglePause, Screenshot,
-    OpenFiles, OpenRoms, OpenShots, QuickStart, RecentClear, RecentFirst
+    OpenFiles, OpenRoms, OpenShots, QuickStart, Kofi, RecentClear, RecentFirst
 };
 constexpr int kRecentMax = 8;
 wxString lastMessageTitle, lastMessageText; // most recent host_message, for tests
@@ -327,7 +328,7 @@ private:
 class PetFrame final : public wxFrame {
 public:
     PetFrame(std::vector<std::string> args, wxString screenshot, bool smoke)
-        : wxFrame(nullptr, wxID_ANY, wxS("Commodore PET — Pet-GPT 2.7")), timer_(this),
+        : wxFrame(nullptr, wxID_ANY, wxS("Commodore PET — Pet-GPT " PETGPT_VERSION)), timer_(this),
           arguments_(std::move(args)), screenshot_(screenshot), smoke_(smoke) {
         frame = this;
 #ifdef __WXMSW__
@@ -595,7 +596,8 @@ private:
         view->AppendSubMenu(monitor, "&Monitor"); view->Append(CrtSettings, "CRT Monitor &Settings...");
         bar->Append(view, "&View");
         auto* help = new wxMenu; help->Append(QuickStart, "&Quick Start...");
-        help->AppendSeparator(); help->Append(wxID_ABOUT, "&About Pet-GPT..."); bar->Append(help, "&Help");
+        help->AppendSeparator(); help->Append(Kofi, "Support me on &Ko-fi...");
+        help->Append(wxID_ABOUT, "&About Pet-GPT..."); bar->Append(help, "&Help");
         SetMenuBar(bar);
     }
 
@@ -801,7 +803,14 @@ private:
             ShowFullScreen(false);
             // Elsewhere ShowFullScreen(false) restores the fitted window; on
             // Wayland Fit must be requested again as compositor maximization.
+#ifdef __WXGTK__
+            // wxGTK 3.3.4 re-shows the menu bar after ShowFullScreen(false)
+            // returns, so a client size set at once is off by its height.
+            if (scale_ >= 1 || native_wayland())
+                CallAfter([this] { if (!closing_ && !IsFullScreen()) ApplyScale(scale_); });
+#else
             if (scale_ >= 1 || native_wayland()) ApplyScale(scale_);
+#endif
         }
         canvas_->SetFocus();
         UpdateCursor(true);
@@ -894,7 +903,7 @@ private:
         UpdateTitle();
     }
     void UpdateTitle() {
-        wxString title = wxS("Commodore PET — Pet-GPT 2.7");
+        wxString title = wxS("Commodore PET — Pet-GPT " PETGPT_VERSION);
         if (userPaused_) title += " [Paused]";
         if (!titleNote_.empty()) title += wxS(" — ") + titleNote_;
         SetTitle(title);
@@ -965,18 +974,8 @@ private:
         case CrtSettings:
             if (!crt_) crt_ = new CrtDialog(this);
             crt_->Sync(); crt_->Show(); crt_->Raise(); break;
-        case wxID_ABOUT: {
-            wxAboutDialogInfo info;
-            info.SetName(wxS("Pet-GPT — Commodore PET Emulator")); info.SetVersion("2.7");
-            info.SetDescription("Five PET/CBM models, tape and disk images, CB2 audio, SNES input, and OpenGL CRT display.\n\n"
-                "F11 / Alt+Enter: fullscreen\nF10: CRT shader\nF12: graphics keyboard\n"
-                "Pause/Break / Ctrl+P: pause or resume\nF6: save PNG screenshot\n"
-                "F9: select CRT knob; Page Up/Down: adjust (Shift: coarse)\nF8: log shader settings");
-            info.SetCopyright("Pet-GPT contributors"); info.SetWebSite("https://github.com/tcottrill/Pet-GPT");
-            info.SetLicense("GNU General Public License, version 3.\nSee LICENSE in the distribution.\n\n"
-                "Built with wxWidgets (wxWindows Library Licence) and GLEW (BSD/MIT licences).");
-            wxAboutBox(info, this); break;
-        }
+        case Kofi: petgpt::openKofiPage(); break;
+        case wxID_ABOUT: petgpt::showAbout(this); break;
         default: event.Skip(); break;
         }
         if (!closing_) { UpdateMenus(); if (id != CrtSettings) canvas_->SetFocus(); }
@@ -1012,6 +1011,9 @@ public:
         // taskbar shows the Pet-GPT icon instead of a generic one.
         if (const char* flatpakId = std::getenv("FLATPAK_ID"); flatpakId && *flatpakId)
             g_set_prgname(flatpakId);
+        // The AppImage carries the same desktop file name as the Flatpak.
+        else if (const char* appImage = std::getenv("APPIMAGE"); appImage && *appImage)
+            g_set_prgname("io.github.tcottrill.Pet-GPT");
 #endif
     }
     bool OnInit() override {
@@ -1020,6 +1022,8 @@ public:
         wxLog::SetActiveTarget(new wxLogStderr());
         initialize_paths(wxStandardPaths::Get().GetExecutablePath().ToStdString(wxConvUTF8));
         LogOpen(data_path("petemu-log.txt"));
+        // Before the first window: Windows applies the theme only to windows created after it.
+        SetAppearance(petgpt::savedAppearance());
 #ifdef __WXGTK__
         bool wayland = false;
 #ifdef GDK_WINDOWING_WAYLAND

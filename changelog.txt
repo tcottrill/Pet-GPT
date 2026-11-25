@@ -57,6 +57,17 @@ Linux
 - Fit to Screen on Wayland, AltGr characters, and the fullscreen cursor hides
   after 3 seconds.
 
+Releases, theme and About
+- Four downloads per release: a Windows installer (per user, no administrator
+  rights, Start menu entry, optional desktop shortcut), a portable Windows zip
+  (keeps everything in its own folder), a Linux AppImage for Ubuntu 22.04 and
+  newer, and the Flatpak. None of them contains ROMs.
+- Help > About: choose the theme (Same as system, Light or Dark; saved in
+  pet.ini). Linux switches at once, Windows on the next start.
+- Help > Support me on Ko-fi, and a Ko-fi button in the About box.
+- Built with wxWidgets 3.3.4 and the static C runtime: the Windows exe needs no
+  Visual C++ redistributable.
+
 Other
 - Gamepads plugged in after launch are picked up (Windows).
 - Audio no longer repeats a frame after a hitch.

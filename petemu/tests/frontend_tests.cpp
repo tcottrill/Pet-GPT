@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
         wxMenuEvent menuOpen(wxEVT_MENU_OPEN);
         frame->GetEventHandler()->ProcessEvent(menuOpen);
         const wxString dash(static_cast<wchar_t>(0x2014));
-        check("title contains Unicode em dash", frame->GetTitle() == "Commodore PET " + dash + " Pet-GPT 2.7");
+        check("title contains Unicode em dash", frame->GetTitle() == "Commodore PET " + dash + " Pet-GPT " PETGPT_VERSION);
         const int modelMenu[] = {Model1, Model2, Model4, Model12, Model8};
         const int models[] = {1, 2, 4, 12, 8};
         for (int i = 0; i < 5; ++i) {
@@ -230,7 +230,8 @@ int main(int argc, char** argv) {
 #ifdef __WXGTK__
                 // X11 exposes the blank cursor type; Wayland reports every
                 // themed cursor as a pixmap, so only the app state is checked there.
-                if (!native_wayland()) {
+                // Without focus the cursor was never hidden (see the note above).
+                if (kept && !native_wayland()) {
                     auto* cursor = canvas->GetCursor().GetCursor();
                     check("GTK applies blank cursor", cursor && gdk_cursor_get_cursor_type(cursor) == GDK_BLANK_CURSOR);
                 }

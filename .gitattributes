@@ -1,3 +1,9 @@
-# Linux scripts must remain executable by bash after a Windows checkout.
+# Linux scripts and data must keep LF after a Windows checkout (core.autocrlf is on
+# here): a CRLF .desktop file breaks linuxdeploy, a CRLF script breaks bash.
 *.sh text eol=lf
+*.py text eol=lf
 *.desktop text eol=lf
+*.xml text eol=lf
+*.json text eol=lf
+# cmd.exe misreads labels and long lines in LF batch files.
+*.bat text eol=crlf

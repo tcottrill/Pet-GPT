@@ -26,14 +26,16 @@ Install Visual Studio 2022 with Desktop development with C++, a Windows SDK, and
 CMake 3.24 or newer. Run from the source root:
 
 ```powershell
-cmake -S . -B build/windows -A x64
-cmake --build build/windows --config Release --parallel
-ctest --test-dir build/windows -C Release --output-on-failure
+cmake -S . -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/windows --parallel
+ctest --test-dir build/windows --output-on-failure
 ```
 
-Or run `./tools/build-windows.ps1`. The executable is
-`build/windows/bin/Release/pet-gpt.exe`. The helper accepts `-Configuration`,
-`-BuildDir`, `-WxSource`, and `-Jobs`; it stops on configure, build, or test failure.
+Or run `build.bat` (tools/build-windows.ps1: the newest Visual Studio found by vswhere,
+its Ninja, static CRT). The executable is `dist/pet-gpt.exe`. The helper accepts
+`-Configuration`, `-WxSource`, `-RomDir` (ROM sets copied with pet.ini into
+`build/windows/test-data` for the frontend and ROM tests) and `-Jobs`; it stops on
+configure, build, or test failure. `vs2022.bat` generates `build/vs2022/PetGPT.sln`.
 A desktop session is needed for native GUI tests.
 
 ## Linux build
@@ -82,7 +84,7 @@ or controller configuration.
 
 ## Dependencies and core-only builds
 
-The default GUI configuration fetches wxWidgets **3.3.3** using CMake FetchContent.
+The default GUI configuration fetches wxWidgets **3.3.4** using CMake FetchContent.
 Initial configuration therefore needs network access. To use an existing source
 checkout, pass `-DPET_WX_SOURCE=/absolute/path/to/wxWidgets`. The local sibling
 Skein checkout can be used for development, but is not required or hardcoded.

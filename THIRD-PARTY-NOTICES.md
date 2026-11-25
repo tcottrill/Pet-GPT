@@ -14,7 +14,7 @@ No Commodore ROM images or commercial software are part of this project or its r
 | `deftypes.h` | `petemu/cpu_cores/deftypes.h` | none stated | yes |
 | iniFile | `petemu/sys_general/iniFile.cpp` | Unlicense | yes |
 | Erin Catto's math header | `petemu/sys_general/MathUtils.h` | permissive notice | not built |
-| wxWidgets 3.3.3 | fetched at build time | wxWindows Library Licence 3.1 | yes (GUI) |
+| wxWidgets 3.3.4 | fetched at build time | wxWindows Library Licence 3.1 | yes (GUI) |
 
 Code under `petemu/sys_audio`, `petemu/sys_input` and `petemu/sys_general/sys_log.*` is the author's own, copied from the author's AAE project, and is GPL-3.0-or-later; see `petemu/sys_audio/REUSE.md`. The headers carry no third-party notice other than the placeholders listed under "Needs the author's attention".
 
@@ -220,7 +220,7 @@ It is provided "as is" without express or implied warranty.
 ## wxWidgets
 
 - What: the cross-platform GUI toolkit used by the frontend; not in the tree. CMake downloads the release archive at configure time (`cmake/Dependencies.cmake`), or uses a local checkout given as `-DPET_WX_SOURCE=`.
-- Version fetched: 3.3.3 (`https://github.com/wxWidgets/wxWidgets/releases/download/v3.3.3/wxWidgets-3.3.3.tar.bz2`). docs/porting.md records verification runs with a local 3.3.4 checkout.
+- Version fetched: 3.3.4 (`https://github.com/wxWidgets/wxWidgets/releases/download/v3.3.4/wxWidgets-3.3.4.tar.bz2`, SHA-256 checked), linked statically.
 - Licence: wxWindows Library Licence, Version 3.1 (LGPL 2 or later with an exception that permits distributing binary forms under terms of your choice). The licence text and copyright holders are in the fetched sources, `docs/licence.txt` and `docs/lgpl.txt`; they are not reproduced here because they are not part of this repository.
 - Release packages that include a wxWidgets-linked binary should include that text.
 

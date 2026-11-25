@@ -30,6 +30,10 @@ RUNTIME_VERSION=26.08
 SDK="org.freedesktop.Sdk//$RUNTIME_VERSION"
 WORK="${PET_FLATPAK_WORK:-$HOME/pet-gpt-flatpak}"
 BUILD="$WORK/build-$RUNTIME_VERSION"
+# A build tree belongs to one source folder: another checkout (a git worktree) gets its own.
+if [ -f "$BUILD/CMakeCache.txt" ] && ! grep -qxF "CMAKE_HOME_DIRECTORY:INTERNAL=$ROOT" "$BUILD/CMakeCache.txt"; then
+    BUILD="$BUILD-$(printf %s "$ROOT" | sha256sum | cut -c1-8)"
+fi
 OUT="$ROOT/dist/linux"
 
 TESTING=0
@@ -54,7 +58,8 @@ if [ -n "${PET_WX_SOURCE:-}" ]; then
 fi
 flatpak run "${mounts[@]}" --share=network --command=bash "$SDK" -c "
     set -e
-    cmake -S '$ROOT' -B '$BUILD' -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF $wx_arg
+    cmake -S '$ROOT' -B '$BUILD' -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+        '-DPETGPT_OUTPUT_DIR=$BUILD/bin' $wx_arg
     cmake --build '$BUILD' --target pet-gpt --parallel \${FLATPAK_BUILDER_N_JOBS:-\$(nproc)}
 "
 
