@@ -51,6 +51,33 @@ int main() {
         CHECK(v.framebuffer()[0]==black); // discrete 40-col display starts at zero
     }
     {
+        PetMachine machine;
+        auto& m = machine.bus();
+        auto& v = machine.video();
+        m.setRamSize(32768);
+        machine.setVideoCharsets(chars, chars);
+        machine.io().configureCrtc(false, 1);
+        machine.reset();
+        m.writeByte(0x8000, 1);
+
+        // The discrete PET fetches column zero 24 clocks after VIDEO ON rises.
+        for (int i = 0; i < 3840 + 24 - 4; ++i) machine.stepCycle();
+        m.writeByte(0x0200, 0x8d); // STA $8000, A is zero after reset
+        m.writeByte(0x0201, 0x00);
+        m.writeByte(0x0202, 0x80);
+        machine.cpu().set_pc(0x0200);
+        CHECK(machine.runCycles(4) == 4);
+        CHECK(m.peekByte(0x8000) == 0);
+        for (int i = 3840 + 24; i < 16640; ++i) machine.stepCycle();
+
+        // The store lands after the video fetch in that clock. Only the next
+        // scanline and subsequent frames should see the new character.
+        CHECK(v.framebuffer()[0] != black);
+        CHECK(v.framebuffer()[2 * v.fbWidth()] == black);
+        for (int i = 0; i < 16640; ++i) machine.stepCycle();
+        CHECK(v.framebuffer()[0] == black);
+    }
+    {
         Pet2001Video v; v.setCharsets(chars,chars); v.reset(); v.write(0,1);
         v.setVideoBlank(true); v.update(100); v.setColumns(80);
         CHECK(v.framebuffer()[0]==black);

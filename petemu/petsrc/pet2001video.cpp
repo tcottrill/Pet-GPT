@@ -52,6 +52,8 @@ void Pet2001Video::reset()
 {
     std::fill(vidram.begin(), vidram.end(), uint8_t(0x20)); // space
     std::fill(fb.begin(), fb.end(), RGBA_BLACK);
+    std::fill(raster_.begin(), raster_.end(), RGBA_BLACK);
+    rasterFrameReady_ = false;
     blank = false;
     blankRequested = false;
     blankCountdownMs = -1;
@@ -77,7 +79,7 @@ void Pet2001Video::write(int addr, uint8_t value)
     // Translate physical SRAM to a visible cell, wrapping at the SRAM boundary.
     const int mask = (cols_ == 80) ? 0x7ff : 0x3ff;
     const int cell = (addr - screenStart_) & mask;
-    if (!blank && activeCharset != nullptr) {
+    if (!rasterFrameReady_ && !blank && activeCharset != nullptr) {
         // Larger programmed displays can show the same SRAM byte more than once.
         for (int visibleCell = cell; visibleCell < visible_; visibleCell += mask + 1)
             drawCharCell(visibleCell, value);
@@ -118,6 +120,7 @@ void Pet2001Video::setColumns(int cols)
     const int nc = (cols == 80) ? 80 : 40;
     // A model switch can keep its width while changing the video hardware.
     cols_    = nc;
+    rasterFrameReady_ = false;
     displayCols_ = nc;
     scanlines_ = CHAR_H;
     fbHeight_ = FB_H;
@@ -129,6 +132,32 @@ void Pet2001Video::setColumns(int cols)
     const int sramSize = (nc == 80) ? 2048 : 1024;
     if ((int)vidram.size() < sramSize) vidram.resize(sramSize, 0x20);
     redrawScreen();
+}
+
+void Pet2001Video::setDiscreteRaster(bool enabled)
+{
+    raster_.assign(enabled ? FB_W * FB_H : 0, RGBA_BLACK);
+    rasterFrameReady_ = false;
+    redrawScreen();
+}
+
+void Pet2001Video::fetchDiscreteCharacter(int line, int column)
+{
+    // The same SRAM byte is fetched again for each scanline of the glyph.
+    const uint8_t ch = vidram[(line / CHAR_H) * COLS + column];
+    auto* pixels = raster_.data() + line * SCALE * FB_W + column * CELL_W;
+    const uint8_t bits = (blank || !activeCharset) ? 0 : glyphRow(ch, line % CHAR_H);
+    for (int x = 0; x < CHAR_W; ++x) {
+        const uint32_t pixel = (bits & (0x80u >> x)) ? RGBA_WHITEISH : RGBA_BLACK;
+        pixels[2 * x] = pixels[2 * x + 1] = pixel;
+        pixels[FB_W + 2 * x] = pixels[FB_W + 2 * x + 1] = pixel;
+    }
+}
+
+void Pet2001Video::finishDiscreteFrame()
+{
+    fb.swap(raster_);
+    rasterFrameReady_ = true;
 }
 
 void Pet2001Video::setCrtcGeometry(int columns, int rows, int scanlines, uint16_t byteOffset)
@@ -234,6 +263,7 @@ void Pet2001Video::load(const std::string& s)
 
     // blank flag
     blank = (!parts[0].empty() && parts[0][0] == '1');
+    rasterFrameReady_ = false;
     // The snapshot format stores the effective blank state, not a pending
     // transition. Never retain a timer from the state being replaced.
     blankRequested = blank;
@@ -260,6 +290,8 @@ void Pet2001Video::load(const std::string& s)
 
 void Pet2001Video::redrawScreen()
 {
+    if (rasterFrameReady_) return;
+
     if (blank || activeCharset == nullptr) {
         // No charset -> just clear to black
         std::fill(fb.begin(), fb.end(), RGBA_BLACK);
@@ -280,6 +312,13 @@ void Pet2001Video::blankScreen()
 {
     // Solid black
     std::fill(fb.begin(), fb.end(), RGBA_BLACK);
+    std::fill(raster_.begin(), raster_.end(), RGBA_BLACK);
+}
+
+uint8_t Pet2001Video::glyphRow(uint8_t ch, int row) const
+{
+    const uint8_t bits = activeCharset[(ch & 0x7f) * CHAR_H + row];
+    return (ch & 0x80) ? bits ^ 0xff : bits;
 }
 
 void Pet2001Video::drawCharCell(int addr, uint8_t ch)
@@ -298,19 +337,12 @@ void Pet2001Video::drawCharCell(int addr, uint8_t ch)
     // Foreground color (white-ish)
     const uint32_t fg = RGBA_WHITEISH;
 
-    const int glyph = (ch & 0x7F); // lower 7 bits select glyph
-    const bool inv = (ch & 0x80) != 0;
-
-    // Each glyph has 8 rows, MSB is leftmost pixel
-    const uint8_t* base = activeCharset + (glyph * CHAR_H);
-
     // Paint doubled pixels (2x2) for each set bit
     const int x0 = col * cellW_;
     const int y0 = row * cellH;
 
     for (int y = 0; y < std::min(scanlines_, CHAR_H); ++y) {
-        uint8_t bits = base[y];
-        if (inv) bits ^= 0xFF;
+        const uint8_t bits = glyphRow(ch, y);
 
         for (int x = 0; x < CHAR_W; ++x) {
             // Test the original row byte directly. Repeated uint8_t shifts

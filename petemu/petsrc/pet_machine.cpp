@@ -46,9 +46,16 @@ uint8_t PetMachine::s_read8(UINT32 ofs, MemoryReadByte* h)
 
 void PetMachine::s_write8(UINT32 ofs, UINT8 data, MemoryWriteByte* h)
 {
-    auto* pm = reinterpret_cast<PetMem*>(h->pUserArea);
+    auto* machine = static_cast<PetMachine*>(h->pUserArea);
     const uint16_t addr = static_cast<uint16_t>(h->lowAddr + ofs);
-    pm->writeByte(addr, data);
+    if (machine->timeVideoWrites_ && ((addr & 0xf000) == 0x8000 || addr == 0xe84c)) {
+        // This core emits a single final data write for stores and RMW
+        // instructions. Screen SRAM and the charset pin change on that clock.
+        machine->videoWrite_ = {addr, data};
+        machine->videoWritePending_ = true;
+        return;
+    }
+    machine->memory.writeByte(addr, data);
 }
 
 // ---- Construction ------------------------------------------------------------
@@ -108,7 +115,7 @@ void PetMachine::installFlatHandlers()
     wAll.lowAddr = 0x0000;
     wAll.highAddr = 0xFFFF;
     wAll.memoryCall = &PetMachine::s_write8;
-    wAll.pUserArea = &memory;
+    wAll.pUserArea = this;
     wrTbl.push_back(wAll);
 
     MemoryWriteByte wEnd{ static_cast<UINT32>(-1), 0, nullptr, nullptr };
@@ -293,18 +300,24 @@ void PetMachine::basic1DiskTrap()
 int PetMachine::runCycles(int cycles)
 {
     int executed = 0;
+    timeVideoWrites_ = memory.video().hasDiscreteRaster();
 
     while (executed < cycles)
     {
         // get_pc() is the address of the next instruction to run.
         if (basic1TrapsActive_) basic1DiskTrap();
 
-               // Step CPU one instruction or interrupt entry.
+        // Step CPU one instruction or interrupt entry.
         const int c = cpuPtr->step6502();
 
         // Advance devices for each CPU cycle executed.
         for (int i = 0; i < c; ++i) {
             stepCycle();
+        }
+        // The video fetch precedes the 6502 write on the same clock.
+        if (videoWritePending_) {
+            memory.writeByte(videoWrite_.address, videoWrite_.value);
+            videoWritePending_ = false;
         }
 
         // IRQ line is physically wired at all times (level-sensitive).
@@ -318,6 +331,7 @@ int PetMachine::runCycles(int cycles)
         executed += c;
     }
 
+    timeVideoWrites_ = false;
     return executed;
 }
 

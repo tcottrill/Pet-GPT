@@ -77,6 +77,14 @@ private:
     static uint8_t  s_read8(UINT32 ofs, MemoryReadByte* h);
     static void     s_write8(UINT32 ofs, UINT8  data, MemoryWriteByte* h);
 
+    struct VideoWrite {
+        uint16_t address;
+        uint8_t value;
+    };
+    VideoWrite videoWrite_{};
+    bool videoWritePending_ = false;
+    bool timeVideoWrites_ = false;
+
     // Build a single catch-all handler that forwards every address to PetMem
     void installFlatHandlers();
 

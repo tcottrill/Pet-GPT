@@ -161,6 +161,10 @@ private:
 	// (refreshFrameTiming, re-evaluated once per frame at the wrap).
 	static constexpr uint32_t kCyclesPerFrame = 16640;
 	static constexpr uint32_t kVBlankEnd = 3840;
+	static constexpr int kDiscreteLineCycles = 64;
+	// VIDEO ON rises at the right edge of the line above the visible area.
+	static constexpr uint32_t kFirstDiscreteFetch =
+		kVBlankEnd + kDiscreteLineCycles - Pet2001Video::COLS;
 
 	void refreshFrameTiming();
 

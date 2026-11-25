@@ -59,6 +59,10 @@ public:
     void setColumns(int cols);
     // Display geometry does not change the machine's SRAM or pixel clock.
     void setCrtcGeometry(int columns, int rows, int scanlines, uint16_t byteOffset);
+    void setDiscreteRaster(bool enabled);
+    bool hasDiscreteRaster() const { return !raster_.empty(); }
+    void fetchDiscreteCharacter(int line, int column);
+    void finishDiscreteFrame();
     // Byte offset in screen SRAM; 8032 glue converts CRTC two-byte units.
     void setScreenStart(uint16_t byteOffset);
     int  columns() const { return cols_; }
@@ -99,6 +103,7 @@ private:
     void redrawScreen();
     void blankScreen();
     void drawCharCell(int addr, uint8_t ch);
+    uint8_t glyphRow(uint8_t ch, int row) const;
     inline void putPixel(int x, int y, uint32_t rgba);
     inline void fillRect(int x, int y, int w, int h, uint32_t rgba);
 
@@ -113,6 +118,9 @@ private:
     int visible_ = VIDRAM_SIZE;  // displayCols_ * displayed rows
     uint16_t screenStart_ = 0;
     std::vector<uint32_t> fb;    // RGBA8888 framebuffer (FB_W x fbHeight_)
+
+    std::vector<uint32_t> raster_; // Frame being scanned on discrete-video PETs.
+    bool rasterFrameReady_ = false;
 
     // Charsets
     const uint8_t* charset1; // 128 * 8 bytes

@@ -36,6 +36,7 @@ void Pet2001IO::configureCrtc(bool present, int bytesPerCharacter)
 	m_hasCrtc = present;
 	m_crtcBytesPerCharacter = bytesPerCharacter == 2 ? 2 : 1;
 	m_crtc.reset();
+	m_video.setDiscreteRaster(!present);
 	refreshFrameTiming();
 }
 
@@ -609,6 +610,7 @@ void Pet2001IO::cycle()
 	m_videoCycle++;
 	if (m_videoCycle >= m_frameCycles)
 	{
+		if (m_video.hasDiscreteRaster()) m_video.finishDiscreteFrame();
 		m_videoCycle = 0;
 		// Timing source can change (8032 editor programs the CRTC; ROM-set
 		// switch flips 40<->80 columns). Re-evaluate at the frame boundary so
@@ -628,6 +630,14 @@ void Pet2001IO::cycle()
 	{
 		// End of V-BLANK. VIDEO ON goes HIGH.
 		setVideoOnSignal(true);
+	}
+
+	if (m_video.hasDiscreteRaster() && m_videoCycle >= kFirstDiscreteFetch)
+	{
+		const int beam = int(m_videoCycle - kFirstDiscreteFetch);
+		const int column = beam % kDiscreteLineCycles;
+		if (column < Pet2001Video::COLS)
+			m_video.fetchDiscreteCharacter(beam / kDiscreteLineCycles, column);
 	}
 }
 
