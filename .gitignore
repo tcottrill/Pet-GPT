@@ -44,3 +44,6 @@ __pycache__/
 # Local runtime preferences
 PetGPT/pet.ini
 screenshots/
+
+# Local design notes and plans (not published)
+docs/superpowers/
