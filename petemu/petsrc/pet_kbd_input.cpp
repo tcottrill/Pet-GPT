@@ -565,8 +565,10 @@ bool pet_keyboard_editable(int vk) noexcept {
     // Alt+Enter remain host accelerators even when their plain keys are mapped.
     if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') ||
         (vk >= VK_NUMPAD0 && vk <= VK_DIVIDE) || (vk >= VK_F1 && vk <= VK_F5) || vk == VK_F7) return true;
-    // F6 is the host screenshot key and never reaches PET input.
+    // F6 is the host screenshot key and never reaches PET input. Escape is a PET
+    // key in a window (it only leaves fullscreen), so it can be remapped too.
     switch (vk) {
+    case VK_ESCAPE:
     case VK_BACK: case VK_TAB: case VK_RETURN: case VK_CAPITAL: case VK_SPACE:
     case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
     case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:

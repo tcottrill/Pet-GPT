@@ -36,8 +36,6 @@
 
 // ---- Static handler callbacks ------------------------------------------------
 
-static bool logged = false;
-
 uint8_t PetMachine::s_read8(UINT32 ofs, MemoryReadByte* h)
 {
     // ofs is relative; reconstruct absolute: lowAddr + ofs
@@ -57,11 +55,10 @@ void PetMachine::s_write8(UINT32 ofs, UINT8 data, MemoryWriteByte* h)
 
 PetMachine::PetMachine()
   //  : ramImage(65536, 0x00),
+    // irq_vector_ready_ and last_irq_level_ start false (member initialisers).
     : rdTbl(),
     wrTbl(),
-    memory(), 
-    irq_vector_ready_(false),
-    last_irq_level_(false)
+    memory()
 {
     // Mirror is initialized to zero; ROM loads will be mirrored explicitly.
    // std::fill(ramImage.begin(), ramImage.end(), 0x00);
@@ -77,7 +74,7 @@ PetMachine::PetMachine()
     // IMPORTANT: mirror PetMem writes into the CPU MEM buffer
    // memory.setRamMirror(ramImage.data(), ramImage.size());
 
-    cpuPtr = std::make_unique<cpu_6502>(memory.ramData(), rdTbl.data(), wrTbl.data(), 0xFFFF, 0);
+    cpuPtr = std::make_unique<cpu_6502>(memory.ramData(), rdTbl.data(), wrTbl.data(), uint16_t(0xFFFF), 0);
 
     // The PET keeps ROM in a separate image served via the read handler (PetMem),
     // NOT in the flat MEM[] array. The new core defaults to fetching opcodes/operands

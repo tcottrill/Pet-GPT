@@ -2,7 +2,7 @@
 extern bool emu_init(int argc, char** argv);
 extern bool emu_run_frame();   // run + present one frame into the current GL viewport; false = quit (none today: Escape no longer quits)
 extern void emu_end();
-extern bool pet_load_software(const char* utf8_path); // .prg/.p00/.t64/.tap/.d64/.d71; true if loaded, mounted or attached
+extern bool pet_load_software(const char* utf8_path); // .prg/.p00-.p99/.t64/.tap/.d64/.d71; true if loaded, mounted or attached
 extern void pet_eject_disk();                         // unmount .d64 -> ./files vdrive
 extern int  pet_get_disk_mounted();                   // 1 if a .d64 is mounted, else 0
 extern void pet_reset();

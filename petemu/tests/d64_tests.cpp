@@ -1395,11 +1395,19 @@ static void test_write_all_file_keeps_links() {
         CHECK(read_file(other.string()) == (std::vector<uint8_t>{4, 5}));
         CHECK_EQ(fs::hard_link_count(real), uintmax_t(2));
     } else std::puts("NOTE: hard links unavailable here; hard-link check skipped");
-    fs::create_symlink(real, link, ec);
+    // A relative link target is resolved from the link's own folder.
+    fs::create_symlink(real.filename(), link, ec);
     if (!ec) {
         CHECK(ieee_helpers::write_all_file(link, {6}));
         CHECK(fs::is_symlink(fs::symlink_status(link)));
         CHECK(read_file(real.string()) == (std::vector<uint8_t>{6}));
+        // A dangling link is refused, not replaced by a new plain file.
+        const fs::path dangling = f.dir / "dangling.d64";
+        fs::create_symlink("missing.d64", dangling, ec);
+        if (!ec) {
+            CHECK(!ieee_helpers::write_all_file(dangling, {1}));
+            CHECK(fs::is_symlink(fs::symlink_status(dangling)));
+        }
     } else std::puts("NOTE: symlinks unavailable here (Windows needs Developer Mode); symlink check skipped");
     // An ordinary file is still replaced, and no temporary file is left behind.
     const fs::path plain = f.dir / "plain.d64";
@@ -1606,7 +1614,27 @@ static void test_host_load_save_d64() {
     CHECK(pay == std::vector<uint8_t>({ 0xA9, 0x00, 0x60 }));
 }
 
+// The tests write their images and folders under relative names. Run them in a
+// private folder under the system temp directory, removed afterwards, so a run
+// from the source tree or the build folder leaves nothing behind.
+struct ScratchWorkingDirectory {
+    std::filesystem::path previous, dir;
+    ScratchWorkingDirectory() {
+        previous = std::filesystem::current_path();
+        dir = std::filesystem::temp_directory_path() /
+            ("pet-d64-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(dir);
+        std::filesystem::current_path(dir);
+    }
+    ~ScratchWorkingDirectory() {
+        std::error_code ec;
+        std::filesystem::current_path(previous, ec);
+        std::filesystem::remove_all(dir, ec);
+    }
+};
+
 int main(int argc, char** argv) {
+    ScratchWorkingDirectory scratch;
     test_partial_read_hands_the_bus_back();
     test_host_load_save_folder();
     test_host_load_save_d64();

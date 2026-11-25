@@ -24,7 +24,7 @@ std::string PetIEEE::to_pet_upper_a0_padded_16(const std::string& ascii)
 {
 	std::string up = to_upper_ascii(ascii);
 	if (up.size() > 16) up.resize(16);
-	std::string out(16, char(0xA0));
+	std::string out(16, '\xA0');
 	for (size_t i = 0; i < up.size() && i < 16; ++i) {
 		unsigned char c = (unsigned char)up[i];
 		if (c < 0x20) c = 0x20;

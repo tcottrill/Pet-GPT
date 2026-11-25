@@ -120,7 +120,7 @@ wxString QuickStartText() {
     const wxString files = wxString::FromUTF8(data_path("files")), roms = wxString::FromUTF8(data_path("roms")),
                    shots = wxString::FromUTF8(data_path("screenshots"));
     return "LOADING A PROGRAM\n"
-        "File > Load Program / Disk / Tape... (Ctrl+O), or drag a file onto the window. Pet-GPT loads .prg, .p00, .t64, .tap, .d64 and .d71 "
+        "File > Load Program / Disk / Tape... (Ctrl+O), or drag a file onto the window. Pet-GPT loads .prg, .p00 (to .p99), .t64, .tap, .d64 and .d71 "
         "files; the last eight are under File > Recent.\n"
         "A BASIC program starts by itself: Pet-GPT loads it and types RUN for you. A machine-code program names the SYS command that "
         "starts it in the window title.\n\n"

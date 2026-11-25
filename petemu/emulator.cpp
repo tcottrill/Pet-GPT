@@ -351,10 +351,9 @@ bool emu_init(int argc, char** argv)
 			}
 		}
 		else {
-			// Keep D64 disabled; folder backend will serve files by name.
-			// Optional: auto-prime a PRG so LOAD\"\",8 works immediately.
-			// If you prefer manual LOAD\"NAME\",8, simply comment this out.
-			ieee_helpers::LoadPrgIntoIEEE(*g_pet, hostPath);   // requires pet_ieee_helpers.h
+			// No image: the folder backend serves files by name, and the named
+			// program is primed so LOAD"",8 loads it straight away.
+			ieee_helpers::LoadPrgIntoIEEE(*g_pet, hostPath);
 			LOG_INFO("[IEEE] Folder backend active. Use LOAD\"%s\",8  (or LOAD\"$\",8 + LIST)",
 				diskArg.c_str());
 		}
@@ -370,9 +369,6 @@ bool emu_init(int argc, char** argv)
 	}
 
 	set_pet_graphics_mode(false);
-
-	// Tell the IEEE device about host root
-	g_pet->bus().io().setIeeeHostRoot(filesRoot);
 
 	//Setup the audio stream
 	int frames_per_update = 44100 / 60;
@@ -550,11 +546,13 @@ bool pet_load_software(const char* utf8_path) {
 	const std::string name = std::filesystem::u8path(p).filename().u8string();
 	std::string ext; { size_t d = name.find_last_of('.'); if (d != std::string::npos) ext = name.substr(d + 1); }
 	std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return (char)tolower(c); });
+	// PC64 program containers are .p00, or .p01 to .p99 when names collided.
+	const bool pc64 = ext.size() == 3 && ext[0] == 'p' && isdigit((unsigned char)ext[1]) && isdigit((unsigned char)ext[2]);
 	// Anything else would be injected as a PRG and could reset the machine with garbage.
-	if (!(ext.empty() || ext == "prg" || ext == "p00" || ext == "t64" || ext == "tap" || ext == "d64" || ext == "d71")) {
+	if (!(ext.empty() || ext == "prg" || pc64 || ext == "t64" || ext == "tap" || ext == "d64" || ext == "d71")) {
 		LOG_ERROR("[PET] unsupported file type '.%s': %s", ext.c_str(), p.c_str());
 		host_message("Unsupported file type", ("\"" + name + "\" has the extension \"." + ext + "\", which Pet-GPT cannot load.\n\n"
-			"Supported: .prg, .p00, .t64, .tap, .d64, .d71, or a file with no extension.").c_str(), true);
+			"Supported: .prg, .p00 (to .p99), .t64, .tap, .d64, .d71, or a file with no extension.").c_str(), true);
 		return false;
 	}
 	if (ext == "tap") {
@@ -588,7 +586,7 @@ bool pet_load_software(const char* utf8_path) {
 	// PetMem::writeByte() stores into, so the bytes are visible immediately.
 	std::vector<uint8_t> file;
 	const bool readOk = ieee_helpers::read_all_file(std::filesystem::u8path(p), file);
-	if (readOk && ext == "p00") {
+	if (readOk && pc64) {
 		// PC64 container: "C64File\0", 16-byte name, NUL, record size; then a normal PRG.
 		static const char magic[8] = { 'C', '6', '4', 'F', 'i', 'l', 'e', 0 };
 		if (file.size() < 26 || std::memcmp(file.data(), magic, 8) != 0) {

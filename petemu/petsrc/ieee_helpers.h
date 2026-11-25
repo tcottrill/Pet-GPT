@@ -224,7 +224,7 @@ namespace ieee_helpers {
     }
 
     // Dump the 16-byte PETSCII dir name (raw hex + naive ASCII view)
-    static void log_dirent_name_hex_ascii(const uint8_t name16[16]) {
+    inline void log_dirent_name_hex_ascii(const uint8_t name16[16]) {
         std::string hex = dump_hex(name16, 16);
         std::string asc; asc.reserve(16);
         for (int i = 0; i < 16; ++i) asc.push_back(dbg_printable(name16[i]));
@@ -286,7 +286,7 @@ namespace ieee_helpers {
     // count_bits_24
     // Fast popcount for the 24 BAM bits stored in 3 bytes.
     // -----------------------------------------------------------------------------
-    static int count_bits_24(const uint8_t bits[3])
+    inline int count_bits_24(const uint8_t bits[3])
     {
         auto pop8 = [](uint8_t v) -> int {
             v = v - ((v >> 1) & 0x55);
@@ -296,13 +296,13 @@ namespace ieee_helpers {
         return pop8(bits[0]) + pop8(bits[1]) + pop8(bits[2]);
     }
 
-    static inline bool test_bit_24(const uint8_t bits[3], int bitIndex /*0..23*/)
+    inline bool test_bit_24(const uint8_t bits[3], int bitIndex /*0..23*/)
     {
         const int b = bitIndex >> 3;
         const int m = bitIndex & 7;
         return (bits[b] >> m) & 1;
     }
-    static inline void set_bit_24(uint8_t bits[3], int bitIndex, bool val)
+    inline void set_bit_24(uint8_t bits[3], int bitIndex, bool val)
     {
         const int b = bitIndex >> 3;
         const int m = bitIndex & 7;
@@ -312,7 +312,7 @@ namespace ieee_helpers {
 
     // Remove quotes, drive prefix, and mode tokens (",S,R", ",S,W", etc.).
     // Layer: Layer 4 name normalization for SEQ OPEN
-    static std::string normalize_open_name_for_seq(const std::string& raw)
+    inline std::string normalize_open_name_for_seq(const std::string& raw)
     {
         std::string s = raw;
 
@@ -366,7 +366,7 @@ namespace ieee_helpers {
 
 
     // Simple wildcard matcher supporting '*' (any) and '?' (single)
-    static bool wild_match(const std::string& pat, const std::string& name)
+    inline bool wild_match(const std::string& pat, const std::string& name)
     {
         size_t pi = 0, ni = 0, star = std::string::npos, mark = 0;
         while (ni < name.size()) {
@@ -394,7 +394,7 @@ namespace ieee_helpers {
     // - uppercases
     // - trims spaces and trailing CR/LF
     // - leaves '*' and '?' intact (wildcards)
-    static std::string normalize_cmd_name(std::string s)
+    inline std::string normalize_cmd_name(std::string s)
     {
         // Surrounding quotes
         if (!s.empty() && s.front() == '\"') s.erase(0, 1);

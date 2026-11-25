@@ -14,7 +14,9 @@
 #include <filesystem>
 #include <vector>
 
+#ifdef _MSC_VER
 #pragma warning( disable : 4996 4244)
+#endif
 
 static bool readFile(const std::string& path, std::vector<uint8_t>& out)
 {

@@ -50,7 +50,7 @@ void Pet2001Video::setCharsets(const uint8_t* charset1_128x8, const uint8_t* cha
 
 void Pet2001Video::reset()
 {
-    std::fill(vidram.begin(), vidram.end(), 0x20); // space
+    std::fill(vidram.begin(), vidram.end(), uint8_t(0x20)); // space
     std::fill(fb.begin(), fb.end(), RGBA_BLACK);
     blank = false;
     blankRequested = false;

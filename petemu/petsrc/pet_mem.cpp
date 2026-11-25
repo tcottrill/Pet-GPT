@@ -62,11 +62,6 @@ void PetMem::reset()
 
 uint8_t PetMem::readByte(uint16_t addr)
 {
-	if (addr == 0x0277)
-	{
-		LOG_DEBUG("READ KERNAL KEYBUF $0277 = %02X", ram[addr]);
-	}
-
 	if (addr == 0xE810 || addr == 0xE811)
 	{
 		const uint8_t lo8 = static_cast<uint8_t>(addr & 0xFF);

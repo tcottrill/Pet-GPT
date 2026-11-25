@@ -64,6 +64,8 @@ int main() {
     pet_keyboard_deserialize("117:65");
     check("Saved F6 binding ignored",pet_keyboard_bindings()[VK_F6]==PET_KEY_DEFAULT);
     check("F5 and F7 remain editable",pet_keyboard_editable(VK_F5) && pet_keyboard_editable(VK_F7));
+    check("Escape is a remappable PET key",pet_keyboard_editable(VK_ESCAPE) && pet_keyboard_set_binding(VK_ESCAPE,'Q'));
+    pet_keyboard_reset_bindings();
     pet_keyboard_reset_bindings();
     check("Modifier key reserved",!pet_keyboard_set_binding(VK_LCONTROL,'A'));
     check("Invalid assignment rejected",!pet_keyboard_set_binding('A',99999));

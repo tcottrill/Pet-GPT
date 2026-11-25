@@ -1,4 +1,67 @@
 Pet-GPT - Commodore PET/CBM Emulator
+Changes since 2.7 (not yet released)
+====================================
+
+Behaviour change
+- Escape no longer quits Pet-GPT. In fullscreen it leaves fullscreen; in a
+  window it is the PET's ESC key (8032) and can be remapped like other keys.
+  Use File > Exit or the window's close button. Launchers that relied on
+  Escape to close the emulator need another way out.
+
+Getting started
+- First start without ROMs opens a ROM setup window: it shows the ROM folder,
+  can open it, and Download ROMs fetches the sets from zimmers.net with a
+  progress window (Cancel stops it). Try again reloads.
+- If the configured model's ROMs are missing, Pet-GPT starts the first model
+  it has and says so once; later starts note it in the title bar. Models
+  without ROMs are greyed out in Machine > Model.
+- Help > Quick Start explains loading, disks, tapes and the PET keys.
+- File > Recent lists the last eight files; File > Open Files / ROM /
+  Screenshots Folder opens those folders.
+
+Loading software
+- BASIC programs start by themselves (Pet-GPT types RUN; [machine] autorun =
+  false turns this off). For machine code the title bar shows the SYS address.
+- .p00 to .p99 (PC64) files load. Other unknown file types are refused with a
+  message instead of being loaded as garbage.
+- Dropping a file no longer blocks the window it was dragged from; extra
+  dropped files are reported as ignored.
+
+Disk drive (device 8)
+- Data files work on the files folder: OPEN for write, append and read
+  (NAME.seq / NAME.usr / NAME.prg), with scratch, rename and copy.
+- Like a real drive, SAVE or OPEN,W without "@" does not replace an existing
+  file (63,FILE EXISTS). BASIC prints READY. either way, so the title bar now
+  says when a SAVE was not written and how to replace the file
+  (SAVE"@0:NAME",8).
+- The original PET 2001 (BASIC 1) can LOAD, VERIFY and SAVE on device 8. Its
+  ROM's disk code never worked on the real machine; Pet-GPT does the transfer
+  for it.
+- BASIC 2 programs that read a file one record at a time (INPUT# per record,
+  GET# loops) no longer hang or lose bytes.
+- A missing file is ?FILE NOT FOUND, not an empty program.
+- Disk images are saved safely (a new file is written, then swapped in); a
+  symlinked image stays a link. A failed mount keeps the current disk.
+- 40-track images read tracks 36-40, also with block commands (U1). They stay
+  read-only.
+- The folder listing and LOAD agree: programs, data files and files with any
+  other name ("v1.2", "game.bin") are listed; disk and tape images, archives
+  and documents are not.
+
+Linux
+- Flatpak package (Freedesktop 26.08 runtime), desktop file, AppStream data,
+  file types for .prg/.p00/.t64/.tap/.d64/.d71, and folders under ~/Pet-GPT.
+- Fit to Screen on Wayland, AltGr characters, and the fullscreen cursor hides
+  after 3 seconds.
+
+Other
+- Gamepads plugged in after launch are picked up (Windows).
+- Audio no longer repeats a frame after a hitch.
+- Pause, screenshots (F6) and stable start-monitor selection.
+- Continuous integration builds and tests the core and the app on Windows and
+  Linux; the emulator core builds with full compiler warnings.
+
+
 Version 2.7 - The One with the configurable keyboard!
 =====================================================
 

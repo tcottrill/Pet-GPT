@@ -1024,7 +1024,7 @@ void PetIEEE::dataIn(uint8_t d8)
 				da_active_[sa] = false;               // release '#' buffer channel
 				// remain in STATE_LISTEN until UNLISTEN arrives
 			}
-			else if (d8 >= 0xF0 && d8 <= 0xFF) {
+			else if (d8 >= 0xF0) {
 				// OPEN/CLOSE text transfer (CLOSE if empty name)
 				last_listen_sa = (uint8_t)(d8 & 0x0F);
 				filename.clear();

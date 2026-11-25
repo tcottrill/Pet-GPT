@@ -1469,7 +1469,9 @@ void VIA6522::updateIFR()
 // -----------------------------------------------------------------------------
 void VIA6522::updatePBOutput()
 {
-	uint8_t pins = (orb & ddrb) | (portB_in & ~ddrb);
+	// Nothing outside the VIA watches port B pins yet; the computed level is
+	// kept for the trace line below.
+	[[maybe_unused]] const uint8_t pins = (orb & ddrb) | (portB_in & ~ddrb);
 
 	//LOG_DEBUG("VIA6522: PB pins=%02X (ORB=%02X DDRB=%02X IN=%02X)",	pins, orb, ddrb, portB_in);
 }
@@ -1597,7 +1599,7 @@ uint32_t VIA6522::cb2_get_tick_counter() const
 //
 // Fixed-output modes (6,7) are handled directly in handleCB2Logic.
 // -----------------------------------------------------------------------------
-void VIA6522::updateCB2State(uint8_t mode)
+void VIA6522::updateCB2State([[maybe_unused]] uint8_t mode)   // modes 4 and 5 behave alike here
 {
 	if (cb2_pulse_count > 0)
 	{
