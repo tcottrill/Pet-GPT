@@ -1,5 +1,6 @@
 #include "pet2001ieee.h"
 #include "ieee_helpers.h"
+#include <cctype>
 
 using namespace ieee_helpers;
 
@@ -8,11 +9,36 @@ using namespace ieee_helpers;
 //
 // One list serves "$", LOAD and OPEN so they always agree. Program files
 // (.prg, or no extension) are PRG; data files written through the drive are
-// NAME.seq (SEQ) and NAME.usr (USR). Anything else in the folder (.d64, .tap,
-// notes...) is not part of the drive. Names show upper-case, cut to 16
-// characters like a real disk; a 16-character name from the listing loads the
-// file even when the host name is longer.
+// NAME.seq (SEQ) and NAME.usr (USR). Disk and tape images, archives, text,
+// pictures and the like (see host_only_extension) are not part of the drive.
+// Any other name is a PRG listed under its whole name, dot included, so
+// "v1.2" or "invaders.bin" still load as they always did. Names show
+// upper-case, cut to 16 characters like a real disk; a 16-character name from
+// the listing loads the file even when the host name is longer.
 // -----------------------------------------------------------------------------
+namespace {
+// Extensions (upper case, with the dot) of files that live in the programs
+// folder for the host's sake and are never PRG files: images and tapes the
+// frontend mounts itself, PC64 containers (their header is not a load
+// address), archives, documents, pictures, and our own temporary files.
+bool host_only_extension(const std::string& extU)
+{
+	static const char* const kHostOnly[] = {
+		".D64", ".D71", ".D80", ".D81", ".D82", ".G64", ".G71", ".X64", ".T64", ".TAP",
+		".ZIP", ".GZ", ".7Z", ".RAR", ".TAR",
+		".TXT", ".MD", ".NFO", ".DIZ", ".PDF", ".HTM", ".HTML", ".DOC", ".DOCX", ".RTF",
+		".INI", ".CFG", ".LOG", ".JSON", ".XML",
+		".PNG", ".JPG", ".JPEG", ".GIF", ".BMP", ".ICO",
+		".TMP", ".TMP~", ".BAK", ".EXE", ".DLL", ".SO", ".LNK", ".URL", ".DS_STORE",
+	};
+	for (const char* x : kHostOnly)
+		if (extU == x) return true;
+	// PC64 containers: .P00 .. .P99, .S00 .., .U00 .., .R00 ..
+	return extU.size() == 4 && (extU[1] == 'P' || extU[1] == 'S' || extU[1] == 'U' || extU[1] == 'R') &&
+		std::isdigit((unsigned char)extU[2]) && std::isdigit((unsigned char)extU[3]);
+}
+} // namespace
+
 std::vector<PetIEEE::HostEntry> PetIEEE::folder_list() const
 {
 	std::vector<HostEntry> list;
@@ -31,12 +57,14 @@ std::vector<PetIEEE::HostEntry> PetIEEE::folder_list() const
 
 		HostEntry e;
 		e.host = fn;
+		bool typedByExtension = true;
 		if (ext == ".PRG" || ext.empty()) e.type = 2;
 		else if (ext == ".SEQ") e.type = 1;
 		else if (ext == ".USR") e.type = 3;
-		else continue;
+		else if (host_only_extension(ext)) continue;
+		else { e.type = 2; typedByExtension = false; }   // "v1.2", "game.bin": PRG under its whole name
 
-		e.stemUpper = to_upper_ascii(it->path().stem().u8string());
+		e.stemUpper = to_upper_ascii(typedByExtension ? it->path().stem().u8string() : fn);
 		if (e.stemUpper.empty()) continue;
 		e.display = e.stemUpper;
 		if (e.display.size() > 16) e.display.resize(16);

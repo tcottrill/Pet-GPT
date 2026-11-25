@@ -1,6 +1,7 @@
 // Drive behaviour as BASIC sees it: boots a real ROM set, types commands and
 // reads the screen. Needs ROMs, so CTest only runs it when PET_TEST_ROM_DIR
-// is set. Usage: ieee_rom_tests <rom root, holding pet2001n/ and pet4000-9/>
+// is set. Usage: ieee_rom_tests <rom root, holding pet2001n/ and pet4000-9/;
+// pet4000-12/, cbm8032/ and pet2001/ are tested too when present>
 #include "pet_machine.h"
 #include "pet_roms.h"
 #include <cstdio>
@@ -16,14 +17,15 @@ void setLevel(Level) {}
 void setConsoleOutputEnabled(bool) {}
 }
 static int checks=0, failures=0;
+static int columns=40;   // 80 while the 8032 runs
 static void screen(PetMachine& m) {
-    for(int y=0;y<25;++y) { for(int x=0;x<40;++x) {
-        int c=m.bus().readByte(0x8000+y*40+x)&127;
+    for(int y=0;y<25;++y) { for(int x=0;x<columns;++x) {
+        int c=m.bus().readByte(uint16_t(0x8000+y*columns+x))&127;
         putchar(c<32 ? c+64 : c);
     } putchar('\n'); }
 }
 static bool shows(PetMachine& m, const char* text) {
-    for(int a=0;a<1000-int(strlen(text));++a) {
+    for(int a=0;a<25*columns-int(strlen(text));++a) {
         bool match=true;
         for(size_t n=0;n<strlen(text);++n)
             if((m.bus().readByte(uint16_t(0x8000+a+n))&127)!=(uint8_t(text[n])&63)) match=false;
@@ -42,15 +44,29 @@ static void command(PetMachine& m, const char* text) {
     }
     m.runCycles(4000000);
 }
-static void run_model(const std::string& romRoot, bool basic4, const std::filesystem::path& files) {
-    printf("-- %s\n", basic4 ? "BASIC 4" : "BASIC 2");
+// model: 2 = 2001-N (BASIC 2), 4 = 4000 9-inch, 12 = 4032 12-inch CRTC, 8 = 8032.
+// Every KERNAL has its own IEEE acceptor code, so each one reads files here.
+static void run_model(const std::string& romRoot, int model, const std::filesystem::path& files) {
+    const bool basic4 = model != 2;
+    const char* label = model == 2 ? "BASIC 2" : model == 4 ? "BASIC 4" : model == 12 ? "BASIC 4 (4032, CRTC)" : "BASIC 4 (8032)";
+    const std::string dir = romRoot + (model == 2 ? "/pet2001n/" : model == 4 ? "/pet4000-9/" : model == 12 ? "/pet4000-12/" : "/cbm8032/");
+    // 2001-N and 4000-9 are required; the CRTC sets run when present.
+    if ((model == 8 || model == 12) && !pet_romset_present(model, dir)) { printf("-- %s: ROM set absent under %s, skipped\n", label, dir.c_str()); return; }
+    printf("-- %s\n", label);
     PetMachine m;
-    const bool loaded = basic4 ? load_pet4_romset(m, romRoot + "/pet4000-9/", false)
-                               : load_pet2_romset(m, romRoot + "/pet2001n/", true);
-    ++checks; if (!loaded) { ++failures; printf("FAIL: ROM set missing under %s\n", romRoot.c_str()); return; }
+    const bool loaded = model == 2 ? load_pet2_romset(m, dir, true)
+                      : model == 8 ? load_pet8032_romset(m, dir)
+                                   : load_pet4_romset(m, dir, model == 12);
+    ++checks; if (!loaded) { ++failures; printf("FAIL: ROM set missing under %s\n", dir.c_str()); return; }
+    // Machine geometry as emulator.cpp's load_basic_set() sets it.
+    columns = model == 8 ? 80 : 40;
+    m.bus().setScreenWindow(model == 8);
+    m.video().setColumns(columns);
+    m.io().configureCrtc(model == 8 || model == 12, model == 8 ? 2 : 1);
     m.bus().setRamSize(32768);
     m.bus().io().setIeeeHostRoot(files.u8string());
     m.reset(); m.runCycles(3000000);
+    std::filesystem::remove(files / "T1.prg");   // left by the previous model
 
     // "$0" is the dual-drive form of the directory; it listed no files.
     command(m, "\x93LOAD\"$0\",8\r"); command(m, "LIST\r");
@@ -273,8 +289,8 @@ int main(int argc, char** argv) {
         out.write(reinterpret_cast<const char*>(prg), sizeof(prg));
     }
     std::string root = argv[1];
-    run_model(root, false, files);
-    run_model(root, true, files);
+    for (int model : {2, 4, 12, 8}) run_model(root, model, files);
+    columns = 40;
     run_basic1(root, files);
     fs::remove_all(files);
     printf("IEEE ROM tests: %d checks, %d failures\n", checks, failures);

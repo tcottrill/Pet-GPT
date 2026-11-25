@@ -288,15 +288,24 @@ int main(int argc, char** argv) {
                 pet_rom_set_available(12) && pet_rom_set_available(8));
             check("unknown model is not available", !pet_rom_set_available(3));
             check("Model8 enabled when its ROMs exist", frame->GetMenuBar()->IsEnabled(Model8));
+            // Availability is cached: commands do not touch the disk, opening a menu
+            // checks again.
+            auto openMenu = [&] {
+                wxMenuEvent open(wxEVT_MENU_OPEN, 0, frame->GetMenuBar()->GetMenu(1));
+                open.SetEventObject(frame);
+                frame->GetEventHandler()->ProcessEvent(open);
+            };
             if (pet_get_basic() != 8) {
                 std::filesystem::rename(set, hidden, ec);
                 if (!ec) {
-                    command(Reset); // any command refreshes the menus
+                    command(Reset);
+                    check("a command does not re-check ROM files", frame->GetMenuBar()->IsEnabled(Model8));
+                    openMenu();
                     check("missing ROM set reported unavailable", !pet_rom_set_available(8));
                     check("model without ROMs is greyed out", !frame->GetMenuBar()->IsEnabled(Model8));
                     check("model with ROMs stays enabled", frame->GetMenuBar()->IsEnabled(Model2));
                     std::filesystem::rename(hidden, set, ec);
-                    command(Reset);
+                    openMenu();
                     check("restored ROM set enabled again", pet_rom_set_available(8) && frame->GetMenuBar()->IsEnabled(Model8));
                 } else std::puts("NOTE: could not move the cbm8032 ROM folder; greyed-model check skipped");
             }

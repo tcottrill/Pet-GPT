@@ -16,6 +16,7 @@
 #include <chrono>
 
 #include "pet2001ieee.h"
+#include "ieee_helpers.h"
 #include "sys_log.h"
 
 // --- no-op Log stubs so the IEEE sources link without the real logger ---
@@ -1185,6 +1186,12 @@ static void test_40_track_geometry() {
     CHECK(PetIEEE_TestAccess::read_sector(e, 40, 16, buf));
     CHECK(!PetIEEE_TestAccess::read_sector(e, 40, 17, buf));   // 17 sectors: 0..16
     CHECK(!PetIEEE_TestAccess::read_sector(e, 41, 0, buf));
+    // Block commands reach the extra tracks too (U1 used the BAM's 35).
+    CHECK(PetIEEE_TestAccess::cmd(e, "U1:5,0,40,16"));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(PetIEEE_TestAccess::stream_data(e, 5).size() == 256 && PetIEEE_TestAccess::stream_data(e, 5)[4] == 0x77);
+    CHECK(!PetIEEE_TestAccess::cmd(e, "U1:5,0,41,0"));
+    CHECK_EQ(status_code(e), 66);
     // Still read-only.
     CHECK(!PetIEEE_TestAccess::save_prg(e, "NEW", {1,4,5}));
     CHECK(PetIEEE_TestAccess::image(e) == img);
@@ -1199,10 +1206,17 @@ static void test_overwrite_protection() {
     const auto path = (f.dir / "ow.d64").string();
     CHECK(write_file(path, make_blank_d64()));
     PetIEEE e; CHECK(e.setD64Image(path));
+    std::vector<std::string> notices;
+    e.setNoticeHandler([&](const std::string& text) { notices.push_back(text); });
     PetIEEE_TestAccess::bus_save(e, "PROG", {1,8,0xAA});
     CHECK_EQ(status_code(e), 0);
+    CHECK(notices.empty());                                        // a good SAVE says nothing
     PetIEEE_TestAccess::bus_save(e, "PROG", {1,8,0xBB});          // no "@"
     CHECK_EQ(status_code(e), 63);
+    // BASIC prints READY. regardless, so the host is told.
+    CHECK_EQ(notices.size(), size_t(1));
+    CHECK(!notices.empty() && notices.back().find("63,FILE EXISTS") != std::string::npos &&
+          notices.back().find("SAVE\"@0:PROG\",8") != std::string::npos);
     std::vector<uint8_t> pay; uint16_t addr = 0;
     CHECK(PetIEEE_TestAccess::load_prg(e, "PROG", pay, addr));
     CHECK(pay == (std::vector<uint8_t>{0xAA}));                    // old file kept
@@ -1251,10 +1265,13 @@ static void test_overwrite_protection() {
     // ---- folder backend ----
     const auto root = f.dir / "root";
     PetIEEE h; h.setHostRoot(root.string());
+    notices.clear();
+    h.setNoticeHandler([&](const std::string& text) { notices.push_back(text); });
     PetIEEE_TestAccess::bus_save(h, "PROG", {1,8,0xAA});
     CHECK(slurp(root / "PROG.prg") == std::string("\x01\x08\xAA", 3));
     PetIEEE_TestAccess::bus_save(h, "PROG", {1,8,0xBB});
     CHECK_EQ(status_code(h), 63);
+    CHECK_EQ(notices.size(), size_t(1));
     CHECK(slurp(root / "PROG.prg") == std::string("\x01\x08\xAA", 3));
     PetIEEE_TestAccess::bus_save(h, "@0:PROG", {1,8,0xCC});
     CHECK_EQ(status_code(h), 0);
@@ -1343,6 +1360,53 @@ static void test_folder_listing_matches_load() {
     CHECK(pay == (std::vector<uint8_t>{0x4C}));
     CHECK(PetIEEE_TestAccess::host_load(e, "M*", pay, addr));
     CHECK(pay == (std::vector<uint8_t>{0x4D}));
+
+    // A dot that is not a known type is part of the name: such files are PRGs
+    // listed and loaded under their whole name, as before the typed listing.
+    // PC64 containers (.p00) stay out: their header is not a load address.
+    put("v1.2",           {1,8,0x12});
+    put("invaders.bin",   {1,8,0x1B});
+    put("game.p00",       {'C','6','4','F'});
+    std::vector<uint8_t> dir2; CHECK(PetIEEE_TestAccess::build_dir_folder(e, dir2, ""));
+    const std::string txt2((const char*)dir2.data(), dir2.size());
+    CHECK(txt2.find("\"V1.2\"") != std::string::npos);
+    CHECK(txt2.find("\"INVADERS.BIN\"") != std::string::npos);
+    CHECK(txt2.find("GAME") == std::string::npos);
+    CHECK(PetIEEE_TestAccess::host_load(e, "V1.2", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0x12}));
+    CHECK(PetIEEE_TestAccess::host_load(e, "INVADERS.BIN", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0x1B}));
+    CHECK(PetIEEE_TestAccess::host_load(e, "INV*", pay, addr));
+    CHECK(pay == (std::vector<uint8_t>{0x1B}));
+}
+
+// write_all_file replaces atomically but keeps the file's identity: through a
+// symlink the target is written (the link stays a link), and a file with a
+// second hard link is updated so both names see the new bytes.
+static void test_write_all_file_keeps_links() {
+    ReviewFixture f;
+    namespace fs = std::filesystem;
+    const fs::path real = f.dir / "real.d64", other = f.dir / "other.d64", link = f.dir / "link.d64";
+    CHECK(write_file(real.string(), {1, 2, 3}));
+    std::error_code ec;
+    fs::create_hard_link(real, other, ec);
+    if (!ec) {
+        CHECK(ieee_helpers::write_all_file(real, {4, 5}));
+        CHECK(read_file(other.string()) == (std::vector<uint8_t>{4, 5}));
+        CHECK_EQ(fs::hard_link_count(real), uintmax_t(2));
+    } else std::puts("NOTE: hard links unavailable here; hard-link check skipped");
+    fs::create_symlink(real, link, ec);
+    if (!ec) {
+        CHECK(ieee_helpers::write_all_file(link, {6}));
+        CHECK(fs::is_symlink(fs::symlink_status(link)));
+        CHECK(read_file(real.string()) == (std::vector<uint8_t>{6}));
+    } else std::puts("NOTE: symlinks unavailable here (Windows needs Developer Mode); symlink check skipped");
+    // An ordinary file is still replaced, and no temporary file is left behind.
+    const fs::path plain = f.dir / "plain.d64";
+    CHECK(write_file(plain.string(), {7}));
+    CHECK(ieee_helpers::write_all_file(plain, {8, 9}));
+    CHECK(read_file(plain.string()) == (std::vector<uint8_t>{8, 9}));
+    CHECK(!fs::exists(f.dir / "plain.d64.tmp~"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1554,6 +1618,7 @@ int main(int argc, char** argv) {
     test_overwrite_protection();
     test_stale_channels();
     test_folder_listing_matches_load();
+    test_write_all_file_keeps_links();
     if (argc > 1 && std::string(argv[1]) == "--cycles") {
         test_cyclic_disk_chains_are_rejected();
         return g_fail ? 1 : 0;

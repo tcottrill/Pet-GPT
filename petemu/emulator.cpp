@@ -332,6 +332,9 @@ bool emu_init(int argc, char** argv)
 	// --- Minimal IEEE virtual drive setup ---
 	const std::string filesRoot = data_path("files");
 	g_pet->bus().io().setIeeeHostRoot(filesRoot);   // always mount the folder
+	// A refused SAVE (63,FILE EXISTS without "@", write protect...) shows READY.
+	// on the PET; say so in the window instead of losing the program silently.
+	g_pet->bus().ieee().setNoticeHandler([](const std::string& text) { host_status(text.c_str()); });
 
 	// Parse: -disk "filename.xxx" (resolved relative to ./files)
 	const std::string diskArg = options.disk;
@@ -395,13 +398,22 @@ bool emu_init(int argc, char** argv)
 	g_pet->io().setSnesEnabled(g_snes_enabled);
 	LOG_INFO("SNES adapter: %s (invert=%d), joystick driver=%s",
 		g_snes_enabled ? "enabled" : "disabled", snesInvert ? 1 : 0, joystick_driver_name());
+	// The box appears once per missing model ([machine] rom_warned remembers
+	// it); later launches only note it in the window title, so a missing set
+	// never blocks every start-up.
+	const int warned = get_config_int("machine", "rom_warned", 0);
 	if (started != want) {
 		static const char* names[] = { "", "PET 2001 (BASIC 1)", "PET 2001-N (BASIC 2)", "", "PET 4000 (BASIC 4)", "", "", "", "CBM 8032", "", "", "", "PET 4032 (12-inch CRTC)" };
 		LOG_WARN("[PET] model %d ROMs missing; started model %d instead", want, started);
-		const std::string text = std::string("The ROMs for the ") + names[want] + " are missing, so Pet-GPT started the " + names[started] +
-			" instead. Add the missing ROM set to the roms folder to use that model.";
-		host_message("ROM set not found", text.c_str(), false);
+		if (warned != want) {
+			const std::string text = std::string("The ROMs for the ") + names[want] + " are missing, so Pet-GPT started the " + names[started] +
+				" instead. Add the missing ROM set to the roms folder to use that model, or choose another model in the Machine menu.";
+			host_message("ROM set not found", text.c_str(), false);
+			set_config_int("machine", "rom_warned", want);
+		}
+		else host_status((std::string(names[want]) + " ROMs missing: running the " + names[started]).c_str());
 	}
+	else if (warned) set_config_int("machine", "rom_warned", 0);   // set found again: warn afresh if it goes missing
 	return true;
 }
 
@@ -448,7 +460,7 @@ bool pet_set_basic(int which) {
 }
 
 int pet_get_basic() { return g_basic_set; }
-int pet_peek(int addr) { return g_pet ? g_pet->bus().readByte((uint16_t)addr) : -1; }
+int pet_peek(int addr) { return g_pet ? g_pet->bus().peekByte((uint16_t)addr) : -1; }
 
 void pet_set_ram(int kb) {
 	if (g_basic_set == 8) kb = 32;

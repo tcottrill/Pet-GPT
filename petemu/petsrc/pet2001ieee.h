@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <functional>
 #include "sys_log.h"
 #include <stdarg.h>
 
@@ -177,7 +178,16 @@ public:
 	// 34,SYNTAX ERROR. Sets the channel-15 status. Returns true when written.
 	bool hostSaveFile(const std::string& rawName, const std::vector<uint8_t>& prgWithHeader);
 
+	// Called with a one-line message when a program SAVE is refused or fails
+	// (63,FILE EXISTS without "@", write protect, ...). BASIC's SAVE never reads
+	// the error channel, so without this the user sees READY. and assumes the
+	// program was saved. The frontend shows it; the drive stays DOS-accurate.
+	void setNoticeHandler(std::function<void(const std::string&)> handler) { notice_ = std::move(handler); }
+
 private:
+	std::function<void(const std::string&)> notice_;
+	void report_save_failure(const std::string& name);
+
 	// Internal state machine (Layer 3/4 control)
 	
 
@@ -369,7 +379,8 @@ private:
 
 	// D64/D71 low-level
 	int  d64_sectors_per_track(int track) const;                      // per mounted geometry (0 = no such track)
-	int  d64_num_tracks() const { return d64_tracks_; }               // 35 (.d64) or 70 (.d71)
+	int  d64_num_tracks() const { return d64_tracks_; }               // 35 (.d64) or 70 (.d71): BAM / allocator tracks
+	int  d64_image_num_tracks() const { return d64_image_tracks_; }   // physical tracks: 35, 40 or 70 (sector access)
 	bool d64_double_sided() const { return d64_tracks_ > 35; }
 	// 1571 split-BAM constants: side-1 free counts live in 18/0, bitmaps in 53/0.
 	static constexpr int D71_BAM2_TRACK = 53;

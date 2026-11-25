@@ -75,14 +75,52 @@ namespace ieee_helpers {
         return !out.empty();
     }
 
-    // Atomic replace: write a temporary file beside the target, then rename it
-    // over the original (std::filesystem::rename replaces an existing file on
-    // Windows and POSIX). A failed write or rename removes the temporary file
-    // and leaves the original untouched.
+    // Plain truncate-and-write of the file itself (keeps its identity: links,
+    // owner, permissions), but not atomic.
+    inline bool write_file_in_place(const std::filesystem::path& p,
+        const std::vector<uint8_t>& bytes)
+    {
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+        f.flush();
+        return static_cast<bool>(f);
+    }
+
+    // Atomic replace where it is safe: write a temporary file beside the real
+    // file, then rename it over the original (std::filesystem::rename replaces
+    // an existing file on Windows and POSIX). A failed write or rename removes
+    // the temporary file and leaves the original untouched.
+    //  - A symlink is followed, so the link stays a link and its target is
+    //    what gets the new bytes.
+    //  - The original's permission bits are carried over to the new file.
+    //  - A file with more than one hard link is written in place instead:
+    //    renaming would detach the other names from the new contents.
+    //  - In a folder where the temporary file cannot be created the write fails
+    //    and the original stays as it was (an in-place write there could leave
+    //    a half-written image if interrupted).
     inline bool write_all_file(const std::filesystem::path& p,
         const std::vector<uint8_t>& bytes)
     {
-        std::filesystem::path tmp = p;
+        namespace fs = std::filesystem;
+        fs::path target = p;
+        std::error_code ec;
+        if (fs::is_symlink(fs::symlink_status(p, ec))) {
+            const fs::path real = fs::canonical(p, ec);   // fails for a dangling link
+            if (ec) return false;
+            target = real;
+        }
+        std::error_code se;
+        const fs::file_status st = fs::status(target, se);
+        const bool exists = !se && fs::exists(st);
+        if (exists) {
+            std::error_code hl;
+            const auto links = fs::hard_link_count(target, hl);
+            if (!hl && links > 1) return write_file_in_place(target, bytes);
+        }
+
+        fs::path tmp = target;
         tmp += ".tmp~";
         {
             std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
@@ -93,15 +131,18 @@ namespace ieee_helpers {
             if (!f) {
                 f.close();
                 std::error_code rm;
-                std::filesystem::remove(tmp, rm);
+                fs::remove(tmp, rm);
                 return false;
             }
         }
-        std::error_code ec;
-        std::filesystem::rename(tmp, p, ec);
+        if (exists) {
+            std::error_code pe;
+            fs::permissions(tmp, st.permissions(), fs::perm_options::replace, pe);
+        }
+        fs::rename(tmp, target, ec);
         if (ec) {
             std::error_code rm;
-            std::filesystem::remove(tmp, rm);
+            fs::remove(tmp, rm);
             return false;
         }
         return true;

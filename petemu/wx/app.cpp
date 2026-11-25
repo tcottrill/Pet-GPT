@@ -13,6 +13,9 @@
 #include <wx/wfstream.h>
 #include <wx/filefn.h>
 #include <wx/utils.h>
+#include <wx/process.h>
+#include <wx/progdlg.h>
+#include <wx/stream.h>
 #include "emulator.h"
 #include "iniFile.h"
 #include "system/path_helper.h"
@@ -161,14 +164,35 @@ public:
 
 
 const char* const romSource = "https://www.zimmers.net/anonftp/pub/cbm/firmware/computers/pet/"; // what download-roms.ps1 fetches from
+// Next to the executable (build tree, Windows install, portable zip), in a
+// tools sub-folder, or in ../share/pet-gpt (the Linux install layout).
 wxString FindRomScript() {
     const wxString dir = wxFileName(wxStandardPaths::Get().GetExecutablePath()).GetPath();
-    for (const wxString& sub : {wxString(), wxString("tools")}) {
-        const wxString path = wxFileName(sub.empty() ? dir : wxFileName(dir, sub).GetFullPath(), "download-roms.ps1").GetFullPath();
-        if (wxFileExists(path)) return path;
+    const wxString sep = wxFileName::GetPathSeparator();
+    for (const wxString& folder : {dir, dir + sep + "tools", dir + sep + ".." + sep + "share" + sep + "pet-gpt"}) {
+        wxFileName path(folder, "download-roms.ps1"); path.Normalize(wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE);
+        if (path.FileExists()) return path.GetFullPath();
     }
     return {};
 }
+
+// The downloader's process: output is read through pipes (there is no console
+// window on Linux, and none is wanted on Windows either), and OnTerminate
+// records the exit code. If the dialog gives up on a process that has not
+// ended, Abandon() hands ownership to the process itself.
+class RomDownloadProcess final : public wxProcess {
+public:
+    RomDownloadProcess() : wxProcess(wxPROCESS_REDIRECT) {}
+    bool done = false;
+    int exitCode = -1;
+    void Abandon() { abandoned_ = true; }
+    void OnTerminate(int, int status) override {
+        if (abandoned_) { delete this; return; }
+        done = true; exitCode = status;
+    }
+private:
+    bool abandoned_ = false;
+};
 wxString FindPowerShell() {
     wxPathList paths; paths.AddEnvList("PATH");
 #ifdef __WXMSW__
@@ -207,8 +231,8 @@ public:
              "One complete model is enough to start; the README lists the exact file names.");
         canDownload_ = !script_.empty() && !shell_.empty();
         text(canDownload_
-            ? wxString("Download ROMs fetches them for you from zimmers.net, the public Commodore firmware archive, in a console window "
-                       "(an internet connection is needed).")
+            ? wxString("Download ROMs fetches them for you from zimmers.net, the public Commodore firmware archive, and shows its "
+                       "progress (an internet connection is needed).")
             : wxString("Automatic download is not available here (download-roms.ps1 or PowerShell was not found). Download the .bin files "
                        "yourself from zimmers.net (") + romSource + ") and copy them into the sub-folders above.");
         auto* buttons = new wxBoxSizer(wxHORIZONTAL);
@@ -239,10 +263,64 @@ private:
 #endif
         command += " -File " + quoted(script_) + " -RomsDir " + quoted(folder_);
         LOG_INFO("Running ROM downloader: %s -> %s", script_.ToStdString(wxConvUTF8).c_str(), folder_.ToStdString(wxConvUTF8).c_str());
-        const long result = wxExecute(command, wxEXEC_SYNC | wxEXEC_SHOW_CONSOLE);
+        // Asynchronous, with the script's own progress lines in a progress box:
+        // a synchronous run left the window frozen and silent (on Linux there is
+        // no console to show), with no way to cancel.
+        auto* process = new RomDownloadProcess;
+        const long pid = wxExecute(command, wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE, process);
+        if (pid <= 0) {
+            delete process;
+            wxMessageBox(wxString::Format("The downloader could not be started. Download the files by hand from zimmers.net (%s).", romSource),
+                         "ROM download", wxOK | wxICON_WARNING, this);
+            return;
+        }
+        wxString line, last = "Contacting zimmers.net...", failures;
+        auto drain = [&](wxInputStream* in) {
+            while (in && in->CanRead()) {
+                const int c = in->GetC();
+                if (in->LastRead() == 0) break;
+                if (c == '\n' || c == '\r') {
+                    line.Trim(); line.Trim(false);
+                    if (!line.empty()) {
+                        last = line;
+                        if (line.StartsWith("FAIL")) failures += line + "\n";
+                        LOG_INFO("ROM download: %s", line.ToStdString(wxConvUTF8).c_str());
+                    }
+                    line.clear();
+                } else line += wxUniChar(static_cast<unsigned char>(c));
+            }
+        };
+        bool cancelled = false;
+        {
+            wxProgressDialog progress("ROM download", "Downloading the PET ROMs from zimmers.net...\n\n", 100, this,
+                                      wxPD_APP_MODAL | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME | wxPD_AUTO_HIDE);
+            while (!process->done) {
+                drain(process->GetInputStream()); drain(process->GetErrorStream());
+                if (!progress.Pulse("Downloading the PET ROMs from zimmers.net...\n\n" + last)) {
+                    cancelled = true;
+                    wxProcess::Kill(static_cast<int>(pid), wxSIGTERM, wxKILL_CHILDREN);
+                    break;
+                }
+                wxTheApp->Yield(true);   // delivers the end-of-process notification
+                wxMilliSleep(30);
+            }
+            // After a cancel, give the process a moment to end before letting go of it.
+            for (int i = 0; cancelled && !process->done && i < 100; ++i) { wxTheApp->Yield(true); wxMilliSleep(20); }
+        }
+        if (!process->done) { process->Abandon(); process = nullptr; }
+        long result = -1;
+        if (process) {
+            drain(process->GetInputStream()); drain(process->GetErrorStream());
+            result = process->exitCode;
+            delete process;
+        }
+        LOG_INFO("ROM downloader finished: %s (code %ld)", cancelled ? "cancelled" : "done", result);
+        if (cancelled) return;
         if (result == 0) { EndModal(wxID_OK); return; } // retry loading
         wxMessageBox(wxString::Format("The download did not finish (code %ld). Check your internet connection and try again, or download the "
-                                      "files by hand from zimmers.net (%s).", result, romSource), "ROM download", wxOK | wxICON_WARNING, this);
+                                      "files by hand from zimmers.net (%s).%s", result, romSource,
+                                      failures.empty() ? wxString() : "\n\n" + failures),
+                     "ROM download", wxOK | wxICON_WARNING, this);
     }
 };
 
@@ -370,6 +448,11 @@ public:
             event.Skip();
         });
         Bind(wxEVT_CLOSE_WINDOW, &PetFrame::OnClose, this);
+        // ROM sets copied in while Pet-GPT runs show up the next time a menu opens.
+        Bind(wxEVT_MENU_OPEN, [this](wxMenuEvent& event) {
+            if (ready_ && !closing_) { RefreshRomAvailability(); UpdateMenus(); }
+            event.Skip();
+        });
         Show();
         if (fullscreen && !smoke_) ToggleFullscreen();
         canvas_->SetFocus();
@@ -424,6 +507,15 @@ private:
     bool cursorVisible_ = true, pointerInside_ = false, pendingWindowScale_ = false;
     bool waylandMaximizeRequested_ = false;
     bool pointerHeld_ = false;
+    static constexpr int kModelIds[5] = {1, 2, 4, 12, 8};   // Model1..Model8 order
+    bool romAvailable_[5] = {};
+
+    // Checks the ROM files of every model (a few dozen file-size queries). Run
+    // at start-up and whenever a menu opens, so ROMs added while Pet-GPT runs
+    // still enable their model, without checking the disk on every command.
+    void RefreshRomAvailability() {
+        for (int i = 0; i < 5; ++i) romAvailable_[i] = pet_rom_set_available(kModelIds[i]);
+    }
 
     void UpdateCursor(bool activity = false) {
         if (!canvas_ || closing_) return;
@@ -550,6 +642,7 @@ private:
             applicationExitCode = 1; Close(); return;
         }
         ready_ = true;
+        RefreshRomAvailability();
         pet_keyboard_load_settings();
         pet_set_speed(get_config_bool("machine", "speed2x", false) ? 2 : 1);
         pet_set_gfx_kbd(get_config_bool("input", "graphics_kbd", true));
@@ -726,12 +819,13 @@ private:
         auto* bar = GetMenuBar();
         bar->Check(TogglePause, userPaused_);
         ram_ = pet_get_ram();
-        const int modelIds[] = {1, 2, 4, 12, 8};
         // Same GTK radio rule as the memory group: enable all, select, then grey out
         // the models whose ROM sets are missing (the running model stays enabled).
+        // Availability comes from the cache RefreshRomAvailability() fills, so this
+        // runs no file checks after every command.
         for (int i = 0; i < 5; ++i) bar->Enable(Model1 + i, true);
-        for (int i = 0; i < 5; ++i) bar->Check(Model1 + i, pet_get_basic() == modelIds[i]);
-        for (int i = 0; i < 5; ++i) bar->Enable(Model1 + i, pet_get_basic() == modelIds[i] || pet_rom_set_available(modelIds[i]));
+        for (int i = 0; i < 5; ++i) bar->Check(Model1 + i, pet_get_basic() == kModelIds[i]);
+        for (int i = 0; i < 5; ++i) bar->Enable(Model1 + i, pet_get_basic() == kModelIds[i] || romAvailable_[i]);
         const int sizes[] = {4, 8, 16, 32};
         // GTK ignores radio-state callbacks for disabled items. Enable the
         // entire group before changing selection so its cached state stays
@@ -817,13 +911,21 @@ private:
                 if (pet_set_basic(want)) {
                     ram_ = pet_get_ram();
                     set_config_int("machine", "basic", want); set_config_int("machine", "ram", ram_);
-                } else host_message("Missing model ROMs", "Unable to load this model's ROMs. Check the roms directory. The previous model remains active.", true);
+                    SetNote({});   // the machine restarted: the last load/status note no longer applies
+                } else {
+                    RefreshRomAvailability();
+                    host_message("Missing model ROMs", "Unable to load this model's ROMs. Check the roms directory. The previous model remains active.", true);
+                }
             }
         } else if (id >= Ram4 && id <= Ram32) {
             const int sizes[] = {4, 8, 16, 32}; ram_ = sizes[id - Ram4];
             pet_set_ram(ram_); set_config_int("machine", "ram", ram_);
+            SetNote({});
         } else if (id >= RecentFirst && id < RecentFirst + kRecentMax) OpenRecent(id - RecentFirst);
-        else if (id >= TapePlay && id <= TapeEject) pet_tape_command(id - TapePlay);
+        else if (id >= TapePlay && id <= TapeEject) {
+            pet_tape_command(id - TapePlay);
+            if (id == TapeEject) SetNote({});   // "Tape X attached" no longer true
+        }
         else if (id >= Scale1 && id <= ScaleFit) ApplyScale(id == ScaleFit ? 0 : id - Scale1 + 1);
         else switch (id) {
         case TogglePause:
@@ -848,8 +950,10 @@ private:
         case OpenRoms: OpenFolder(wxString::FromUTF8(data_path("roms"))); break;
         case OpenShots: OpenFolder(wxString::FromUTF8(data_path("screenshots"))); break;
         case QuickStart: { QuickStartDialog dialog(this); dialog.ShowModal(); break; }
-        case Eject: pet_eject_disk(); break;
-        case Reset: pet_reset(); break;
+        case Eject:
+            if (pet_get_disk_mounted()) { pet_eject_disk(); SetNote("Disk ejected: drive 8 is the files folder again"); }
+            break;
+        case Reset: pet_reset(); SetNote({}); break;
         case wxID_EXIT: Close(); break;
         case Fullscreen: ToggleFullscreen(); break;
         case Speed: pet_set_speed(pet_get_speed() == 2 ? 1 : 2); set_config_bool("machine", "speed2x", pet_get_speed() == 2); break;

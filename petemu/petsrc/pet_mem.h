@@ -33,6 +33,10 @@ public:
     // CPU-visible memory API
     uint8_t readByte(uint16_t addr);
     void    writeByte(uint16_t addr, uint8_t val);
+    // Same mapping as readByte() but with no side effects: the I/O windows read
+    // as $FF instead of reaching the PIA/VIA/CRTC (whose reads clear flags).
+    // For tests and debugging, never for the CPU.
+    uint8_t peekByte(uint16_t addr) const;
 
     void onIrqLine(bool level) { irq_line = level; }
 

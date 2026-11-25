@@ -212,7 +212,9 @@ bool PetIEEE::cmd_block_u(const std::string& up)
 
 	if (!isD64Mounted()) { set_status(74, "DRIVE NOT READY", 0, 0); return false; }
 	if (ch < 0 || ch > 15) { set_status(30, "SYNTAX ERROR", 0, 0); return false; }
-	if (track < 1 || track > d64_num_tracks() || sector < 0 || sector >= d64_sectors_per_track(track)) {
+	// Physical tracks, not the BAM's: a 40-track image's tracks 36-40 can be read
+	// (writes to that image stop at WRITE PROTECT ON below).
+	if (track < 1 || track > d64_image_num_tracks() || sector < 0 || sector >= d64_sectors_per_track(track)) {
 		set_status(66, "ILLEGAL TRACK AND SECTOR", (uint8_t)track, (uint8_t)sector);
 		return false;
 	}
@@ -1388,20 +1390,45 @@ bool PetIEEE::commit_prg_save(const std::string& rawName, const std::string& prg
 	// from the raw name. Without it an existing file gives 63,FILE EXISTS.
 	const bool replaceSave = has_replace_flag(rawName);
 
+	bool ok = false;
 	if (isD64Mounted()) {
 		// For D64, the KERNAL has already included the load address.
 		std::vector<uint8_t> out(prgWithHeader.begin(), prgWithHeader.end());
 		LOG_DEBUG("IEEE PRG SAVE -> D64: name=\"%s\" size=%zu",
 			saveName.c_str(), out.size());
-		return d64_save_prg(saveName, out, replaceSave);
+		ok = d64_save_prg(saveName, out, replaceSave);
 	}
+	else {
+		// Virtual drive: write exact PRG stream as received.
+		LOG_DEBUG("IEEE PRG SAVE -> folder: name=\"%s.prg\" size=%zu",
+			saveName.c_str(), prgWithHeader.size());
+		saveFile(saveName, prgWithHeader, replaceSave);
+		// The folder path reports through the channel-15 status on every outcome.
+		ok = status15_.compare(0, 3, "00,") == 0;
+	}
+	if (!ok) report_save_failure(saveName);
+	return ok;
+}
 
-	// Virtual drive: write exact PRG stream as received.
-	LOG_DEBUG("IEEE PRG SAVE -> folder: name=\"%s.prg\" size=%zu",
-		saveName.c_str(), prgWithHeader.size());
-	saveFile(saveName, prgWithHeader, replaceSave);
-	// The folder path reports through the channel-15 status on every outcome.
-	return status15_.compare(0, 3, "00,") == 0;
+// -----------------------------------------------------------------------------
+// report_save_failure
+// Tell the host that a SAVE did not write anything, with the drive's own
+// status ("63,FILE EXISTS") and, for an existing name, how to replace it.
+// -----------------------------------------------------------------------------
+void PetIEEE::report_save_failure(const std::string& name)
+{
+	// "63,FILE EXISTS,00,00" -> "63,FILE EXISTS"
+	std::string status = status15_;
+	const size_t c1 = status.find(',');
+	const size_t c2 = (c1 == std::string::npos) ? c1 : status.find(',', c1 + 1);
+	if (c2 != std::string::npos) status.erase(c2);
+	if (status.empty() || status.compare(0, 3, "00,") == 0) status = "WRITE ERROR";
+
+	std::string msg = "SAVE \"" + name + "\" was not written (" + status + ")";
+	if (status15_.compare(0, 3, "63,") == 0)
+		msg += ": use SAVE\"@0:" + name + "\",8 to replace it";
+	LOG_WARN("[IEEE] %s", msg.c_str());
+	if (notice_) notice_(msg);
 }
 
 // -----------------------------------------------------------------------------

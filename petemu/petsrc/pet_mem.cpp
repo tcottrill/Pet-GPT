@@ -109,6 +109,18 @@ uint8_t PetMem::readByte(uint16_t addr)
 	return 0xFF;
 }
 
+uint8_t PetMem::peekByte(uint16_t addr) const
+{
+	if (inRange(addr, PIA1_BASE, PIA1_END) ||
+		inRange(addr, PIA2_BASE, PIA2_END) ||
+		inRange(addr, VIA_BASE, VIA_END) ||
+		addr == 0xE880 || addr == 0xE881)
+		return 0xFF;   // device registers: reading them is not side-effect free
+	if (romMask[addr]) return rom[addr];
+	if ((addr & 0xF000) == 0x8000) return ram[0x8000 | (addr & screenMask_)];
+	return addr < configuredRamBytes ? ram[addr] : 0xFF;
+}
+
 void PetMem::writeByte(uint16_t addr, uint8_t val)
 {
 	// ---------------- Screen RAM window ($8000-$8FFF) ----------------

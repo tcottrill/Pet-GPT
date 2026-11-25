@@ -10,7 +10,7 @@ extern void pet_tape_command(int command); // 0 play, 1 stop, 2 rewind, 3 eject
 extern int pet_tape_state(); // bit 0 mounted, bit 1 playing, bit 2 end
 extern bool pet_set_basic(int which); // Model IDs: 2, 4, 8, 12
 extern int pet_get_basic();
-extern int pet_peek(int addr);                        // CPU-visible byte, for tests
+extern int pet_peek(int addr);                        // RAM/ROM/screen byte without side effects (I/O reads $FF), for tests
 extern bool pet_rom_set_available(int which);         // model's ROM files are present; changes nothing
 extern void pet_set_ram(int kb);                      // 4/8/16/32: resize RAM + reset
 extern void pet_set_crt(int on);                      // CRT look (mono monitor shader) on/off

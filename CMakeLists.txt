@@ -106,7 +106,13 @@ if(PET_BUILD_GUI)
   # The ROM setup dialog looks for the downloader next to the executable.
   add_custom_command(TARGET pet-gpt POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/petemu/tools/download-roms.ps1" "$<TARGET_FILE_DIR:pet-gpt>")
-  install(FILES petemu/tools/download-roms.ps1 DESTINATION bin)
+  # Beside the .exe on Windows; on Linux a data file, not a command in bin/
+  # (FindRomScript also looks in ../share/pet-gpt).
+  if(WIN32)
+    install(FILES petemu/tools/download-roms.ps1 DESTINATION bin)
+  else()
+    install(FILES petemu/tools/download-roms.ps1 DESTINATION share/pet-gpt)
+  endif()
   install(FILES petemu/petemu.ico DESTINATION share/pet-gpt)
   if(UNIX)
     install(FILES packaging/pet-gpt.desktop DESTINATION share/applications)
