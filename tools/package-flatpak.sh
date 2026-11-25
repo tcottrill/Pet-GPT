@@ -51,7 +51,8 @@ mkdir -p "$WORK" "$OUT"
 
 # 1. Build the binary inside the SDK.
 mounts=(--filesystem="$ROOT" --filesystem="$WORK")
-wx_arg=""
+# Without PET_WX_SOURCE, clear one cached by an earlier run: the pinned download is used.
+wx_arg="-DPET_WX_SOURCE="
 if [ -n "${PET_WX_SOURCE:-}" ]; then
     mounts+=(--filesystem="$PET_WX_SOURCE")
     wx_arg="-DPET_WX_SOURCE=$PET_WX_SOURCE"
