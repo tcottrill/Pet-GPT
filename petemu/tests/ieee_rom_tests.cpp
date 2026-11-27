@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <string>
+#include <vector>
 namespace Log {
 bool open(const std::string&) { return true; }
 void close() {}
@@ -277,6 +279,67 @@ static void run_basic1(const std::string& romRoot, const std::filesystem::path& 
         CHECK_SHOWS(m, "BACK FIVE");
     }
 }
+// Save states with real ROMs: boot to READY, save, run one emulated second and hash
+// RAM + screen; load the state (back into the same machine, and into a new one) and
+// the same second must give the same hash. model: 2 = 2001-N, 8 = 8032, 96 = 8296.
+static std::vector<uint8_t> state_bytes(PetMachine& m) {
+    std::vector<uint8_t> bytes; StateWriter w(bytes);
+    w.header(); m.saveState(w);
+    return bytes;
+}
+static bool state_load(PetMachine& m, std::vector<uint8_t> bytes) {
+    StateFile file; std::string error;
+    return file.parse(std::move(bytes), error) && m.loadState(file, error);
+}
+static uint64_t second_hash(PetMachine& m) {
+    m.runCycles(1000000);
+    uint64_t h = 1469598103934665603ULL;
+    const uint8_t* ram = m.bus().ramData();
+    for (size_t i = 0; i < 65536; ++i) { h ^= ram[i]; h *= 1099511628211ULL; }
+    for (int a = 0x8000; a < 0x8000 + 25 * columns; ++a) { h ^= m.bus().readByte(uint16_t(a)); h *= 1099511628211ULL; }
+    return h;
+}
+// The geometry load_basic_set() in emulator.cpp applies for each model.
+static bool state_machine(PetMachine& m, int model, const std::string& dir) {
+    const bool loaded = model == 2 ? load_pet2_romset(m, dir, true) : model == 8 ? load_pet8032_romset(m, dir) : load_pet8296_romset(m, dir);
+    if (!loaded) return false;
+    const bool wide = model != 2;
+    columns = wide ? 80 : 40;
+    if (model == 2) m.bus().clearROM(0xB000, 0x1000);
+    m.bus().setScreenWindow(wide);
+    m.video().setColumns(columns);
+    m.io().configureCrtc(wide, wide ? 2 : 1);
+    m.bus().setExpansion(model == 96);
+    if (model == 96) m.bus().setScreenWindow4K();
+    m.video().setScreen4K(model == 96);
+    m.bus().setRamSize(32768);
+    return true;
+}
+static void run_state(const std::string& romRoot, int model) {
+    const std::string dir = romRoot + (model == 2 ? "/pet2001n/" : model == 8 ? "/cbm8032/" : "/cbm8296/");
+    if (!pet_romset_present(model, dir)) { printf("-- state model %d: ROM set absent under %s, skipped\n", model, dir.c_str()); return; }
+    printf("-- save state, model %d\n", model);
+    PetMachine m;
+    ++checks; if (!state_machine(m, model, dir)) { ++failures; printf("FAIL: ROM set did not load\n"); return; }
+    m.reset();
+    for (int frame = 0; frame < 600 && !shows(m, "READY."); ++frame) m.runCycles(16640);
+    CHECK_SHOWS(m, "READY.");
+    const auto snapshot = state_bytes(m);
+    const uint64_t original = second_hash(m);
+    ++checks; if (!state_load(m, snapshot)) { ++failures; printf("FAIL: state did not load back into the same machine\n"); return; }
+    const uint64_t again = second_hash(m);
+    ++checks; if (again != original) { ++failures; printf("FAIL %d: model %d second after load differs (same machine)\n", __LINE__, model); }
+    PetMachine fresh;
+    ++checks; if (!state_machine(fresh, model, dir)) { ++failures; printf("FAIL: ROM set did not load\n"); return; }
+    fresh.reset();
+    ++checks; if (!state_load(fresh, snapshot)) { ++failures; printf("FAIL: state did not load into a new machine\n"); return; }
+    ++checks; if (second_hash(fresh) != original) { ++failures; printf("FAIL %d: model %d second after load differs (new machine)\n", __LINE__, model); }
+    // A damaged file leaves a running machine alone.
+    const auto before = state_bytes(fresh);
+    auto cut = snapshot; cut.resize(cut.size() / 3);
+    ++checks; if (state_load(fresh, cut) || state_bytes(fresh) != before) { ++failures; printf("FAIL %d: truncated state was not refused cleanly\n", __LINE__); }
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { printf("usage: ieee_rom_tests <rom root>\n"); return 2; }
     namespace fs = std::filesystem;
@@ -292,6 +355,7 @@ int main(int argc, char** argv) {
     for (int model : {2, 4, 12, 8}) run_model(root, model, files);
     columns = 40;
     run_basic1(root, files);
+    for (int model : {2, 8, 96}) run_state(root, model);
     fs::remove_all(files);
     printf("IEEE ROM tests: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

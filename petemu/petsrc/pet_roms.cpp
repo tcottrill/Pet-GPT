@@ -55,6 +55,7 @@ static bool readFile(const std::string& path, std::vector<uint8_t>& out)
 // Character ROM buffers: kept alive here (setVideoCharsets takes raw pointers
 // the video code reads every frame, not a copy).
 static std::vector<uint8_t> g_char_rom1, g_char_rom2; // graphics bank / text bank
+static std::vector<uint8_t> g_char_rom3, g_char_rom4; // same, upper half of a 4 KB character ROM
 
 // Quiet readFile: no error log when the file simply isn't there (used for
 // fallback chains).
@@ -93,10 +94,15 @@ static bool readCharRom(const std::string& dir, std::vector<uint8_t>& rom, bool 
 	}
     return true;
 }
-static void installCharRom(PetMachine& pet, const std::vector<uint8_t>& rom) {
+static void installCharRom(PetMachine& pet, const std::vector<uint8_t>& rom, bool upperBank = false) {
     g_char_rom1.assign(rom.begin(), rom.begin()+0x400);
     g_char_rom2.assign(rom.begin()+0x400, rom.begin()+0x800);
-    pet.setVideoCharsets(g_char_rom1.data(),g_char_rom2.data());
+    pet.setVideoCharsets(g_char_rom1.data(),g_char_rom2.data());   // also drops any second bank from a previous set
+    if (upperBank && rom.size() >= 0x1000) {                       // 4 KB chargen (8296-D): upper 2 KB, selected by CRTC R12 bit 5
+        g_char_rom3.assign(rom.begin()+0x800, rom.begin()+0xC00);
+        g_char_rom4.assign(rom.begin()+0xC00, rom.begin()+0x1000);
+        pet.video().setCharsetsUpper(g_char_rom3.data(),g_char_rom4.data());
+    }
 }
 
 // BASIC 2 loader (zimmers.net-native file names)
@@ -160,14 +166,15 @@ bool load_pet2_romset(PetMachine& pet, const std::string& dir, bool editorN)
 
 // Load BASIC 4 (PET 40-col, "N" editor) split set by the filenames you provided.
 // Maps: BASIC @ B000/C000/D000 (3x4KB), EDIT-4-N @ E000 (2KB), KERNAL-4 @ F000 (4KB).
-bool load_pet4_romset(PetMachine& pet, const std::string& dir, bool crtc)
+bool load_pet4_romset(PetMachine& pet, const std::string& dir, bool crtc, bool hz50)
 {
 	std::vector<uint8_t> basB, basC, basD, editN, kernalF, chars;
 
 	const std::string p_basB = dir + "basic-4-b000.901465-23.bin"; // 4096 bytes -> $B000
 	const std::string p_basC = dir + "basic-4-c000.901465-20.bin"; // 4096 bytes -> $C000
 	const std::string p_basD = dir + "basic-4-d000.901465-21.bin"; // 4096 bytes -> $D000
-	const std::string p_edit = dir + (crtc ? "edit-4-40-n-60Hz.901499-01.bin" : "edit-4-n.901447-29.bin");     // 2048 bytes -> $E000
+	const std::string p_edit = dir + (crtc ? (hz50 ? "edit-4-40-n-50Hz.901498-01.bin" : "edit-4-40-n-60Hz.901499-01.bin")
+	                                       : "edit-4-n.901447-29.bin");     // 2048 bytes -> $E000
 	const std::string p_kern = dir + "kernal-4.901465-22.bin";     // 4096 bytes -> $F000
 
 	if (!readFile(p_basB, basB)) return false;
@@ -192,20 +199,20 @@ bool load_pet4_romset(PetMachine& pet, const std::string& dir, bool crtc)
 
 	installCharRom(pet, chars);
 
-	LOG_INFO("ROMs installed: BASIC4, 40-column %s editor, KERNAL4", crtc ? "CRTC 60Hz" : "discrete video");
+	LOG_INFO("ROMs installed: BASIC4, 40-column %s editor, KERNAL4", crtc ? (hz50 ? "CRTC 50Hz" : "CRTC 60Hz") : "discrete video");
 	return true;
 }
 
-// 8032: BASIC 4 B/C/D + 80-column business editor (60 Hz) + KERNAL 4.
+// 8032: BASIC 4 B/C/D + 80-column business editor (60 Hz, or 50 Hz when hz50) + KERNAL 4.
 // After install, flip the machine into 80-column mode (2 KB screen window,
 // 80-col renderer default until the editor ROM programs the CRTC).
-bool load_pet8032_romset(PetMachine& pet, const std::string& dir)
+bool load_pet8032_romset(PetMachine& pet, const std::string& dir, bool hz50)
 {
 	std::vector<uint8_t> basB, basC, basD, edit80, kernalF, chars;
 	if (!readFile(dir + "basic-4-b000.901465-19.bin", basB)) return false;
 	if (!readFile(dir + "basic-4-c000.901465-20.bin", basC)) return false;
 	if (!readFile(dir + "basic-4-d000.901465-21.bin", basD)) return false;
-	if (!readFile(dir + "edit-4-80-b-60Hz.901474-03.bin", edit80)) return false;
+	if (!readFile(dir + (hz50 ? "edit-4-80-b-50Hz.901474-04-0283.bin" : "edit-4-80-b-60Hz.901474-03.bin"), edit80)) return false;
 	if (!readFile(dir + "kernal-4.901465-22.bin", kernalF)) return false;
 	if (basB.size() != 0x1000 || basC.size() != 0x1000 || basD.size() != 0x1000 ||
 		edit80.size() != 0x0800 || kernalF.size() != 0x1000) {
@@ -218,8 +225,53 @@ bool load_pet8032_romset(PetMachine& pet, const std::string& dir)
 	if (!pet.loadRom(edit80.data(), 0x0800, 0xE000)) return false;
 	if (!pet.loadRom(kernalF.data(), 0x1000, 0xF000)) return false;
 	installCharRom(pet, chars);
-	LOG_INFO("ROMs installed: 8032 (BASIC4 B/C/D, EDIT-4-80-B 60Hz, KERNAL-4)");
+	LOG_INFO("ROMs installed: 8032 (BASIC4 B/C/D, EDIT-4-80-B %s, KERNAL-4)", hz50 ? "50Hz" : "60Hz");
 	return true;
+}
+
+// 8296 (North American, 60 Hz): the 8032 business editor with BASIC 4 (B000 is the -23 revision),
+// 2 KB character ROM. With hz50 the European 8296-D: 4 KB editor at $E000 (the I/O page keeps
+// priority over $E800-$E8FF) and a 4 KB character ROM whose upper half is chosen by CRTC R12 bit 5.
+// The 64K expansion and 4 KB screen are applied by the caller.
+bool load_pet8296_romset(PetMachine& pet, const std::string& dir, bool hz50)
+{
+	std::vector<uint8_t> basB, basC, basD, edit, kernalF, chars;
+	if (!readFile(dir + "basic-4-b000.901465-23.bin", basB)) return false;
+	if (!readFile(dir + "basic-4-c000.901465-20.bin", basC)) return false;
+	if (!readFile(dir + "basic-4-d000.901465-21.bin", basD)) return false;
+	if (!readFile(dir + (hz50 ? "edit-50hz-324243-04.bin" : "edit-4-80-b-60Hz.901474-03.bin"), edit)) return false;
+	if (!readFile(dir + "kernal-4.901465-22.bin", kernalF)) return false;
+	if (!readFile(dir + (hz50 ? "characters-324242-01.bin" : "characters-2.901447-10.bin"), chars)) return false;
+	if (basB.size() != 0x1000 || basC.size() != 0x1000 || basD.size() != 0x1000 ||
+		edit.size() != (hz50 ? 0x1000u : 0x800u) || kernalF.size() != 0x1000 ||
+		(hz50 ? chars.size() != 0x1000 : chars.size() < 0x800)) {
+		LOG_ERROR("[8296] ROM size mismatch - set not installed"); return false;
+	}
+	if (!pet.loadRom(basB.data(), 0x1000, 0xB000)) return false;
+	if (!pet.loadRom(basC.data(), 0x1000, 0xC000)) return false;
+	if (!pet.loadRom(basD.data(), 0x1000, 0xD000)) return false;
+	if (!pet.loadRom(edit.data(), edit.size(), 0xE000)) return false;
+	if (!hz50) pet.bus().clearROM(0xE800, 0x800);   // a 4 KB editor from an earlier set must not leave stale bytes
+	if (!pet.loadRom(kernalF.data(), 0x1000, 0xF000)) return false;
+	installCharRom(pet, chars, hz50);
+	LOG_INFO("ROMs installed: 8296 (BASIC4 B/C/D, %s, KERNAL-4)", hz50 ? "8296-D 50Hz editor, 4 KB character ROM" : "EDIT-4-80-B 60Hz");
+	return true;
+}
+
+// The optional European editor ROM for the CRTC models (12, 8 and 96); model 96 needs
+// its 4 KB editor and 4 KB character ROM both.
+bool pet_editor50_present(int which, const std::string& dir)
+{
+	auto size = [&](const char* name) -> uintmax_t {
+		std::error_code ec;
+		const auto n = std::filesystem::file_size(std::filesystem::u8path(dir + name), ec);
+		return ec ? 0 : static_cast<uintmax_t>(n);
+	};
+	if (which == 96) return size("edit-50hz-324243-04.bin") == 0x1000 && size("characters-324242-01.bin") == 0x1000;
+	const char* name = which == 12 ? "edit-4-40-n-50Hz.901498-01.bin"
+	                 : which == 8  ? "edit-4-80-b-50Hz.901474-04-0283.bin" : nullptr;
+	if (!name) return false;
+	return size(name) == 0x800;
 }
 
 // Same files and size rules as the loaders above, without reading or installing.
@@ -254,6 +306,10 @@ bool pet_romset_present(int which, const std::string& dir)
 		return has("basic-4-b000.901465-19.bin", 0x1000) && has("basic-4-c000.901465-20.bin", 0x1000) &&
 			has("basic-4-d000.901465-21.bin", 0x1000) && has("edit-4-80-b-60Hz.901474-03.bin", 0x800) &&
 			has("kernal-4.901465-22.bin", 0x1000) && charsAny;
+	case 96:   // the 60 Hz North American set; the 8296-D files are optional
+		return has("basic-4-b000.901465-23.bin", 0x1000) && has("basic-4-c000.901465-20.bin", 0x1000) &&
+			has("basic-4-d000.901465-21.bin", 0x1000) && has("kernal-4.901465-22.bin", 0x1000) &&
+			has("edit-4-80-b-60Hz.901474-03.bin", 0x800) && charsNew;
 	}
 	return false;
 }

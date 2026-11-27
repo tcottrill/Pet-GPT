@@ -28,6 +28,8 @@
 #include "t64.h"
 #include "mixer.h"
 #include "pet_roms.h"        // ROM-set loaders (load_pet2_romset, etc.)
+#include "frame_pacing.h"    // host tick follows the CRTC frame length
+#include "state_io.h"        // save states (.petstate)
 
 #include <iterator> // required for istreambuf_iterator
 #include <filesystem>
@@ -111,9 +113,12 @@ void pet_audio_init(int device_rate, int fps)
 	// For example, device_rate / fps.
 	g_cb2_frame_samples = device_rate / fps;
 }
+static int s_audio_slice_left = 0; // cycles left in the audio slice in progress (0 = none started)
+
 // FIX: Add this function to reset audio state
 void reset_audio()
 {
+	s_audio_slice_left = 0;        // a reset starts a fresh slice
 	s_last_cb2_level = false;
 	s_dc_offset = 0.0;
 	g_cb2render.reset();   // clear reconstruction filter state
@@ -154,13 +159,17 @@ static bool ends_with_icase(const std::string& s, const char* suffix) {
 	return true;
 }
 
-static int g_basic_set = 2;  // IDs: 1=2001, 2=2001N, 4=4000-9, 8=8032, 12=4000-12
+static int g_basic_set = 2;  // IDs: 1=2001, 2=2001N, 4=4000-9, 8=8032, 12=4000-12, 96=8296
 static int g_ram_kb    = 32; // configured RAM size in KB (4/8/16/32)
+static bool g_video_50hz = false; // preference: 50 Hz editor ROM on the CRTC models (12, 8, 96) when the file(s) are there
+
+static bool is_model_id(int which) { return which == 1 || which == 2 || which == 4 || which == 8 || which == 12 || which == 96; }
 
 // Each ROM set lives in its own self-contained subfolder (own copy of the
 // shared character ROMs too), so a set can be swapped or archived as a unit.
 static std::string rom_dir_for(int which) {
-	return (which == 8) ? resource_path("roms/cbm8032") + "/"
+	return (which == 96) ? resource_path("roms/cbm8296") + "/"
+	     : (which == 8) ? resource_path("roms/cbm8032") + "/"
 	     : (which == 12) ? resource_path("roms/pet4000-12") + "/"
 	     : (which == 4) ? resource_path("roms/pet4000-9") + "/"
 	     : (which == 1) ? resource_path("roms/pet2001") + "/"
@@ -168,7 +177,7 @@ static std::string rom_dir_for(int which) {
 }
 
 bool pet_rom_set_available(int which) {
-	if (which != 1 && which != 2 && which != 4 && which != 8 && which != 12) return false;
+	if (!is_model_id(which)) return false;
 	return pet_romset_present(which, rom_dir_for(which));
 }
 
@@ -177,23 +186,36 @@ static bool load_basic_set(int which) {
 		LOG_ERROR("[PET] load_basic_set: g_pet is null");
 		return false;
 	}
-	if (which != 1 && which != 2 && which != 4 && which != 8 && which != 12) which = 2;
+	if (!is_model_id(which)) which = 2;
 	const std::string romdir = rom_dir_for(which);
+	// The 50 Hz editor is optional: without its file the 60 Hz one loads and the
+	// stored preference stays as it is.
+	bool hz50 = false;
+	if (g_video_50hz && (which == 12 || which == 8 || which == 96)) {
+		hz50 = pet_editor50_present(which, romdir);
+		if (!hz50) LOG_INFO("[PET] 50 Hz video wanted but the 50 Hz editor ROM is missing in %s; using the 60 Hz editor", romdir.c_str());
+	}
 	// BASIC 4 maps $B000-$BFFF; BASIC 2 does not. Unmap it when switching
 	// down, or stale BASIC-4 bytes stay readable (and write-protected) there
 	// and ROM-detection code misidentifies the machine.
 	bool ok = (which == 1) ? load_pet1_romset(*g_pet, romdir)
-	        : (which == 8) ? load_pet8032_romset(*g_pet, romdir)
-	        : (which == 4 || which == 12) ? load_pet4_romset(*g_pet, romdir, which == 12)
+	        : (which == 8) ? load_pet8032_romset(*g_pet, romdir, hz50)
+	        : (which == 96) ? load_pet8296_romset(*g_pet, romdir, hz50)
+	        : (which == 4 || which == 12) ? load_pet4_romset(*g_pet, romdir, which == 12, hz50)
 	                       : load_pet2_romset(*g_pet, romdir, true); // BASIC 2, "N" editor; zimmers.net-native filenames
 	if (!ok) { LOG_ERROR("[PET] Failed to load BASIC %d ROM set from %s", which, romdir.c_str()); return false; }
 	if (which == 1 || which == 2) g_pet->bus().clearROM(0xB000, 0x1000);
-	// Machine geometry follows the ROM set: 8032 = 80 cols + 2 KB screen +
+	// Machine geometry follows the ROM set: 8032 and 8296 = 80 cols + 2 KB screen +
 	// business keyboard matrix; 40-col models the reverse.
-	const bool is8032 = (which == 8);
+	const bool is8296 = (which == 96);
+	const bool is8032 = (which == 8 || is8296);   // the 80-column business family
 	g_pet->bus().setScreenWindow(is8032);
 	g_pet->video().setColumns(is8032 ? 80 : 40);
 	g_pet->io().configureCrtc(is8032 || which == 12, is8032 ? 2 : 1);
+	// Only the 8296 has the $FFF0 expansion RAM and the 4 KB screen memory.
+	g_pet->bus().setExpansion(is8296);
+	if (is8296) g_pet->bus().setScreenWindow4K();
+	g_pet->video().setScreen4K(is8296);
 	if (is8032) {
 		g_ram_kb = 32;
 		g_pet->bus().setRamSize(32768);
@@ -215,39 +237,30 @@ void reset_all()
 
 
 ///////////////////////  MAIN LOOP /////////////////////////////////////
-bool emu_run_frame()
+// Cycles per host tick: the emulated video frame, or nominal 60 Hz (see
+// frame_pacing.h). Logs whenever the value changes, including the first time.
+static int current_frame_cycles()
 {
-	g_pet->io().cb2ResetEdgeLog();
-
-	// Only feed host input to the PET while the emulator window is in the
-	// foreground. RawInput uses RIDEV_INPUTSINK (so releases are tracked even
-	// unfocused), but without this gate everything typed into OTHER apps was
-	// also typed into BASIC (and CapsLock fired RUN/STOP).
-	const bool focused = host_is_focused();
-	if (focused) {
-		update_keyboard(g_pet);
+	static int s_last = 0;
+	const int c = pacing_frame_cycles(g_pet ? g_pet->io().crtcFrameCycles() : 0);
+	if (c != s_last) {
+		s_last = c;
+		LOG_INFO("[PET] video frame %d cycles (%.2f Hz); host pacing %s", c, 1000000.0 / c,
+			c == kNominalFrameCycles ? "nominal 60 Hz" : "following the emulated frame");
 	}
-	else {
-		uint8_t idle[10];
-		memset(idle, 0xFF, sizeof(idle));   // active-low: all released
-		g_pet->io().setKeyrows(idle);
-	}
+	return c;
+}
 
-	// Poll the host gamepad and feed the emulated SNES adapter.
-	if (g_snes_enabled) {
-		poll_joystick();
-		g_pet->io().setSnesButtons(focused ? map_joy_to_snes() : 0);
-	}
+long long emu_frame_nanos()
+{
+	const int c = current_frame_cycles();
+	return c == kNominalFrameCycles ? 1000000000LL / 60 : (long long)c * 1000LL;
+}
 
-	// 2) Run ~1/60 sec of CPU afterward (x2 when Machine > 2x Speed is on)
-	const int cycles_per_frame = (1000000 / 60) * g_speed_mult;
-	if (g_pet) g_pet->runCycles(cycles_per_frame);
-
-	// Service the video blank timer in emulated time (PIA1 CA2 blanking:
-	// the screen goes dark 100 emulated ms after software requests it).
-	if (g_pet) g_pet->video().update(cycles_per_frame / 1000);
-
-	emu_present();
+// Render and submit one finished audio slice (always kNominalFrameCycles * speed
+// cycles, so it matches the mixer's fixed 1/60 s of samples).
+static void finish_audio_slice()
+{
 	// -----------------------------------------------------------------
 	// AUDIO GENERATION
 	// -----------------------------------------------------------------
@@ -268,6 +281,56 @@ bool emu_run_frame()
 	}
 
 	mixer_update();
+}
+
+static double s_present_seconds = 0.0;   // emulated seconds since the last advancing present
+
+bool emu_run_frame(bool present)
+{
+	// Only feed host input to the PET while the emulator window is in the
+	// foreground. RawInput uses RIDEV_INPUTSINK (so releases are tracked even
+	// unfocused), but without this gate everything typed into OTHER apps was
+	// also typed into BASIC (and CapsLock fired RUN/STOP).
+	const bool focused = host_is_focused();
+	if (focused) {
+		update_keyboard(g_pet);
+	}
+	else {
+		uint8_t idle[10];
+		memset(idle, 0xFF, sizeof(idle));   // active-low: all released
+		g_pet->io().setKeyrows(idle);
+	}
+
+	// Poll the host gamepad and feed the emulated SNES adapter.
+	if (g_snes_enabled) {
+		poll_joystick();
+		g_pet->io().setSnesButtons(focused ? map_joy_to_snes() : 0);
+	}
+
+	// 2) Run one emulated video frame of CPU (x2 when Machine > 2x Speed is on).
+	// Audio is cut in fixed 1/60 s slices that may span calls when the frame is ~50 Hz.
+	const int cycles_per_frame = current_frame_cycles() * g_speed_mult;
+	const int slice_cycles = kNominalFrameCycles * g_speed_mult;
+	for (int left = cycles_per_frame; left > 0; ) {
+		if (s_audio_slice_left <= 0) {
+			g_pet->io().cb2ResetEdgeLog();
+			s_audio_slice_left = slice_cycles;
+		}
+		const int n = left < s_audio_slice_left ? left : s_audio_slice_left;
+		g_pet->runCycles(n);
+		left -= n;
+		s_audio_slice_left -= n;
+		if (s_audio_slice_left <= 0) finish_audio_slice();
+	}
+
+	// Service the video blank timer in emulated time (PIA1 CA2 blanking:
+	// the screen goes dark 100 emulated ms after software requests it).
+	if (g_pet) g_pet->video().update(cycles_per_frame / 1000);
+
+	// Real emulated time for the tube's phosphor decay: not scaled by g_speed_mult.
+	s_present_seconds += current_frame_cycles() / 1e6;
+
+	if (present) emu_present(true);
 
 	return true; // Escape is a host/PET key now, never a quit request
 }
@@ -287,8 +350,10 @@ bool emu_init(int argc, char** argv)
 
 	// --- Load ROM set from disk ---
 	const HostOptions options = parse_core_options(argc, argv);
+	// -50hz / -60hz override pet.ini for this run only (not written back).
+	g_video_50hz = options.video50 >= 0 ? options.video50 != 0 : get_config_bool("machine", "video50hz", false);
 	int want = options.model ? options.model : get_config_int("machine", "basic", 2);
-	if (want != 1 && want != 2 && want != 4 && want != 8 && want != 12) want = 2;
+	if (!is_model_id(want)) want = 2;
 	// Never a dead end: start the requested model, else the first complete set
 	// found, else let the frontend help the user get ROMs and retry.
 	std::error_code romDirError;
@@ -296,7 +361,7 @@ bool emu_init(int argc, char** argv)
 	int started = 0;
 	for (;;) {
 		if (load_basic_set(want)) started = want;
-		else for (int m : { 2, 4, 12, 8, 1 })
+		else for (int m : { 2, 4, 12, 8, 96, 1 })
 			if (m != want && pet_rom_set_available(m) && load_basic_set(m)) { started = m; break; }
 		if (started) break;
 		LOG_ERROR("[PET] no complete ROM set found under %s", data_path("roms").c_str());
@@ -341,8 +406,9 @@ bool emu_init(int argc, char** argv)
 	if (!diskArg.empty()) {
 		const std::string hostPath = filesRoot + "/" + diskArg;
 
-		if (ends_with_icase(diskArg, ".d64") || ends_with_icase(diskArg, ".d71")) {
-			// Mount a disk image (.d64 = 1541, .d71 = 1571 double-sided)
+		if (ends_with_icase(diskArg, ".d64") || ends_with_icase(diskArg, ".d71") ||
+			ends_with_icase(diskArg, ".d80") || ends_with_icase(diskArg, ".d82")) {
+			// Mount a disk image (.d64 = 1541, .d71 = 1571 double-sided, .d80 = 8050, .d82 = 8250 double-sided)
 			if (!g_pet->bus().io().setIeeeD64Image(hostPath)) {
 				LOG_ERROR("[IEEE] Failed to mount disk image: %s", hostPath.c_str());
 			}
@@ -367,6 +433,7 @@ bool emu_init(int argc, char** argv)
 			"Try updating your graphics driver.\n\nDetails are in the log file:\n" + data_path("petemu-log.txt")).c_str(), true);
 		emu_end(); return false;
 	}
+	g_gl->setPhosphorModel(g_basic_set);   // g_gl is created after the first ROM set loads
 
 	set_pet_graphics_mode(false);
 
@@ -399,7 +466,8 @@ bool emu_init(int argc, char** argv)
 	// never blocks every start-up.
 	const int warned = get_config_int("machine", "rom_warned", 0);
 	if (started != want) {
-		static const char* names[] = { "", "PET 2001 (BASIC 1)", "PET 2001-N (BASIC 2)", "", "PET 4000 (BASIC 4)", "", "", "", "CBM 8032", "", "", "", "PET 4032 (12-inch CRTC)" };
+		static const char* table[] = { "", "PET 2001 (BASIC 1)", "PET 2001-N (BASIC 2)", "", "PET 4000 (BASIC 4)", "", "", "", "CBM 8032", "", "", "", "PET 4032 (12-inch CRTC)" };
+		struct { const char* operator[](int id) const { return id == 96 ? "CBM 8296" : table[id]; } } names;   // 96 sits outside the table
 		LOG_WARN("[PET] model %d ROMs missing; started model %d instead", want, started);
 		if (warned != want) {
 			const std::string text = std::string("The ROMs for the ") + names[want] + " are missing, so Pet-GPT started the " + names[started] +
@@ -448,18 +516,155 @@ int pet_tape_state() {
 }
 
 bool pet_set_basic(int which) {
-	if (which != 1 && which != 2 && which != 4 && which != 8 && which != 12) return false;
+	if (!is_model_id(which)) return false;
 	if (!load_basic_set(which)) return false;   // PetMachine::loadRom keeps the CPU MEM mirror in sync
 	g_pet->reset();
+	if (g_gl) g_gl->setPhosphorModel(g_basic_set);   // each machine has its own tube
 	LOG_INFO("[PET] switched to model %d", which);
 	return true;
 }
 
 int pet_get_basic() { return g_basic_set; }
+
+bool pet_video50_available(int which) {
+	return (which == 12 || which == 8 || which == 96) && pet_editor50_present(which, rom_dir_for(which));
+}
+int pet_get_video50() { return g_video_50hz ? 1 : 0; }
+
+// Stores the preference; on a CRTC model it reloads the current ROM set (which
+// picks the editor ROM) and resets, as a model switch does. pet_set_basic skips
+// an unchanged model, so this calls load_basic_set directly.
+bool pet_set_video50(int on) {
+	const bool previous = g_video_50hz;
+	g_video_50hz = (on != 0);
+	if (!g_pet || (g_basic_set != 12 && g_basic_set != 8 && g_basic_set != 96)) return true;
+	if (!load_basic_set(g_basic_set)) { g_video_50hz = previous; return false; }
+	g_pet->reset();
+	if (g_gl) g_gl->setPhosphorModel(g_basic_set);   // reloaded ROM set; keeps the profile in step
+	LOG_INFO("[PET] video %s Hz", g_video_50hz ? "50" : "60");
+	return true;
+}
+// ---- Save states -------------------------------------------------------------
+// File = header + MACH chunk (what only this layer knows: model, RAM, 50 Hz, speed,
+// CRTC wiring, ROM checksum) + the machine's own chunks (PetMachine::saveState).
+bool pet_save_state(const char* utf8_path, std::string* message)
+{
+	std::string local;
+	std::string& msg = message ? *message : local;
+	if (!g_pet || !utf8_path || !*utf8_path) { msg = "There is no machine to save."; return false; }
+
+	std::vector<uint8_t> bytes;
+	bytes.reserve(200 * 1024);
+	StateWriter w(bytes);
+	w.header();
+	w.beginChunk("MACH");
+	w.i32(g_basic_set); w.i32(g_ram_kb); w.flag(g_video_50hz); w.i32(g_speed_mult);
+	w.flag(g_pet->io().hasCrtc()); w.u8(uint8_t(g_pet->io().crtcBytesPerCharacter()));
+	w.u32(g_pet->bus().romChecksum());
+	w.endChunk();
+	std::string warning;
+	g_pet->saveState(w, &warning);
+
+	// Write beside the target and rename, so a failed write never destroys an older state.
+	const auto target = std::filesystem::u8path(utf8_path);
+	auto temp = target; temp += ".tmp";
+	std::error_code ec;
+	{
+		std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+		out.write(reinterpret_cast<const char*>(bytes.data()), (std::streamsize)bytes.size());
+		out.flush();
+		if (!out) { out.close(); std::filesystem::remove(temp, ec); msg = "The state file could not be written: " + target.filename().u8string(); return false; }
+	}
+	std::filesystem::rename(temp, target, ec);
+	if (ec) {
+		std::filesystem::remove(target, ec);
+		std::filesystem::rename(temp, target, ec);
+	}
+	if (ec) { std::filesystem::remove(temp, ec); msg = "The state file could not be written: " + target.filename().u8string(); return false; }
+	msg = "Saved state " + target.filename().u8string() + (warning.empty() ? std::string() : ": " + warning);
+	LOG_INFO("[PET] %s", msg.c_str());
+	return true;
+}
+
+bool pet_load_state(const char* utf8_path, std::string* message)
+{
+	std::string local;
+	std::string& msg = message ? *message : local;
+	if (!g_pet || !utf8_path || !*utf8_path) { msg = "There is no machine to load into."; return false; }
+	const auto source = std::filesystem::u8path(utf8_path);
+	const std::string name = source.filename().u8string();
+
+	std::error_code ec;
+	const auto fileSize = std::filesystem::file_size(source, ec);
+	if (ec) { msg = "The state file " + name + " cannot be read."; return false; }
+	if (fileSize > 4u * 1024 * 1024) { msg = name + " is too big to be a Pet-GPT state."; return false; }
+	std::vector<uint8_t> bytes;
+	if (!ieee_helpers::read_all_file(source, bytes)) { msg = "The state file " + name + " cannot be read."; return false; }
+	StateFile file;
+	std::string error;
+	if (!file.parse(std::move(bytes), error)) { msg = name + ": " + error + "."; return false; }
+
+	StateReader mach = file.find("MACH");
+	const int model = mach.i32(), ramKb = mach.i32();
+	const bool hz50 = mach.flag();
+	const int speed = mach.i32();
+	const bool hasCrtc = mach.flag();
+	const int bytesPerCharacter = mach.u8();
+	const uint32_t romCrc = mach.u32();
+	const bool crtcModel = model == 12 || model == 8 || model == 96;
+	if (mach.failed() || !is_model_id(model) || (ramKb != 4 && ramKb != 8 && ramKb != 16 && ramKb != 32) ||
+		(speed != 1 && speed != 2) || hasCrtc != crtcModel || bytesPerCharacter != ((model == 8 || model == 96) ? 2 : 1)) {
+		msg = name + ": the machine description is missing or damaged.";
+		return false;
+	}
+	// Everything that can be refused is refused before the machine changes.
+	const bool switchRoms = model != g_basic_set || (crtcModel && hz50 != g_video_50hz);
+	if (switchRoms) {
+		if (!pet_rom_set_available(model)) { msg = "This state needs the ROM set for model " + std::to_string(model) + ", which is not installed (see the roms folder)."; return false; }
+		if (crtcModel && hz50 && !pet_video50_available(model)) { msg = "This state was saved with the 50 Hz editor ROM, which is not installed."; return false; }
+	}
+	// The device chunks are checked on a scratch machine, which needs the same geometry flags only.
+	if (!g_pet->validateState(file, error)) { msg = name + ": " + error + "."; return false; }
+
+	const bool previous50 = g_video_50hz;
+	if (switchRoms) {
+		if (crtcModel) g_video_50hz = hz50;
+		if (!load_basic_set(model)) {
+			g_video_50hz = previous50;
+			msg = "The ROM set for model " + std::to_string(model) + " could not be loaded.";
+			return false;
+		}
+	}
+	g_ram_kb = ramKb;
+	g_pet->bus().setRamSize((size_t)ramKb * 1024);
+
+	std::string warning;
+	if (!g_pet->loadState(file, error, &warning)) {
+		// Not expected after validation; do not leave a half-loaded machine running.
+		g_pet->reset(); reset_audio(); mixer_flush();
+		msg = name + ": " + error + "; the machine was reset.";
+		return false;
+	}
+	if (g_pet->bus().romChecksum() != romCrc) {
+		LOG_WARN("[PET] state %s was saved with a different ROM set than the one installed", name.c_str());
+		if (!warning.empty()) warning += "; ";
+		warning += "the ROM set differs from the one the state was saved with";
+	}
+	g_speed_mult = speed;
+	// Nothing audible carries over: drop the slice in progress and the filter history.
+	reset_audio();
+	g_pet->io().cb2ResetEdgeLog();
+	mixer_flush();
+	if (g_gl) g_gl->setPhosphorModel(g_basic_set);
+	msg = "Loaded state " + name + (warning.empty() ? std::string() : " (" + warning + ")");
+	LOG_INFO("[PET] %s", msg.c_str());
+	return true;
+}
+
 int pet_peek(int addr) { return g_pet ? g_pet->bus().peekByte((uint16_t)addr) : -1; }
 
 void pet_set_ram(int kb) {
-	if (g_basic_set == 8) kb = 32;
+	if (g_basic_set == 8 || g_basic_set == 96) kb = 32;
 	if (g_basic_set == 1) kb = 8;
 	if (kb != 4 && kb != 8 && kb != 16 && kb != 32) return;
 	if (!g_pet) return;
@@ -549,17 +754,17 @@ bool pet_load_software(const char* utf8_path) {
 	// PC64 program containers are .p00, or .p01 to .p99 when names collided.
 	const bool pc64 = ext.size() == 3 && ext[0] == 'p' && isdigit((unsigned char)ext[1]) && isdigit((unsigned char)ext[2]);
 	// Anything else would be injected as a PRG and could reset the machine with garbage.
-	if (!(ext.empty() || ext == "prg" || pc64 || ext == "t64" || ext == "tap" || ext == "d64" || ext == "d71")) {
+	if (!(ext.empty() || ext == "prg" || pc64 || ext == "t64" || ext == "tap" || ext == "d64" || ext == "d71" || ext == "d80" || ext == "d82")) {
 		LOG_ERROR("[PET] unsupported file type '.%s': %s", ext.c_str(), p.c_str());
 		host_message("Unsupported file type", ("\"" + name + "\" has the extension \"." + ext + "\", which Pet-GPT cannot load.\n\n"
-			"Supported: .prg, .p00 (to .p99), .t64, .tap, .d64, .d71, or a file with no extension.").c_str(), true);
+			"Supported: .prg, .p00 (to .p99), .t64, .tap, .d64, .d71, .d80, .d82, or a file with no extension.").c_str(), true);
 		return false;
 	}
 	if (ext == "tap") {
 		std::vector<uint8_t> file;
 		std::string error;
 		if (!ieee_helpers::read_all_file(std::filesystem::u8path(p), file)) error = "Unable to read the TAP file.";
-		else g_pet->io().tape().attach(file, error);
+		else if (g_pet->io().tape().attach(file, error)) g_pet->io().tape().setSourcePath(p);   // a save state re-attaches it by path
 		if (!error.empty()) {
 			LOG_ERROR("[PET] TAP '%s': %s", p.c_str(), error.c_str());
 			host_message("Cannot attach tape", error.c_str(), true);
@@ -570,7 +775,7 @@ bool pet_load_software(const char* utf8_path) {
 		return error.empty();
 	}
 
-	if (ext == "d64" || ext == "d71") {
+	if (ext == "d64" || ext == "d71" || ext == "d80" || ext == "d82") {
 		if (g_pet->bus().io().setIeeeD64Image(p)) {
 			LOG_INFO("[PET] mounted %s '%s'", ext.c_str(), p.c_str());
 			host_status(("Disk " + name + " mounted: LOAD\"$\",8 lists it, LOAD\"*\",8 loads the first program").c_str());
@@ -709,6 +914,9 @@ void emu_end()
 	g_pet = nullptr;
 }
 
-void emu_present() {
-    if(g_gl && g_pet) g_gl->present(g_pet->video().framebuffer(),g_pet->video().fbWidth(),g_pet->video().fbHeight());
+void emu_present(bool advance) {
+    // Only a presenting frame consumes the accumulated time; repaints pass 0 so they never fade the picture.
+    const double dt = advance ? s_present_seconds : 0.0;
+    if (advance) s_present_seconds = 0.0;
+    if(g_gl && g_pet) g_gl->present(g_pet->video().framebuffer(),g_pet->video().fbWidth(),g_pet->video().fbHeight(),dt);
 }

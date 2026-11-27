@@ -50,10 +50,11 @@
 namespace {
 enum {
     Load = wxID_HIGHEST + 100, Eject, Reset, Fullscreen, Scale1, Scale2, Scale3, ScaleFit,
-    Model1, Model2, Model4, Model12, Model8, Ram4, Ram8, Ram16, Ram32,
-    Speed, Graphics, Snes, Keyboard, Crt, Green, White, CrtSettings,
+    Model1, Model2, Model4, Model12, Model8, Model96, Ram4, Ram8, Ram16, Ram32,
+    Speed, Video50, Graphics, Snes, Keyboard, Crt, Green, White, CrtSettings,
     TapePlay, TapeStop, TapeRewind, TapeEject, TogglePause, Screenshot,
-    OpenFiles, OpenRoms, OpenShots, QuickStart, Kofi, RecentClear, RecentFirst
+    OpenFiles, OpenRoms, OpenShots, QuickStart, Kofi, RecentClear, RecentFirst,
+    SaveState = RecentFirst + 100, LoadState, QuickSave, QuickLoad, OpenStates   // above the Recent range (kRecentMax ids)
 };
 constexpr int kRecentMax = 8;
 wxString lastMessageTitle, lastMessageText; // most recent host_message, for tests
@@ -69,7 +70,9 @@ bool native_wayland() {
 #endif
 }
 const char* knobNames[] = {"mono_blur_h", "mono_blur_v", "mono_halation", "mono_halation_radius",
-                          "mono_scanline", "mono_contrast", "mono_brightness"};
+                          "mono_scanline", "mono_contrast", "mono_brightness", "mono_persistence", "mono_persist_ms",
+                          "mono_persist_tail", "mono_persist_tail_ms"};
+const int kKnobTotal = 11;  // must match PetGL::kKnobCount
 class ProgramDropTarget final : public wxFileDropTarget {
 public:
     explicit ProgramDropTarget(std::function<void(const wxString&, size_t)> load) : load_(std::move(load)) {}
@@ -121,11 +124,11 @@ wxString QuickStartText() {
     const wxString files = wxString::FromUTF8(data_path("files")), roms = wxString::FromUTF8(data_path("roms")),
                    shots = wxString::FromUTF8(data_path("screenshots"));
     return "LOADING A PROGRAM\n"
-        "File > Load Program / Disk / Tape... (Ctrl+O), or drag a file onto the window. Pet-GPT loads .prg, .p00 (to .p99), .t64, .tap, .d64 and .d71 "
+        "File > Load Program / Disk / Tape... (Ctrl+O), or drag a file onto the window. Pet-GPT loads .prg, .p00 (to .p99), .t64, .tap, .d64, .d71, .d80 and .d82 "
         "files; the last eight are under File > Recent.\n"
         "A BASIC program starts by itself: Pet-GPT loads it and types RUN for you. A machine-code program names the SYS command that "
         "starts it in the window title.\n\n"
-        "DISK IMAGES (.d64, .d71)\n"
+        "DISK IMAGES (.d64, .d71, .d80, .d82)\n"
         "Loading a disk image mounts it as drive 8; nothing runs yet. Type LOAD\"$\",8 and press Return, then type LIST to see the "
         "directory. To run a program, type LOAD\"NAME\",8 and press Return, then type RUN. LOAD\"*\",8 loads the first program. "
         "File > Eject Disk (Ctrl+E) goes back to the files folder, whose programs also load by name with LOAD\"NAME\",8.\n\n"
@@ -139,7 +142,7 @@ wxString QuickStartText() {
         "DEL: Backspace or Delete\n"
         "RETURN: Enter\n"
         "Graphics characters: F12 switches between the graphics and business keyboards\n"
-        "Esc: leaves fullscreen; in a window it is the PET's ESC key. Pause or Ctrl+P pauses, Ctrl+R resets, F6 saves a screenshot.\n"
+        "Esc: leaves fullscreen; in a window it is the PET's ESC key. Pause or Ctrl+P pauses, Ctrl+R resets, F6 saves a screenshot. Ctrl+S and Ctrl+L quick save and quick load the whole machine (File > Save State... has Ctrl+Shift+S and Ctrl+Shift+L).\n"
         "Machine > Keyboard Mapping... shows the whole layout and lets you change any key.\n\n"
         "WHERE THINGS ARE (File > Open ... Folder opens them)\n"
         "Programs and disk images: " + files + "\nROM sets: " + roms + "\nScreenshots: " + shots;
@@ -228,7 +231,7 @@ public:
         top->Add(path, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(10));
         text("Each PET model has its own sub-folder there:\n"
              "    pet2001  (PET 2001, BASIC 1)\n    pet2001n  (PET 2001-N, BASIC 2)\n    pet4000-9  (PET 4000, BASIC 4)\n"
-             "    pet4000-12  (PET 4032, 12-inch CRTC)\n    cbm8032  (CBM 8032, 80 columns)\n"
+             "    pet4000-12  (PET 4032, 12-inch CRTC)\n    cbm8032  (CBM 8032, 80 columns)\n    cbm8296  (CBM 8296, 64K expansion)\n"
              "One complete model is enough to start; the README lists the exact file names.");
         canDownload_ = !script_.empty() && !shell_.empty();
         text(canDownload_
@@ -498,7 +501,7 @@ private:
     wxString screenshot_;
     std::string startupProgram_;
     FrameSchedule schedule_;
-    int paused_ = 0, ram_ = 32, scale_ = 2, knob_ = 0, smokeFrames_ = 0;
+    int paused_ = 0, ram_ = 32, scale_ = 2, knob_ = 0, smokeFrames_ = 0, smokeTextAt_ = 0;
     bool ready_ = false, closing_ = false, smoke_ = false;
     bool userPaused_ = false;
     wxString titleNote_;
@@ -508,14 +511,14 @@ private:
     bool cursorVisible_ = true, pointerInside_ = false, pendingWindowScale_ = false;
     bool waylandMaximizeRequested_ = false;
     bool pointerHeld_ = false;
-    static constexpr int kModelIds[5] = {1, 2, 4, 12, 8};   // Model1..Model8 order
-    bool romAvailable_[5] = {};
+    static constexpr int kModelIds[6] = {1, 2, 4, 12, 8, 96};   // Model1..Model96 order
+    bool romAvailable_[6] = {};
 
     // Checks the ROM files of every model (a few dozen file-size queries). Run
     // at start-up and whenever a menu opens, so ROMs added while Pet-GPT runs
     // still enable their model, without checking the disk on every command.
     void RefreshRomAvailability() {
-        for (int i = 0; i < 5; ++i) romAvailable_[i] = pet_rom_set_available(kModelIds[i]);
+        for (int i = 0; i < 6; ++i) romAvailable_[i] = pet_rom_set_available(kModelIds[i]);
     }
 
     void UpdateCursor(bool activity = false) {
@@ -563,8 +566,11 @@ private:
         tape->Append(TapeRewind, "&Rewind"); tape->Append(TapeEject, "&Eject");
         file->AppendSubMenu(tape, "&Tape"); file->AppendSeparator();
         file->Append(Screenshot, "Save &Screenshot (F6)"); file->AppendSeparator();
+        file->Append(SaveState, "Sa&ve State... (Ctrl+Shift+S)"); file->Append(LoadState, "Load St&ate... (Ctrl+Shift+L)");
+        file->Append(QuickSave, "&Quick Save State (Ctrl+S)"); file->Append(QuickLoad, "Quic&k Load State (Ctrl+L)");
+        file->AppendSeparator();
         file->Append(OpenFiles, "Open Files Fol&der"); file->Append(OpenRoms, "Open ROM Folder");
-        file->Append(OpenShots, "Open Screenshots Folder"); file->AppendSeparator();
+        file->Append(OpenShots, "Open Screenshots Folder"); file->Append(OpenStates, "Open States Folder"); file->AppendSeparator();
         file->Append(Reset, "&Reset (Ctrl+R)"); file->AppendSeparator(); file->Append(wxID_EXIT, "E&xit");
         bar->Append(file, "&File");
         auto* machine = new wxMenu;
@@ -575,11 +581,13 @@ private:
         machine->AppendRadioItem(Model4, wxS("PET 4000 — BASIC 4"));
         machine->AppendRadioItem(Model12, wxS("PET 4032 — 12-inch CRTC"));
         machine->AppendRadioItem(Model8, wxS("CBM 8032 — 80 columns"));
+        machine->AppendRadioItem(Model96, wxS("CBM 8296"));
         auto* memory = new wxMenu;
         memory->AppendRadioItem(Ram4, "4 KB"); memory->AppendRadioItem(Ram8, "8 KB");
         memory->AppendRadioItem(Ram16, "16 KB"); memory->AppendRadioItem(Ram32, "32 KB");
         machine->AppendSubMenu(memory, "&Memory"); machine->AppendSeparator();
         machine->AppendCheckItem(Speed, "&2x Speed");
+        machine->AppendCheckItem(Video50, "50 Hz video (European editor ROM)", "CRTC models only (CBM 8296: the European 8296-D): use the 50 Hz editor ROM and reset (needs the optional 50 Hz ROM file)");
         machine->AppendCheckItem(Graphics, "&Graphics Keyboard (F12)");
         machine->Append(Keyboard, "&Keyboard Mapping...");
         machine->AppendCheckItem(Snes, "&SNES Adapter");
@@ -636,6 +644,9 @@ private:
         }
         // GLEW probes a deprecated enum on some core-profile drivers.
         while (glGetError() != GL_NO_ERROR) {}
+        // Emulation is wall-clock paced so 50 Hz firmware runs at the right speed on any display;
+        // a vsync-blocking SwapBuffers would stall the 4 ms timer handler, so turn vertical sync off.
+        if (canvas_->SetSwapInterval(0) == wxGLCanvas::SwapInterval::NotSet) LOG_INFO("Could not disable vertical sync (swap interval 0); SwapBuffers may block");
         std::vector<char*> argv;
         for (auto& arg : arguments_) argv.push_back(arg.data());
         joystick_set_host_window(canvas_->GetHandle());
@@ -651,7 +662,7 @@ private:
         pet_set_crt(get_config_bool("video", "crt", true));   // default look: CRT shader, green phosphor
         pet_set_monitor(get_config_bool("video", "crt_tint", true));
         if (pet_get_basic() == 1) ram_ = 8;
-        if (pet_get_basic() == 8) ram_ = 32;
+        if (pet_get_basic() == 8 || pet_get_basic() == 96) ram_ = 32;
         if (!startupProgram_.empty()) LoadPath(wxString::FromUTF8(startupProgram_));
         UpdateMenus(); schedule_.Reset(Clock::now()); timer_.Start(4);
     }
@@ -675,19 +686,29 @@ private:
         UpdateCursor(); // Wall-clock UI behavior must continue while emulation is paused.
         if (!ready_ || closing_ || paused_ || IsIconized()) { schedule_.Reset(Clock::now()); return; }
         bool dropped = false;
+        schedule_.SetPeriod(std::chrono::nanoseconds(emu_frame_nanos()));
         const int count = schedule_.Due(Clock::now(), &dropped);
         if (!count) return;
         if (dropped) mixer_flush();
         PrepareViewport();
         int ran = 0;
         while (ran < count) {
-            emu_run_frame();
+            emu_run_frame(ran + 1 == count); // upload/draw once per batch: only the last catch-up frame is presented
             ++ran;
         }
         canvas_->SwapBuffers();
-        if (smoke_ && (smokeFrames_ += ran) >= 120) {
-            VerifySmokeFrame();
-            Close();
+        if (smoke_) {
+            // Capture two frames after text reaches screen memory (the raster needs a finished frame to
+            // show it), not at a fixed frame: the 8032 chimes before it draws and boots later than the rest.
+            smokeFrames_ += ran;
+            // Test aid: PET_SMOKE_FRAME=N captures at frame N instead, to check a program well after boot.
+            static const int smokeAt = std::getenv("PET_SMOKE_FRAME") ? std::atoi(std::getenv("PET_SMOKE_FRAME")) : 0;
+            if (smokeAt > 0) { if (smokeFrames_ >= smokeAt) { VerifySmokeFrame(); Close(); } return; }
+            if (!smokeTextAt_) for (int a = 0x8000; a < 0x83E8 && !smokeTextAt_; ++a) if (pet_peek(a) != 0x20) smokeTextAt_ = smokeFrames_;
+            if ((smokeFrames_ >= 120 && smokeTextAt_ && smokeFrames_ >= smokeTextAt_ + 2) || smokeFrames_ >= 600) {
+                VerifySmokeFrame();
+                Close();
+            }
         }
     }
 
@@ -708,6 +729,30 @@ private:
         glReadBuffer(GL_BACK); glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, image.GetData());
         glPixelStorei(GL_PACK_ALIGNMENT, alignment); glReadBuffer(readBuffer);
         return image.Mirror(false);
+    }
+
+    // The states folder sits beside the screenshots folder; created when first needed.
+    wxString StatesFolder() {
+        const wxString directory = wxString::FromUTF8(data_path("states"));
+        if (!wxDirExists(directory)) wxFileName::Mkdir(directory, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+        return directory;
+    }
+    // Both run from OnCommand (UI thread, emulation suspended, between frames), so the machine is quiescent.
+    void SaveStateTo(const wxString& path) {
+        std::string message;
+        if (pet_save_state(path.ToStdString(wxConvUTF8).c_str(), &message)) SetNote(wxString::FromUTF8(message));
+        else host_message("Save state failed", message.c_str(), true);
+    }
+    void LoadStateFrom(const wxString& path) {
+        std::string message;
+        if (!pet_load_state(path.ToStdString(wxConvUTF8).c_str(), &message)) {
+            host_message("Load state failed", message.c_str(), true); return;
+        }
+        ram_ = pet_get_ram();
+        RefreshRomAvailability();
+        schedule_.Reset(Clock::now());          // no catch-up burst for the time spent in a dialog
+        if (crt_) crt_->Sync();                  // the persistence profile follows the model
+        SetNote(wxString::FromUTF8(message));    // OnCommand then refreshes the model/RAM/50 Hz/speed menu checks
     }
 
     void SaveScreenshot() {
@@ -832,9 +877,9 @@ private:
         // the models whose ROM sets are missing (the running model stays enabled).
         // Availability comes from the cache RefreshRomAvailability() fills, so this
         // runs no file checks after every command.
-        for (int i = 0; i < 5; ++i) bar->Enable(Model1 + i, true);
-        for (int i = 0; i < 5; ++i) bar->Check(Model1 + i, pet_get_basic() == kModelIds[i]);
-        for (int i = 0; i < 5; ++i) bar->Enable(Model1 + i, pet_get_basic() == kModelIds[i] || romAvailable_[i]);
+        for (int i = 0; i < 6; ++i) bar->Enable(Model1 + i, true);
+        for (int i = 0; i < 6; ++i) bar->Check(Model1 + i, pet_get_basic() == kModelIds[i]);
+        for (int i = 0; i < 6; ++i) bar->Enable(Model1 + i, pet_get_basic() == kModelIds[i] || romAvailable_[i]);
         const int sizes[] = {4, 8, 16, 32};
         // GTK ignores radio-state callbacks for disabled items. Enable the
         // entire group before changing selection so its cached state stays
@@ -842,8 +887,9 @@ private:
         for (int i = 0; i < 4; ++i) bar->Enable(Ram4 + i, true);
         for (int i = 0; i < 4; ++i) if (ram_ == sizes[i]) bar->Check(Ram4 + i, true);
         for (int i = 0; i < 4; ++i) {
-            bar->Enable(Ram4 + i, (pet_get_basic() != 1 || sizes[i] == 8) && (pet_get_basic() != 8 || sizes[i] == 32));
+            bar->Enable(Ram4 + i, (pet_get_basic() != 1 || sizes[i] == 8) && ((pet_get_basic() != 8 && pet_get_basic() != 96) || sizes[i] == 32));
         }
+        bar->Check(Video50, pet_get_video50() != 0); bar->Enable(Video50, pet_video50_available(pet_get_basic()));
         bar->Check(Speed, pet_get_speed() == 2); bar->Check(Graphics, pet_get_gfx_kbd() != 0);
         bar->Check(Snes, pet_get_snes() != 0); bar->Check(Crt, pet_get_crt() != 0);
         bar->Check(Green, pet_get_monitor() != 0); bar->Check(White, pet_get_monitor() == 0);
@@ -878,6 +924,9 @@ private:
         else if (event.ControlDown() && keycode == 'O') command = Load;
         else if (event.ControlDown() && keycode == 'E') command = Eject;
         else if (event.ControlDown() && keycode == 'R') command = Reset;
+        // Ctrl+S / Ctrl+L quick save/load, with Shift the file dialogs. Not with Alt: AltGr reports Ctrl+Alt on some layouts.
+        else if (event.ControlDown() && !event.AltDown() && keycode == 'S') command = event.ShiftDown() ? SaveState : QuickSave;
+        else if (event.ControlDown() && !event.AltDown() && keycode == 'L') command = event.ShiftDown() ? LoadState : QuickLoad;
         if (command) {
             if (!event.IsAutoRepeat()) { wxCommandEvent action(wxEVT_MENU, command); OnCommand(action); }
             return true;
@@ -886,11 +935,11 @@ private:
         if (keycode == WXK_ESCAPE && IsFullScreen()) { if (!event.IsAutoRepeat()) LeaveFullscreen(); return true; }
         if (keycode == WXK_F8) {
             wxString text("[video]\n");
-            for (int i = 0; i < 7; ++i) text += wxString::Format("%s=%.3f\n", knobNames[i], pet_shader_get(i));
+            for (int i = 0; i < kKnobTotal; ++i) text += wxString::Format("%s=%.3f\n", knobNames[i], pet_shader_get(i));
             LOG_INFO("%s", text.ToStdString(wxConvUTF8).c_str());
             wxLogMessage("%s", text); return true;
         }
-        if (keycode == WXK_F9) { knob_ = (knob_ + 1) % 7; UpdateTuningTitle(); return true; }
+        if (keycode == WXK_F9) { knob_ = (knob_ + 1) % kKnobTotal; UpdateTuningTitle(); return true; }
         if (pet_get_crt() && (keycode == WXK_PAGEUP || keycode == WXK_PAGEDOWN)) {
             float lo, hi, step; pet_shader_range(knob_, &lo, &hi, &step);
             pet_shader_set(knob_, pet_shader_get(knob_) + step * (event.ShiftDown() ? 5 : 1) * (keycode == WXK_PAGEUP ? 1 : -1));
@@ -914,13 +963,14 @@ private:
         Suspension suspended(*this);
         canvas_->SetCurrent(*context_);
         const int id = event.GetId();
-        if (id >= Model1 && id <= Model8) {
-            const int models[] = {1, 2, 4, 12, 8}; const int want = models[id - Model1];
+        if (id >= Model1 && id <= Model96) {
+            const int models[] = {1, 2, 4, 12, 8, 96}; const int want = models[id - Model1];
             if (want != pet_get_basic()) {
                 if (pet_set_basic(want)) {
                     ram_ = pet_get_ram();
                     set_config_int("machine", "basic", want); set_config_int("machine", "ram", ram_);
                     SetNote({});   // the machine restarted: the last load/status note no longer applies
+                    if (crt_) crt_->Sync();   // persistence rows now belong to the new machine
                 } else {
                     RefreshRomAvailability();
                     host_message("Missing model ROMs", "Unable to load this model's ROMs. Check the roms directory. The previous model remains active.", true);
@@ -946,7 +996,7 @@ private:
             const auto directory = get_config_string(std::string("paths"), std::string("lastromdir"), std::string());
             // First load: start in the programs folder (~/Pet-GPT/files on Linux).
             wxFileDialog dialog(this, "Load PET software", wxString::FromUTF8(directory.empty() ? data_path("files") : directory), "",
-                "PET software (*.prg;*.p00;*.t64;*.tap;*.d64;*.d71)|*.prg;*.PRG;*.p00;*.P00;*.t64;*.T64;*.tap;*.TAP;*.d64;*.D64;*.d71;*.D71|All files|*",
+                "PET software (*.prg;*.p00;*.t64;*.tap;*.d64;*.d71;*.d80;*.d82)|*.prg;*.PRG;*.p00;*.P00;*.t64;*.T64;*.tap;*.TAP;*.d64;*.D64;*.d71;*.D71;*.d80;*.D80;*.d82;*.D82|All files|*",
                 wxFD_OPEN | wxFD_FILE_MUST_EXIST);
             if (dialog.ShowModal() == wxID_OK) {
                 set_config_string("paths", "lastromdir", dialog.GetDirectory().ToStdString(wxConvUTF8).c_str());
@@ -958,6 +1008,33 @@ private:
         case OpenFiles: OpenFolder(wxString::FromUTF8(data_path("files"))); break;
         case OpenRoms: OpenFolder(wxString::FromUTF8(data_path("roms"))); break;
         case OpenShots: OpenFolder(wxString::FromUTF8(data_path("screenshots"))); break;
+        case OpenStates: OpenFolder(wxString::FromUTF8(data_path("states"))); break;
+        case QuickSave: SaveStateTo(StatesFolder() + wxFileName::GetPathSeparator() + "quick.petstate"); break;
+        case QuickLoad: {
+            const wxString path = StatesFolder() + wxFileName::GetPathSeparator() + "quick.petstate";
+            if (!wxFileExists(path)) SetNote("No quick state saved yet (Ctrl+S saves one)");
+            else LoadStateFrom(path);
+            break;
+        }
+        case SaveState: {
+            static const char* const names[] = {"", "pet2001", "pet2001n", "", "pet4000", "", "", "", "cbm8032", "", "", "", "pet4032"};
+            const int model = pet_get_basic();
+            const wxString stem = wxString(model == 96 ? "cbm8296" : (model >= 0 && model <= 12) ? names[model] : "pet") + "-" + wxDateTime::Now().Format("%Y%m%d-%H%M%S");
+            wxFileDialog dialog(this, "Save PET state", StatesFolder(), stem + ".petstate", "Pet-GPT state (*.petstate)|*.petstate",
+                wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+            if (dialog.ShowModal() == wxID_OK) {
+                wxString path = dialog.GetPath();
+                if (!path.Lower().EndsWith(".petstate")) path += ".petstate";
+                SaveStateTo(path);
+            }
+            break;
+        }
+        case LoadState: {
+            wxFileDialog dialog(this, "Load PET state", StatesFolder(), "", "Pet-GPT state (*.petstate)|*.petstate|All files|*",
+                wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+            if (dialog.ShowModal() == wxID_OK) LoadStateFrom(dialog.GetPath());
+            break;
+        }
         case QuickStart: { QuickStartDialog dialog(this); dialog.ShowModal(); break; }
         case Eject:
             if (pet_get_disk_mounted()) { pet_eject_disk(); SetNote("Disk ejected: drive 8 is the files folder again"); }
@@ -966,6 +1043,10 @@ private:
         case wxID_EXIT: Close(); break;
         case Fullscreen: ToggleFullscreen(); break;
         case Speed: pet_set_speed(pet_get_speed() == 2 ? 1 : 2); set_config_bool("machine", "speed2x", pet_get_speed() == 2); break;
+        case Video50:
+            if (pet_set_video50(!pet_get_video50())) { set_config_bool("machine", "video50hz", pet_get_video50() != 0); SetNote({}); if (crt_) crt_->Sync(); }   // the machine restarted, like a model switch
+            else host_message("Missing editor ROM", "Unable to load the editor ROM. The previous setting remains active.", true);
+            break;
         case Graphics: pet_set_gfx_kbd(!pet_get_gfx_kbd()); set_config_bool("input", "graphics_kbd", pet_get_gfx_kbd() != 0); break;
         case Snes: pet_set_snes(!pet_get_snes()); set_config_bool("input", "snes_adapter", pet_get_snes() != 0); break;
         case Keyboard: pet_keyboard_show_dialog(this); break;
@@ -1046,7 +1127,9 @@ public:
                 "-scale <1|2|3|fit>  Override saved scale\n"
                 "-monitor <n>  Select starting monitor (Windows: 1 = primary, others by layout)\n"
                 "-monitorid <id>  Windows: physical monitor ID from log; Linux: display name\n"
-                "-pet2001 / -basic2 / -basic4 / -4032 / -8032  Select model\n"
+                "-pet2001 / -basic2 / -basic4 / -4032 / -8032 / -8296  Select model (-8296 is the CBM 8296, 60 Hz)\n"
+                "-8296d  CBM 8296-D, the European 50 Hz model\n"
+                "-50hz / -60hz  Use the 50 Hz or 60 Hz editor ROM (12-inch 4000, 8032 and 8296 only)\n"
                 "-disk <image>  Mount a disk image\n"
                 "-h  Show this help", "Pet-GPT", wxOK | wxICON_INFORMATION);
             LogClose(); return false;

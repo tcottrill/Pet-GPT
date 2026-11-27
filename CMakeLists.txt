@@ -22,9 +22,8 @@ if(WIN32)
   add_compile_definitions(UNICODE _UNICODE)
 endif()
 set(PET_INCLUDES petemu petemu/cpu_cores petemu/petsrc petemu/sys_general petemu/sys_input petemu/sys_audio petemu/system petemu/thirdparty)
-# The 6502 core is a vendored copy of the shared AAE core and stays identical to
-# its master, so it builds at the compiler's default warning level; everything
-# else in the core builds with full warnings.
+# The vendored AAE 6502 builds at the compiler's default warning level;
+# the rest of the PET core builds with full warnings.
 add_library(pet_cpu OBJECT petemu/cpu_cores/cpu_6502.cpp)
 target_include_directories(pet_cpu PUBLIC ${PET_INCLUDES})
 add_library(pet_core STATIC

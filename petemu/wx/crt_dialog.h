@@ -11,8 +11,8 @@ public:
     explicit CrtDialog(wxWindow* parent);
     void Sync();
 private:
-    std::array<wxSlider*, 7> sliders_{};
-    std::array<wxSpinCtrlDouble*, 7> values_{};
+    std::array<wxSlider*, 11> sliders_{};
+    std::array<wxSpinCtrlDouble*, 11> values_{};
     wxCheckBox* enabled_{};
     wxRadioBox* tint_{};
 };

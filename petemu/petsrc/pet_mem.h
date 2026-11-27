@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "sys_log.h"
+#include "state_io.h"
 #include "pet2001io.h"      // Pet2001IO (PIA1 + PIA2 + VIA in one core)
 #include "pet2001ieee.h"    // IEEE-488 handshake device
 #include "pet2001video.h"   // PET 40-column text video
@@ -74,6 +75,18 @@ public:
     // Configured base-RAM size (writes at/above this are dropped by writeByte()).
     inline size_t   ramConfiguredBytes() const noexcept { return configuredRamBytes; }
 
+    // 8096/8296 64 KB expansion board (control register $FFF0, write-only).
+    // Absent by default; turning it off also clears the register.
+    void setExpansion(bool present) { expansionPresent_ = present; if (!present) expansionCtrl_ = 0; }
+    bool expansion() const noexcept { return expansionPresent_; }
+
+    // Save states (the MEM chunk): the 64 KB RAM image, configured RAM size,
+    // screen window, expansion board (present flag, control register and its 64 KB
+    // when present) and the IRQ line. ROM bytes are never saved; romChecksum() lets
+    // a loader notice that the installed ROM set differs from the saved one.
+    void saveState(StateWriter& w) const;
+    bool loadState(StateReader& r);   // false, nothing changed, if the payload is cut short or out of range
+    uint32_t romChecksum() const;
 
 private:
     // Memory images
@@ -95,8 +108,22 @@ private:
 public:
     // 8032 has 2 KB screen SRAM (mask 0x7FF); 40-col PETs 1 KB (0x3FF).
     void setScreenWindow(bool is8032) { screenMask_ = is8032 ? 0x07FF : 0x03FF; }
+    // 8296: 4 KB screen memory, no mirror and no open bus at $8800-$8FFF.
+    void setScreenWindow4K() { screenMask_ = 0x0FFF; }
 private:
-    uint16_t screenMask_ = 0x03FF;
+    uint16_t screenMask_ = 0x03FF;   // 0x3FF = 1 KB, 0x7FF = 2 KB, 0xFFF = 4 KB
+
+    // CRTC boards with a 2 KB screen decode nothing at $8800-$8FFF.
+    inline bool screenOpenBus(uint16_t a) const {
+        return a >= 0x8800 && screenMask_ != 0x0FFF && ioUnit.hasCrtc();
+    }
+
+    // Expansion RAM (four 16 KB blocks) and its control register.
+    std::vector<uint8_t> expRam_ = std::vector<uint8_t>(65536, 0x00);
+    uint8_t expansionCtrl_ = 0;
+    bool    expansionPresent_ = false;
+    // Offset into expRam_ when the expansion supplies this address, else -1.
+    int expansionOffset(uint16_t a, bool& writeProtected) const;
 
     inline bool inRange(uint16_t a, uint16_t lo, uint16_t hi) const {
         return (a >= lo) && (a <= hi);

@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------------
-// mos6545.cpp - functional MOS 6545 CRTC (see mos6545.h for the design notes)
+// mos6545.cpp - MOS 6545 register file and raster timing
 // -----------------------------------------------------------------------------
 #include "mos6545.h"
 
@@ -35,8 +35,57 @@ void Mos6545::reset()
     // (cols()==0 tells the glue "not initialized yet").
     std::memset(reg_, 0, sizeof(reg_));
     addr_ = 0;
-    vretrace_ = false;
     epoch_ = 0;
+    programmed_ = false;
+    resetRaster();
+}
+
+void Mos6545::resetRaster()
+{
+    column_ = row_ = raster_ = line_ = adjust_ = syncLines_ = 0;
+    rowAddress_ = screenStart();
+    vretrace_ = false;
+}
+
+bool Mos6545::tick()
+{
+    // Latch the programmed memory address at the top of a new frame.
+    if (line_ == 0 && column_ == 0) {
+        rowAddress_ = screenStart();
+        if (reg_[7] == 0 && syncLines_ == 0)
+            syncLines_ = syncWidth();
+    }
+    if (++column_ <= reg_[0])
+        return false;
+
+    column_ = 0;
+    ++line_;
+    if (syncLines_ > 0)
+        --syncLines_;
+
+    if (adjust_ != 0) {
+        if (adjust_++ < reg_[5])
+            return false;
+    } else {
+        if (++raster_ <= reg_[9])
+            return false;
+        raster_ = 0;
+        if (++row_ <= reg_[4]) {
+            rowAddress_ = (rowAddress_ + cols()) & 0x3fff;
+            if (row_ == reg_[7])
+                syncLines_ = syncWidth();
+            return false;
+        }
+        if (reg_[5] != 0) {
+            adjust_ = 1;
+            return false;
+        }
+    }
+
+    row_ = raster_ = line_ = adjust_ = 0;
+    if (reg_[7] == 0 && syncLines_ == 0)
+        syncLines_ = syncWidth();
+    return true;
 }
 
 void Mos6545::writeAddr(uint8_t v)
@@ -64,6 +113,7 @@ void Mos6545::writeData(uint8_t v)
     if (geometry && reg_[addr_] != nv)
         ++epoch_;
     reg_[addr_] = nv;
+    if (addr_ == 0) programmed_ = true;
 }
 
 uint8_t Mos6545::readData() const
@@ -72,4 +122,37 @@ uint8_t Mos6545::readData() const
     // everything else is write-only and reads as 0.
     if (addr_ >= 14 && addr_ <= 17) return reg_[addr_];
     return 0x00;
+}
+
+void Mos6545::saveState(StateWriter& w) const
+{
+    w.bytes(reg_, sizeof reg_);
+    w.u8(addr_);
+    w.flag(vretrace_);
+    w.u32(epoch_);
+    w.flag(programmed_);
+    w.i32(column_); w.i32(row_); w.i32(raster_); w.i32(line_); w.i32(adjust_); w.i32(syncLines_);
+    w.u16(rowAddress_);
+}
+
+bool Mos6545::loadState(StateReader& r)
+{
+    Mos6545 t = *this;   // all or nothing
+    r.bytes(t.reg_, sizeof t.reg_);
+    for (int i = 0; i < 18; ++i) t.reg_[i] &= kRegMask[i];
+    t.addr_ = r.u8();
+    t.vretrace_ = r.flag();
+    t.epoch_ = r.u32();
+    t.programmed_ = r.flag();
+    t.column_ = r.i32(); t.row_ = r.i32(); t.raster_ = r.i32(); t.line_ = r.i32(); t.adjust_ = r.i32(); t.syncLines_ = r.i32();
+    t.rowAddress_ = r.u16();
+    // The counters size the renderer's raster buffer, so a damaged file must not reach it.
+    if (r.failed() || t.addr_ > 31 || t.column_ < 0 || t.column_ > 255 || t.row_ < 0 || t.row_ > 255 ||
+        t.raster_ < 0 || t.raster_ > 32 || t.line_ < 0 || t.line_ > 8192 || t.adjust_ < 0 || t.adjust_ > 32 ||
+        t.syncLines_ < 0 || t.syncLines_ > 16 || t.rowAddress_ > 0x3FFF) {
+        r.fail();
+        return false;
+    }
+    *this = t;
+    return true;
 }

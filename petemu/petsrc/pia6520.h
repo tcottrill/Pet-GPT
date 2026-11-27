@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "state_io.h"
 
 // -----------------------------------------------------------------------------
 // PIA6520
@@ -113,7 +114,10 @@ public:
     void handleCB2Edge();
 
     void tick();
-  
+
+    // Save states: every pin level, edge-detect history and interrupt flag.
+    void saveState(StateWriter& w) const;
+    bool loadState(StateReader& r);
 
 private:
    

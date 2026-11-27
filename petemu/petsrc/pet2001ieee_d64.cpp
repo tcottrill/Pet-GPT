@@ -10,6 +10,15 @@ using namespace ieee_helpers;
 // Layer: D64 fs helpers
 int PetIEEE::d64_sectors_per_track(int track) const {
 	if (track < 1) return 0;
+	if (d64_8x50_) {
+		// 8050: tracks 1-77; 8250: side 2 (78-154) repeats the same four speed zones.
+		if (track > d64_image_tracks_) return 0;
+		const int zt = (track > 77) ? track - 77 : track;
+		if (zt <= 39) return 29;
+		if (zt <= 53) return 27;
+		if (zt <= 64) return 25;
+		return 23;
+	}
 	int z = track;
 	if (track > 35) {
 		// 1571 side 1 (tracks 36..70) mirrors side 0's speed-zone geometry; the
@@ -53,7 +62,8 @@ bool PetIEEE::d64_write_sector(int track, int sector, const uint8_t* src) {
 bool PetIEEE::d64_flush_image_to_disk() {
 	if (d64Path.empty() || d64.empty()) return false;
 	// Writable geometries: 35-track (.d64/1541) and 70-track (.d71/1571), with
-	// or without a trailing error map. Any other size (e.g. 40-track) has BAM
+	// or without a trailing error map, and the plain .d80 (8050) / .d82 (8250)
+	// images. Any other size (e.g. 40-track) has BAM
 	// math we don't model, so it stays WRITE-PROTECTED: reads work, writes fail
 	// cleanly (callers set WRITE ERROR / DS$).
 	const size_t n = d64.size();
@@ -71,12 +81,12 @@ bool PetIEEE::d64_flush_image_to_disk() {
 bool PetIEEE::buildDirectoryPRG_D64(std::vector<uint8_t>& out, uint16_t startAddr, const std::string& match) {
 	if (!isD64Mounted()) return false;
 
-	// ----- Read BAM (Track 18 / Sector 0) -----
+	// ----- Read BAM (Track 18 / Sector 0); on an 8050/8250 the header (39/0) -----
 	uint8_t bam[256];
-	if (!d64_read_sector(18, 0, bam)) return false;
+	if (!d64_read_sector(d64_dir_track(), 0, bam)) return false;
 
 	// Disk name (strip trailing $A0; NO padding inside quotes)
-	const std::string diskName = dir_name_to_ascii(&bam[0x90]); // 16 bytes, $A0 padded in image
+	const std::string diskName = dir_name_to_ascii(&bam[d64_8x50_ ? 0x06 : 0x90]); // 16 bytes, $A0 padded in image
 
 	// Disk ID: 2 chars at $A2/$A3 -> uppercase alnum or space
 	auto read_id_2 = [](const uint8_t* p) -> std::string {
@@ -107,16 +117,26 @@ bool PetIEEE::buildDirectoryPRG_D64(std::vector<uint8_t>& out, uint16_t startAdd
 	// Free blocks: BAM free count per track. Track 18 (the directory track) is
 	// excluded, matching a real 1541 (a blank disk reports 664, not 683).
 	int freeBlocks = 0;
-	for (int track = 1; track <= 35; ++track) {
-		if (track == 18) continue;
-		const int off = 0x04 + (track - 1) * 4;
-		if (off >= 256) break;
-		freeBlocks += bam[off];
+	if (d64_8x50_) {
+		// The 8050/8250 report the plain BAM total: unlike the 1541's track 18, the
+		// unused directory sectors on track 39 count (a blank 8050 shows 2052).
+		D64Catalog bamCat{};
+		if (!d64_parse_bam(bamCat)) return false;
+		for (int track = 1; track <= bamCat.tracks; ++track)
+			freeBlocks += bamCat.bam[track].freeCount;
+	}
+	else {
+		for (int track = 1; track <= 35; ++track) {
+			if (track == 18) continue;
+			const int off = 0x04 + (track - 1) * 4;
+			if (off >= 256) break;
+			freeBlocks += bam[off];
+		}
 	}
 	// 1571 side 1: free counts for tracks 36..70 sit at $DD in 18/0. Track 53
 	// (the side-1 BAM track) is excluded, same convention as track 18 - a blank
 	// .d71 then reports 1328 blocks free.
-	if (d64_double_sided()) {
+	if (d64_double_sided() && !d64_8x50_) {
 		for (int track = 36; track <= 70; ++track) {
 			if (track == D71_BAM2_TRACK) continue;
 			freeBlocks += bam[D71_SIDE1_COUNT_OFF + (track - 36)];
@@ -161,14 +181,14 @@ bool PetIEEE::buildDirectoryPRG_D64(std::vector<uint8_t>& out, uint16_t startAdd
 		};
 
 	// Header fields (the shared emitter pads/wraps them like a 1541).
-	const std::string id = read_id_2(&bam[0xA2]);   // e.g. "1A"
-	const std::string dos = read_dos_2(&bam[0xA5]); // e.g. "2A"
+	const std::string id = read_id_2(&bam[d64_8x50_ ? 0x18 : 0xA2]);   // e.g. "1A"
+	const std::string dos = read_dos_2(&bam[d64_8x50_ ? 0x1B : 0xA5]); // e.g. "2A", "2C" on an 8050/8250
 
-	// ----- Walk directory chain (18/1 -> ..) and gather entries -----
+	// ----- Walk directory chain (18/1 -> .., 39/1 on an 8050/8250) and gather entries -----
 	std::vector<DirEntry> entries;
 
 	uint8_t sec[256];
-	int t = 18, s = 1;
+	int t = d64_dir_track(), s = 1;
 	SectorVisits visited;
 	while (true) {
 		if (!visited.visit(t, s) || !d64_read_sector(t, s, sec)) return false;
@@ -317,8 +337,46 @@ bool PetIEEE::buildDirectoryPRG_common(std::vector<uint8_t>& out, uint16_t start
 // -----------------------------------------------------------------------------
 // Catalog / BAM / directory / allocation helpers
 // -----------------------------------------------------------------------------
+// 8050/8250 BAM blocks: 38/0, 38/3 (and 38/6, 38/9 on a .d82). Each is
+// 6 header bytes (link, 'C', lowest track, highest track + 1) then 5 bytes per
+// track: free count and a 4-byte bitmap (1 = free, bit 0 = sector 0).
+static const int D80_BAM_SECTORS[4] = { 0, 3, 6, 9 };
+
+void PetIEEE::d80_bam_range(const uint8_t* blk, int index, int& lo, int& hi) const
+{
+	lo = blk[4]; hi = blk[5];
+	if (lo < 1 || hi <= lo || hi > d64_num_tracks() + 1 || 6 + (hi - lo) * 5 > 256) {
+		lo = 1 + 50 * index;
+		hi = std::min(lo + 50, d64_num_tracks() + 1);
+	}
+}
+
 bool PetIEEE::d64_parse_bam(D64Catalog& out)
 {
+	if (d64_8x50_) {
+		const int nt8 = d64_num_tracks();
+		out.tracks = nt8;
+		out.bam.clear();
+		out.bam.resize(nt8 + 1);
+		for (int i = 0; i < d80_bam_block_count(); ++i) {
+			uint8_t blk[256];
+			if (!d64_read_sector(D80_BAM_TRACK, D80_BAM_SECTORS[i], blk)) return false;
+			int lo, hi;
+			d80_bam_range(blk, i, lo, hi);
+			for (int t = lo; t < hi; ++t) {
+				const int off = 6 + (t - lo) * 5;
+				D64BamTrack bt{};
+				bt.freeCount = blk[off];
+				for (int k = 0; k < 4; ++k) bt.bits[k] = blk[off + 1 + k];
+				out.bam[t] = bt;
+			}
+		}
+		out.dirFirstT = D80_DIR_TRACK;
+		out.dirFirstS = 1;
+		out.is40 = false;
+		return true;
+	}
+
 	uint8_t bam[256];
 	if (!d64_read_sector(18, 0, bam)) return false;
 
@@ -413,24 +471,41 @@ bool PetIEEE::d64_bam_is_free(const D64Catalog& cat, int track, int sector) cons
 {
 	if (track <= 0 || track >= (int)cat.bam.size()) return false;
 	const D64BamTrack& bt = cat.bam[track];
-	if (sector < 0 || sector >= 24) return false;
-	return test_bit_24(bt.bits, sector);
+	if (sector < 0 || sector >= 32) return false;
+	return test_bit_32(bt.bits, sector);
 }
 
 void PetIEEE::d64_bam_set_used(D64Catalog& cat, int track, int sector, bool used)
 {
 	if (track <= 0 || track >= (int)cat.bam.size()) return;
 	D64BamTrack& bt = cat.bam[track];
-	set_bit_24(bt.bits, sector, !used); // 1=free, 0=used
+	set_bit_32(bt.bits, sector, !used); // 1=free, 0=used
 
 	int cnt = 0;
 	const int maxS = d64_sectors_per_track(track);
-	for (int s = 0; s < maxS; ++s) if (test_bit_24(bt.bits, s)) ++cnt;
+	for (int s = 0; s < maxS; ++s) if (test_bit_32(bt.bits, s)) ++cnt;
 	bt.freeCount = (uint8_t)cnt;
 }
 
 bool PetIEEE::d64_write_bam_sector(const D64Catalog& cat)
 {
+	if (d64_8x50_) {
+		// Patch each BAM block's per-track entries in place; link/lo/hi bytes stay.
+		for (int i = 0; i < d80_bam_block_count(); ++i) {
+			uint8_t blk[256];
+			if (!d64_read_sector(D80_BAM_TRACK, D80_BAM_SECTORS[i], blk)) return false;
+			int lo, hi;
+			d80_bam_range(blk, i, lo, hi);
+			for (int t = lo; t < hi && t < (int)cat.bam.size(); ++t) {
+				const int off = 6 + (t - lo) * 5;
+				blk[off] = cat.bam[t].freeCount;
+				for (int k = 0; k < 4; ++k) blk[off + 1 + k] = cat.bam[t].bits[k];
+			}
+			if (!d64_write_sector(D80_BAM_TRACK, D80_BAM_SECTORS[i], blk)) return false;
+		}
+		return true;
+	}
+
 	uint8_t bam[256];
 	if (!d64_read_sector(18, 0, bam)) return false;
 
@@ -507,7 +582,7 @@ bool PetIEEE::d64_scratch_dir_entry(D64Catalog& cat, int idx)
 bool PetIEEE::d64_append_dir_entry(D64Catalog& cat, const D64DirEntry& src, int& outIndex)
 {
 	// Walk chain for free slot (start at dir head, or 18/1)
-	uint8_t t = 18, s = 1;
+	uint8_t t = (uint8_t)d64_dir_track(), s = 1;
 	if (cat.dirFirstT) { t = cat.dirFirstT; s = cat.dirFirstS; }
 
 	SectorVisits visited;
@@ -579,10 +654,10 @@ bool PetIEEE::d64_append_dir_entry(D64Catalog& cat, const D64DirEntry& src, int&
 
 bool PetIEEE::d64_find_last_dir_sector(const D64Catalog& cat, uint8_t& outT, uint8_t& outS)
 {
-	uint8_t t = cat.dirFirstT ? cat.dirFirstT : 18;
+	uint8_t t = cat.dirFirstT ? cat.dirFirstT : (uint8_t)d64_dir_track();
 	uint8_t s = cat.dirFirstS ? cat.dirFirstS : 1;
 
-	if (t == 0) { outT = 18; outS = 1; return true; }
+	if (t == 0) { outT = (uint8_t)d64_dir_track(); outS = 1; return true; }
 
 	SectorVisits visited;
 	while (true) {
@@ -601,9 +676,9 @@ bool PetIEEE::d64_alloc_next_dir_sector_on_track18(
 	uint8_t prevT, uint8_t prevS,
 	uint8_t& newT, uint8_t& newS)
 {
-	if (prevT != 18) return false;
+	if (prevT != d64_dir_track()) return false;
 
-	const int track = 18;
+	const int track = d64_dir_track();
 	const int maxS = d64_sectors_per_track(track);
 	if (maxS <= 1) return false;
 
@@ -646,12 +721,11 @@ bool PetIEEE::d64_alloc_block(D64Catalog& cat, int preferredTrack, int interleav
 {
 	const int nt = d64_num_tracks();
 	int t = preferredTrack;
-	if (t < 1 || t > nt) t = 17;
-	if (t == 18 || t == D71_BAM2_TRACK) t = 17; // never start on a DOS/BAM track
+	if (t < 1 || t > nt) t = d64_file_start_track();
+	if (d64_reserved_track(t)) t = d64_file_start_track(); // never start on a DOS/BAM track
 
 	auto try_track = [&](int tt) -> bool {
-		if (tt == 18) return false;                          // side-0 dir/BAM track
-		if (nt > 35 && tt == D71_BAM2_TRACK) return false;   // side-1 BAM track (.d71)
+		if (d64_reserved_track(tt)) return false;            // dir/BAM tracks (18, 53 on .d71; 38, 39 on .d80/.d82)
 		const int ms = d64_sectors_per_track(tt);
 		if (ms <= 0) return false;
 
@@ -706,9 +780,10 @@ bool PetIEEE::d64_free_block(D64Catalog& cat, int track, int sector)
 // -----------------------------------------------------------------------------
 void PetIEEE::d64_log_bam_sanity(const D64Catalog& cat) const
 {
-	for (int t = 1; t <= 35; ++t) {
+	const int lastTrack = d64_8x50_ ? cat.tracks : 35;
+	for (int t = 1; t <= lastTrack; ++t) {
 		const D64BamTrack& bt = cat.bam[t];
-		const int pop = count_bits_24(bt.bits);
+		const int pop = count_bits_32(bt.bits);
 		if ((int)bt.freeCount != pop) {
 			LOG_ERROR("[D64] BAM MISMATCH t=%d freeCount=%u bits_pop=%d (bits=%02X %02X %02X)",
 				t, (unsigned)bt.freeCount, pop,
@@ -738,7 +813,7 @@ bool PetIEEE::d64_write_file_chain(
 {
 	// first block near track 17
 	D64Block first{};
-	if (!d64_alloc_block(cat, 17, D64_FILE_INTERLEAVE, first)) return false;
+	if (!d64_alloc_block(cat, d64_file_start_track(), d64_file_interleave(), first)) return false;
 
 	D64Block cur = first;
 	uint16_t writtenSectors = 0;
@@ -755,7 +830,7 @@ bool PetIEEE::d64_write_file_chain(
 
 		if (!last) {
 			// allocate next block on/near this track using interleave
-			if (!d64_alloc_block(cat, cur.track, D64_FILE_INTERLEAVE, next)) return false;
+			if (!d64_alloc_block(cat, cur.track, d64_file_interleave(), next)) return false;
 			buf[0] = next.track;
 			buf[1] = next.sector;
 		}
@@ -850,8 +925,7 @@ bool PetIEEE::d64_save_file(const std::string& petName,
 	const int needBlocks = (len < 1) ? 1 : (int)((len + 253) / 254);
 	int allocFree = 0;
 	for (int t = 1; t <= cat.tracks; ++t) {
-		if (t == 18) continue;
-		if (cat.tracks > 35 && t == D71_BAM2_TRACK) continue;
+		if (d64_reserved_track(t)) continue;
 		allocFree += cat.bam[t].freeCount;
 	}
 	if (needBlocks > allocFree + oldBlocks) {
@@ -1161,6 +1235,7 @@ bool PetIEEE::d64_format(const std::string& diskName, const std::string& id)
 {
 	if (!isD64Mounted()) { set_status(74, "DRIVE NOT READY", 0, 0); return false; }
 	if (!writable_disk_size(d64.size())) { set_status(26, "WRITE PROTECT ON", 0, 0); return false; }
+	if (d64_8x50_) return d80_format(diskName, id);
 	ImageTransaction transaction(d64);
 
 	uint8_t cur[256];
@@ -1233,6 +1308,71 @@ bool PetIEEE::d64_format(const std::string& diskName, const std::string& id)
 }
 
 // -----------------------------------------------------------------------------
+// NEW / HEADER for a .d80/.d82: header block 39/0, BAM blocks on track 38 (all of
+// track 38 marked used, as DOS formats it), empty directory 39/1. Same ID rules as
+// d64_format. All files are wiped; the image size is preserved.
+// -----------------------------------------------------------------------------
+bool PetIEEE::d80_format(const std::string& diskName, const std::string& id)
+{
+	ImageTransaction transaction(d64);
+
+	uint8_t cur[256];
+	const bool haveCur = d64_read_sector(D80_DIR_TRACK, 0, cur); // for ID preservation
+
+	const int nt = d64_num_tracks();
+	const int nBlocks = d80_bam_block_count();
+
+	uint8_t hdr[256] = { 0 };
+	hdr[0] = D80_BAM_TRACK; hdr[1] = D80_BAM_SECTORS[0];   // first BAM block
+	hdr[2] = 'C';                                            // DOS format flag
+	const std::string pn = to_pet_upper_a0_padded_16(diskName);
+	for (int i = 0; i < 16; ++i) hdr[0x06 + i] = (uint8_t)pn[i];
+	hdr[0x16] = 0xA0; hdr[0x17] = 0xA0;
+	const std::string up = to_upper_ascii(id);
+	uint8_t id0 = 0xA0, id1 = 0xA0;
+	if (!up.empty()) { id0 = (uint8_t)up[0]; id1 = (up.size() >= 2) ? (uint8_t)up[1] : (uint8_t)0xA0; }
+	else if (haveCur) { id0 = cur[0x18]; id1 = cur[0x19]; }
+	hdr[0x18] = id0; hdr[0x19] = id1;
+	hdr[0x1A] = 0xA0;
+	hdr[0x1B] = '2'; hdr[0x1C] = 'C';                       // DOS type "2C"
+	hdr[0x1D] = 0xA0; hdr[0x1E] = 0xA0; hdr[0x1F] = 0xA0; hdr[0x20] = 0xA0;
+
+	for (int i = 0; i < nBlocks; ++i) {
+		uint8_t blk[256] = { 0 };
+		if (i + 1 < nBlocks) { blk[0] = D80_BAM_TRACK; blk[1] = D80_BAM_SECTORS[i + 1]; }
+		else { blk[0] = D80_DIR_TRACK; blk[1] = 1; }       // last BAM block -> first directory block
+		blk[2] = 'C';
+		const int lo = 1 + 50 * i, hi = std::min(lo + 50, nt + 1);
+		blk[4] = (uint8_t)lo; blk[5] = (uint8_t)hi;
+		for (int t = lo; t < hi; ++t) {
+			const int n = d64_sectors_per_track(t);
+			uint8_t bits[4] = { 0,0,0,0 };
+			for (int s = 0; s < n; ++s) set_bit_32(bits, s, true);
+			if (t == D80_BAM_TRACK) { bits[0] = bits[1] = bits[2] = bits[3] = 0; }   // all of track 38 used
+			if (t == D80_DIR_TRACK) { bits[0] &= (uint8_t)~0x03; }                   // 39/0 header + 39/1 directory
+			const int off = 6 + (t - lo) * 5;
+			blk[off] = (uint8_t)count_bits_32(bits);
+			for (int k = 0; k < 4; ++k) blk[off + 1 + k] = bits[k];
+		}
+		if (!d64_write_sector(D80_BAM_TRACK, D80_BAM_SECTORS[i], blk)) {
+			set_status(25, "WRITE ERROR", 0, 0);
+			return false;
+		}
+	}
+
+	uint8_t dir[256] = { 0 };
+	dir[0] = 0x00; dir[1] = 0xFF;                           // single empty directory sector
+	if (!d64_write_sector(D80_DIR_TRACK, 0, hdr) || !d64_write_sector(D80_DIR_TRACK, 1, dir) ||
+		!d64_flush_image_to_disk()) {
+		set_status(25, "WRITE ERROR", 0, 0);
+		return false;
+	}
+	transaction.commit();
+	set_status(0, "OK", 0, 0);
+	return true;
+}
+
+// -----------------------------------------------------------------------------
 // VALIDATE / COLLECT (CMD15 "V"): rebuild the BAM from the directory + file
 // chains, reclaiming orphaned blocks. Unclosed ("splat") files are removed.
 // -----------------------------------------------------------------------------
@@ -1250,7 +1390,7 @@ bool PetIEEE::d64_validate()
 	for (int t = 1; t <= nt; ++t) {
 		D64BamTrack bt{};
 		const int n = d64_sectors_per_track(t);
-		for (int s = 0; s < n; ++s) set_bit_24(bt.bits, s, true);
+		for (int s = 0; s < n; ++s) set_bit_32(bt.bits, s, true);
 		bt.freeCount = (uint8_t)n;
 		cat.bam[t] = bt;
 	}
@@ -1269,9 +1409,16 @@ bool PetIEEE::d64_validate()
 		};
 
 	// System blocks: BAM (18/0) and the directory chain (18/1 -> ...).
-	d64_bam_set_used(cat, 18, 0, true);
-	if (nt > 35) d64_bam_set_used(cat, D71_BAM2_TRACK, 0, true); // side-1 BAM (.d71)
-	if (!mark_chain(cat.dirFirstT ? cat.dirFirstT : 18, cat.dirFirstS ? cat.dirFirstS : 1)) {
+	if (d64_8x50_) {
+		// Track 38 (BAM blocks) is kept fully used as formatted; 39/0 is the header.
+		for (int s = 0; s < d64_sectors_per_track(D80_BAM_TRACK); ++s) d64_bam_set_used(cat, D80_BAM_TRACK, s, true);
+		d64_bam_set_used(cat, D80_DIR_TRACK, 0, true);
+	}
+	else {
+		d64_bam_set_used(cat, 18, 0, true);
+		if (nt > 35) d64_bam_set_used(cat, D71_BAM2_TRACK, 0, true); // side-1 BAM (.d71)
+	}
+	if (!mark_chain(cat.dirFirstT ? cat.dirFirstT : d64_dir_track(), cat.dirFirstS ? cat.dirFirstS : 1)) {
 		set_status(71, "DIR ERROR", 0, 0); return false;
 	}
 

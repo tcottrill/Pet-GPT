@@ -46,14 +46,29 @@ public:
             pulses.push_back(ticks);
         }
         pulses_ = std::move(pulses);
+        sourcePath_.clear();   // the caller names the file after a successful attach
         rewind();
         return true;
     }
     void play() { if (mounted() && !atEnd()) playing_ = true; }
     void stop() { playing_ = false; }
     void rewind() { stop(); position_ = 0; remaining_ = mounted() ? pulses_[0] : 0; }
-    void eject() { pulses_.clear(); rewind(); }
+    void eject() { pulses_.clear(); sourcePath_.clear(); rewind(); }
     bool mounted() const { return !pulses_.empty(); }
+    // The file the host attached this tape from (empty if unknown), so a save
+    // state can attach it again. The image itself is never stored in a state.
+    const std::string& sourcePath() const { return sourcePath_; }
+    void setSourcePath(const std::string& path) { sourcePath_ = path; }
+    size_t pulseCount() const { return pulses_.size(); }
+    uint32_t remaining() const { return remaining_; }
+    // Puts the transport back where a save state found it. False (nothing
+    // changed) if the position does not fit this image.
+    bool restore(size_t position, uint32_t remaining, bool playing) {
+        if (!mounted() || position > pulses_.size()) return false;
+        if (position == pulses_.size() ? (remaining != 0 || playing) : (remaining == 0 || remaining > pulses_[position])) return false;
+        position_ = position; remaining_ = remaining; playing_ = playing;
+        return true;
+    }
     bool playing() const { return playing_; }
     bool atEnd() const { return mounted() && position_ == pulses_.size(); }
     size_t position() const { return position_; }
@@ -68,6 +83,7 @@ public:
     }
 private:
     std::vector<uint32_t> pulses_;
+    std::string sourcePath_;
     size_t position_ = 0;
     uint32_t remaining_ = 0;
     bool playing_ = false;

@@ -15,6 +15,7 @@
 #include "snes_adapter.h"
 #include "mos6545.h"
 #include "pet_tape.h"
+#include "state_io.h"
 
 // -----------------------------------------------------------------------------
 // Pet2001IO
@@ -111,10 +112,24 @@ public:
 	bool getViaCA2Output() const { return m_via.getCA2Output(); }
 	Mos6545& crtc() { return m_crtc; }
 	void configureCrtc(bool present, int bytesPerCharacter);
+	bool hasCrtc() const { return m_hasCrtc; }
+	int crtcBytesPerCharacter() const { return m_crtcBytesPerCharacter; }
+	int crtcFrameCycles() const { return (m_hasCrtc && m_crtc.programmed()) ? m_crtc.frameCycles() : 0; }
 	void setViaCA2Input(bool level) { m_via.setCA2(level); }
 
 	// IEEE data preloading
 	void ieeeLoadData(uint16_t addr, const std::vector<uint8_t>& bytes);
+
+	// Save states: writes the chunks PIA1, PIA2, VIA , CRTC and IO  (the glue:
+	// video sync levels and cycle count, last IRQ level, port input latches, the
+	// SNES adapter's shift progress). The keyboard rows are not saved: the host
+	// re-reads them every frame. The IEEE-488 drive behind the bus is not
+	// serialised; loading puts it in its power-on state and then re-applies the
+	// handshake lines the PET itself drives, from the restored PIA/VIA registers.
+	// loadState() expects a file that validated on a scratch machine (see
+	// PetMachine::loadState); a chunk it cannot read fails it, possibly half done.
+	void saveState(StateWriter& w) const;
+	bool loadState(const StateFile& file);
 
 private:
 	// Recompute combined IRQ and drive m_setIrq only on change.
@@ -157,8 +172,7 @@ private:
 	// -------------------------------------------------------------------------
 	// 40-col discrete video board: 25 rows * 8 lines * 64 cycles = 12,800
 	// active + 3,840 V-Blank (60 lines) = 16,640 total (60.096 Hz).
-	// In 80-column mode the CRTC register file drives the timing instead
-	// (refreshFrameTiming, re-evaluated once per frame at the wrap).
+	// CRTC models use Mos6545's raster counters instead.
 	static constexpr uint32_t kCyclesPerFrame = 16640;
 	static constexpr uint32_t kVBlankEnd = 3840;
 	static constexpr int kDiscreteLineCycles = 64;
@@ -166,9 +180,6 @@ private:
 	static constexpr uint32_t kFirstDiscreteFetch =
 		kVBlankEnd + kDiscreteLineCycles - Pet2001Video::COLS;
 
-	void refreshFrameTiming();
-
 	uint32_t m_videoCycle = 0;
-	uint32_t m_frameCycles = kCyclesPerFrame; // current frame length
-	uint32_t m_vblankEnd   = kVBlankEnd;      // current V-blank length
+	bool m_crtcSync = false;
 };

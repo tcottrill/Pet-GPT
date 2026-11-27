@@ -783,6 +783,81 @@ void cpu_6502::reset6502()
 }
 
 // -----------------------------------------------------------------------------
+// Save-state snapshot of the registers and the state kept between instructions.
+// -----------------------------------------------------------------------------
+// Byte layout: see the comment block in cpu_6502.h.
+size_t cpu_6502::save_state(uint8_t* out, size_t capacity) const
+{
+	if (!out || capacity < kStateMaxSize) return 0;
+	size_t n = 0;
+	auto put8 = [&](uint8_t v) { out[n++] = v; };
+	auto put16 = [&](uint16_t v) { put8(uint8_t(v & 0xFF)); put8(uint8_t(v >> 8)); };
+	put8('6'); put8('5'); put8('0'); put8('2');
+	put8(1);
+	put8(uint8_t(cpu_model));
+	put16(26);                                   // portable 16 + private length 2 + private 8
+	put16(PC);
+	put8(A); put8(X); put8(Y); put8(S);
+	put8(uint8_t(P | F_T));
+	put8(_irqPending ? 1 : 0);                   // no NMI latch in this core
+	const uint64_t cycles = uint64_t(uint32_t(clocktickstotal));
+	for (int i = 0; i < 8; ++i) put8(uint8_t(cycles >> (8 * i)));
+	put16(8);
+	put16(PPC);
+	put8(_irqMode ? 1 : 0);
+	put8(irq_inhibit_one);
+	put8(jammed ? 1 : 0);
+	put8(kil_logged ? 1 : 0);
+	put8(io_port_data); put8(io_port_dir);
+	return n;
+}
+
+bool cpu_6502::load_state(const uint8_t* in, size_t size)
+{
+	if (!in || size < 8 || in[0] != '6' || in[1] != '5' || in[2] != '0' || in[3] != '2') return false;
+	if (in[4] != 1) return false;                 // a version this core does not know
+	const size_t rest = size_t(in[6]) | (size_t(in[7]) << 8);
+	if (rest < 16 || size - 8 < rest) return false;
+	const uint8_t* p = in + 8;
+
+	const uint16_t pc = uint16_t(p[0] | (p[1] << 8));
+	const uint8_t a = p[2], x = p[3], y = p[4], s = p[5];
+	const uint8_t status = p[6];
+	const bool irq = (p[7] & 1) != 0;
+	uint64_t cycles = 0;
+	for (int i = 0; i < 8; ++i) cycles |= uint64_t(p[8 + i]) << (8 * i);
+
+	// Core-private part: optional, and only trusted at exactly the length this core writes.
+	uint16_t ppc = pc;
+	int irqMode = IRQ_HOLD;
+	uint8_t inhibit = 0, ioData = 0, ioDir = 0;
+	bool jam = false, kilLogged = false;
+	if (rest >= 18) {
+		const size_t privLen = size_t(p[16]) | (size_t(p[17]) << 8);
+		if (18 + privLen > rest) return false;     // the blob claims more than it holds
+		if (privLen == 8) {
+			const uint8_t* q = p + 18;
+			ppc = uint16_t(q[0] | (q[1] << 8));
+			irqMode = q[2] ? IRQ_HOLD : IRQ_PULSE;
+			inhibit = q[3] > 2 ? 0 : q[3];
+			jam = q[4] != 0; kilLogged = q[5] != 0;
+			ioData = q[6]; ioDir = q[7];
+		}
+	}
+
+	PC = pc; PPC = ppc;
+	A = a; X = x; Y = y; S = s;
+	P = uint8_t(status | F_T);
+	_irqPending = irq ? 1 : 0;
+	_irqMode = irqMode;
+	irq_inhibit_one = inhibit;
+	jammed = jam; kil_logged = kilLogged;
+	clocktickstotal = int(cycles % 0x10000000u);
+	io_port_data = ioData; io_port_dir = ioDir;
+	return true;
+}
+
+// -----------------------------------------------------------------------------
 // Internal Helper: Actually take the interrupt, push stack, change PC.
 // -----------------------------------------------------------------------------
 void cpu_6502::execute_irq()
@@ -924,7 +999,9 @@ int cpu_6502::step6502()
 	}
 
 	(this->*opcode_table[opcode].addressing_mode)();
+	executingOperation_ = true;
 	(this->*opcode_table[opcode].instruction)();
+	executingOperation_ = false;
 
 	clockticks6502 += ticks[opcode];
 	clocktickstotal += clockticks6502;
@@ -940,6 +1017,19 @@ int cpu_6502::step6502()
 		irq_inhibit_one--;
 
 	return clockticks6502;
+}
+
+int cpu_6502::absoluteDataReadCycle() const
+{
+	if (!executingOperation_) return 0;
+	switch (opcode) {
+	case 0x0d: case 0x2c: case 0x2d: case 0x4d: case 0x6d: // ORA, BIT, AND, EOR, ADC
+	case 0xac: case 0xad: case 0xae:                       // LDY, LDA, LDX
+	case 0xcc: case 0xcd: case 0xec: case 0xed:             // CPY, CMP, CPX, SBC
+		return static_cast<int>(ticks[opcode]);
+	default:
+		return 0;
+	}
 }
 
 // -----------------------------------------------------------------------------

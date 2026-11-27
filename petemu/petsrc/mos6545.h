@@ -2,25 +2,25 @@
 #define MOS6545_H
 
 #include <cstdint>
+#include "state_io.h"
 
 // -----------------------------------------------------------------------------
-// Mos6545 - functional (geometry-driven) MOS 6545 CRTC for the PET 8032.
+// MOS 6545 registers and raster counters for the PET 4032 and 8032.
 //
 // Design (locked 2026-06-07, built 2026-07-10):
 //   - Full R0-R17 register file with real 6545 R/W semantics: address register
 //     at base+0 (write) / STATUS at base+0 (read), data at base+1. Only
 //     R14-R17 read back; R16/R17 (light pen) are read-only.
-//   - The renderer is driven by the DECODED GEOMETRY (R1 columns, R6 rows,
-//     R9 scanlines/char, R12/R13 screen start) - there is no per-scanline
-//     raster model, and frame timing stays with the synthesized retrace in
-//     Pet2001IO (the 8032 drives its IRQ from the same signal).
+//   - Raster signals are clocked by the PET glue once per CPU cycle. The CRTC
+//     reports vertical blank in its status register and supplies a separate
+//     vertical sync pulse to the PET's VIA and PIA.
 //   - PET-8032 quirk for the glue, NOT this class: the CRTC character clock
 //     counts 2-BYTE units, so the editor ROM programs R1=40 for an 80-column
 //     screen. The renderer applies the x2; cols() reports the raw R1.
 //   - The PET screen editor uses a SOFTWARE cursor (reverse video), so the
 //     hardware cursor (R10/R11/R14/R15) is stored/readable but not rendered.
 //
-// Mapped by Pet2001IO at $E880 (addr/status) / $E881 (data), 8032 model only.
+// Mapped by Pet2001IO at $E880 (addr/status) / $E881 (data).
 // -----------------------------------------------------------------------------
 class Mos6545 {
 public:
@@ -34,9 +34,18 @@ public:
     void    writeData(uint8_t v);      // base+1 write: store to selected reg
     uint8_t readData() const;          // base+1 read : R14-R17 only, else 0
 
-    // Host hook: feed the vertical-blank state from the synthesized retrace
-    // timing so software polling the status register (bit 5) sees real phase.
     void setVerticalRetrace(bool inVBlank) { vretrace_ = inVBlank; }
+    void resetRaster();
+    bool tick(); // Advance one character clock. True at the end of a frame.
+    bool programmed() const { return programmed_; }
+    bool verticalSync() const { return syncLines_ != 0; }
+    bool displayEnabled() const { return adjust_ == 0 && row_ < rows(); }
+    int horizontalClock() const { return column_; }
+    int scanline() const { return line_; }
+    int rasterAddress() const { return raster_; }
+    uint16_t rowAddress() const {
+        return line_ == 0 && column_ == 0 ? screenStart() : rowAddress_;
+    }
 
     // ---- Decoded geometry (for the renderer / glue) -------------------------
     int cols() const { return reg_[1]; }                          // R1, raw (8032 glue doubles it)
@@ -71,11 +80,27 @@ public:
     // software-rendered anyway).
     uint32_t geometryEpoch() const { return epoch_; }
 
+    // Save states: the register file, the selected register, the raster
+    // counters mid-frame and the sync/retrace flags. False (this chip unchanged)
+    // when a counter is out of range for the registers, which no real run reaches.
+    void saveState(StateWriter& w) const;
+    bool loadState(StateReader& r);
+
 private:
+    int syncWidth() const { return (reg_[3] >> 4) ? (reg_[3] >> 4) : 16; }
+
     uint8_t  reg_[18];
     uint8_t  addr_;
     bool     vretrace_;
     uint32_t epoch_;
+    bool programmed_ = false;
+    int column_ = 0;
+    int row_ = 0;
+    int raster_ = 0;
+    int line_ = 0;
+    int adjust_ = 0;
+    int syncLines_ = 0;
+    uint16_t rowAddress_ = 0;
 };
 
 #endif // MOS6545_H

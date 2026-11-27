@@ -21,6 +21,7 @@
 #pragma once
 
 #include <cstdint>
+#include "state_io.h"
 
 class SnesAdapter
 {
@@ -82,6 +83,24 @@ public:
 
     // Current DATA (PA6) level the adapter presents: true = high.
     bool dataBit() const { return data_high_; }
+
+    // Save states: the shift-register progress. The live buttons come from the
+    // host every frame, and enabled/invert are host options, so none of the
+    // three is stored; the DATA level is recomputed under the current options.
+    void saveState(StateWriter& w) const
+    {
+        w.u16(latched_); w.i32(index_); w.flag(last_latch_); w.flag(last_clock_);
+    }
+    bool loadState(StateReader& r)
+    {
+        const uint16_t latched = r.u16();
+        const int index = r.i32();
+        const bool latch = r.flag(), clock = r.flag();
+        if (r.failed()) return false;   // index_ is unbounded: a game may clock without latching
+        latched_ = latched; index_ = index; last_latch_ = latch; last_clock_ = clock;
+        present();
+        return true;
+    }
 
 private:
     void present()

@@ -1617,6 +1617,367 @@ static void test_host_load_save_d64() {
 // The tests write their images and folders under relative names. Run them in a
 // private folder under the system temp directory, removed afterwards, so a run
 // from the source tree or the build folder leaves nothing behind.
+// ---------------------------------------------------------------------------
+// .d80 (8050, 77 tracks) and .d82 (8250, 154 tracks). Zones of 29/27/25/23
+// sectors (the .d82's second side repeats them), header 39/0, directory chain
+// from 39/1, BAM blocks 38/0 and 38/3 (plus 38/6 and 38/9 on a .d82), 50 tracks
+// and 5 bytes per track in each. The geometry is spelled out here on its own so
+// a slip in the emulator shows up as a failure.
+// ---------------------------------------------------------------------------
+static int spt8(int t) {
+    if (t < 1 || t > 154) return 0;
+    const int z = t > 77 ? t - 77 : t;
+    if (z <= 39) return 29;
+    if (z <= 53) return 27;
+    if (z <= 64) return 25;
+    return 23;
+}
+static size_t soff8(int t, int s) { int tot = 0; for (int i = 1; i < t; ++i) tot += spt8(i); return (size_t)((tot + s) * 256); }
+static const int kBam8Sec[4] = { 0, 3, 6, 9 };
+
+// Blank formatted image as DOS leaves it: track 38 all used, 39/0 and 39/1 used.
+static std::vector<uint8_t> make_blank_d8x(bool two, const char* name, const char* id) {
+    std::vector<uint8_t> img(two ? 1066496 : 533248, 0);
+    const int tracks = two ? 154 : 77, nBlocks = two ? 4 : 2;
+    uint8_t* h = img.data() + soff8(39, 0);
+    h[0] = 38; h[1] = 0; h[2] = 'C';
+    for (int i = 0; i < 16; ++i) h[6 + i] = 0xA0;
+    for (int i = 0; name[i]; ++i) h[6 + i] = (uint8_t)name[i];
+    h[0x16] = 0xA0; h[0x17] = 0xA0; h[0x18] = (uint8_t)id[0]; h[0x19] = (uint8_t)id[1];
+    h[0x1A] = 0xA0; h[0x1B] = '2'; h[0x1C] = 'C';
+    for (int i = 0; i < nBlocks; ++i) {
+        uint8_t* b = img.data() + soff8(38, kBam8Sec[i]);
+        b[0] = (uint8_t)(i + 1 < nBlocks ? 38 : 39); b[1] = (uint8_t)(i + 1 < nBlocks ? kBam8Sec[i + 1] : 1);
+        b[2] = 'C';
+        const int lo = 1 + 50 * i, hi = (lo + 50 < tracks + 1) ? lo + 50 : tracks + 1;
+        b[4] = (uint8_t)lo; b[5] = (uint8_t)hi;
+        for (int t = lo; t < hi; ++t) {
+            uint32_t bits = (1u << spt8(t)) - 1u;
+            if (t == 38) bits = 0;
+            if (t == 39) bits &= ~3u;
+            int cnt = 0; for (int s = 0; s < 32; ++s) cnt += (bits >> s) & 1;
+            const int o = 6 + (t - lo) * 5;
+            b[o] = (uint8_t)cnt;
+            for (int k = 0; k < 4; ++k) b[o + 1 + k] = (uint8_t)(bits >> (8 * k));
+        }
+    }
+    uint8_t* dir = img.data() + soff8(39, 1);
+    dir[0] = 0x00; dir[1] = 0xFF;
+    return img;
+}
+
+// Put a file on an exact list of sectors: marks them used in the BAM, writes the
+// chain and adds directory slot 'slot' (0..7, all in 39/1).
+static void add_file_d8x(std::vector<uint8_t>& img, int slot, const char* name, uint8_t type,
+                         const std::vector<std::pair<int, int>>& secs, const std::vector<uint8_t>& data) {
+    for (size_t k = 0; k < secs.size(); ++k) {
+        const int t = secs[k].first, s = secs[k].second;
+        uint8_t* b = img.data() + soff8(38, kBam8Sec[(t - 1) / 50]);
+        const int o = 6 + ((t - 1) % 50) * 5;
+        b[o + 1 + (s >> 3)] &= (uint8_t)~(1u << (s & 7));
+        b[o]--;
+        uint8_t* p = img.data() + soff8(t, s);
+        const size_t pos = k * 254, room = data.size() - pos;
+        if (k + 1 < secs.size()) {
+            p[0] = (uint8_t)secs[k + 1].first; p[1] = (uint8_t)secs[k + 1].second;
+            std::memcpy(p + 2, data.data() + pos, 254);
+        } else {
+            p[0] = 0; p[1] = (uint8_t)(room + 1);
+            std::memcpy(p + 2, data.data() + pos, room);
+        }
+    }
+    uint8_t* e = img.data() + soff8(39, 1) + 2 + slot * 32;
+    e[0] = type; e[1] = (uint8_t)secs[0].first; e[2] = (uint8_t)secs[0].second;
+    for (int i = 0; i < 16; ++i) e[3 + i] = 0xA0;
+    for (int i = 0; name[i]; ++i) e[3 + i] = (uint8_t)name[i];
+    e[0x1C] = (uint8_t)(secs.size() & 0xFF); e[0x1D] = (uint8_t)(secs.size() >> 8);
+}
+
+static std::vector<uint8_t> pattern_bytes(size_t n, int mul, uint8_t first0, uint8_t first1) {
+    std::vector<uint8_t> v(n);
+    for (size_t i = 0; i < n; ++i) v[i] = (uint8_t)((i * mul + 11) & 0xFF);
+    v[0] = first0; v[1] = first1;   // PRG load address
+    return v;
+}
+
+// Every sector of a file's chain (empty on a broken or looping chain).
+static std::vector<std::pair<int, int>> chain_of(PetIEEE& e, int t, int s) {
+    std::vector<std::pair<int, int>> out;
+    uint8_t sec[256];
+    std::set<std::pair<int, int>> seen;
+    while (t != 0) {
+        if (!seen.insert({ t, s }).second || !PetIEEE_TestAccess::read_sector(e, t, s, sec)) return {};
+        out.push_back({ t, s });
+        const int nt = sec[0], ns = sec[1]; t = nt; s = ns;
+    }
+    return out;
+}
+
+static int count_named(PetIEEE& e, const char* name) {
+    D64Catalog cat{};
+    if (!PetIEEE_TestAccess::parse_bam(e, cat) || !PetIEEE_TestAccess::parse_dir(e, cat)) return -1;
+    int n = 0;
+    for (const auto& en : cat.entries) if (std::string(en.name) == name && (en.fileType & 0x0F)) ++n;
+    return n;
+}
+
+static void run_d8x(bool two) {
+    const std::string ext = two ? "d82" : "d80";
+    const std::string path = "d64_test_d8x." + ext;
+    const int total = two ? 4166 : 2083;
+    const int blankFree = total - 29 - 2;       // BAM total: track 38, header 39/0 and first directory block 39/1 are used (2052 on a blank 8050)
+    const int lastTrack = two ? 154 : 77;
+
+    // HELLO spans three sectors on track 37; SIDE2 sits at the far end of the
+    // disk (side two on a .d82) and starts on the last sector of its 23-sector track.
+    const auto hello = pattern_bytes(600, 7, 0x01, 0x08);
+    const auto side2 = pattern_bytes(300, 13, 0x00, 0x20);
+    const int farT = two ? 150 : 70;
+    auto img = make_blank_d8x(two, two ? "TEST D82" : "TEST D80", two ? "D2" : "D8");
+    add_file_d8x(img, 0, "HELLO", 0x82, { {37, 0}, {37, 5}, {37, 10} }, hello);
+    add_file_d8x(img, 1, "SIDE2", 0x82, { {farT, 22}, {farT, 3} }, side2);
+    CHECK_EQ((int)img.size(), two ? 1066496 : 533248);
+    CHECK(write_file(path, img));
+
+    // --- mount by size; wrong sizes are refused and change nothing ---
+    PetIEEE e;
+    CHECK(e.setD64Image(path));
+    CHECK(PetIEEE_TestAccess::image(e) == img);
+    {
+        auto bad = img; bad.push_back(0);
+        CHECK(write_file("d64_test_d8x_bad.img", bad));
+        CHECK(!e.setD64Image("d64_test_d8x_bad.img"));
+        bad.resize(img.size() - 256);
+        CHECK(write_file("d64_test_d8x_bad.img", bad));
+        CHECK(!e.setD64Image("d64_test_d8x_bad.img"));
+        CHECK(e.getD64Image() == path);
+        CHECK(PetIEEE_TestAccess::image(e) == img);
+        std::error_code ec; std::filesystem::remove("d64_test_d8x_bad.img", ec);
+    }
+
+    // --- geometry: first/last sector of each zone, one past the end is refused ---
+    uint8_t sec[256];
+    CHECK(PetIEEE_TestAccess::read_sector(e, 1, 28, sec));
+    CHECK(!PetIEEE_TestAccess::read_sector(e, 1, 29, sec));
+    CHECK(PetIEEE_TestAccess::read_sector(e, 40, 26, sec));
+    CHECK(!PetIEEE_TestAccess::read_sector(e, 40, 27, sec));
+    CHECK(PetIEEE_TestAccess::read_sector(e, 54, 24, sec));
+    CHECK(!PetIEEE_TestAccess::read_sector(e, 54, 25, sec));
+    CHECK(PetIEEE_TestAccess::read_sector(e, 65, 22, sec));
+    CHECK(!PetIEEE_TestAccess::read_sector(e, 65, 23, sec));
+    CHECK(PetIEEE_TestAccess::read_sector(e, lastTrack, 22, sec));
+    CHECK(!PetIEEE_TestAccess::read_sector(e, lastTrack, 23, sec));
+    CHECK(!PetIEEE_TestAccess::read_sector(e, lastTrack + 1, 0, sec));
+    if (two) {
+        CHECK(PetIEEE_TestAccess::read_sector(e, 78, 28, sec));
+        CHECK(!PetIEEE_TestAccess::read_sector(e, 78, 29, sec));
+        CHECK(PetIEEE_TestAccess::read_sector(e, 117, 26, sec));
+        CHECK(!PetIEEE_TestAccess::read_sector(e, 117, 27, sec));
+        CHECK(PetIEEE_TestAccess::read_sector(e, 131, 24, sec));
+        CHECK(!PetIEEE_TestAccess::read_sector(e, 131, 25, sec));
+    }
+
+    // --- directory listing: header, DOS type, entries with block counts, free ---
+    std::vector<uint8_t> dir;
+    CHECK(PetIEEE_TestAccess::build_dir(e, dir, ""));
+    CHECK(bytes_contain(dir, two ? "\"TEST D82" : "\"TEST D80"));
+    CHECK(bytes_contain(dir, two ? "D2 2C" : "D8 2C"));
+    CHECK(bytes_contain(dir, "    3 \"HELLO\""));
+    CHECK(bytes_contain(dir, "    2 \"SIDE2\""));
+    CHECK(bytes_contain(dir, "PRG"));
+    CHECK_EQ(parse_blocks_free(dir), blankFree - 5);
+    std::vector<uint8_t> dirW;
+    CHECK(PetIEEE_TestAccess::build_dir(e, dirW, "H*"));
+    CHECK(bytes_contain(dirW, "\"HELLO\"") && !bytes_contain(dirW, "SIDE2"));
+
+    // --- LOAD: by name, wildcard, directory, missing file ---
+    std::vector<uint8_t> full;
+    CHECK(load_full(e, "HELLO", full)); CHECK(full == hello);
+    CHECK(load_full(e, "SIDE2", full)); CHECK(full == side2);
+    CHECK(load_full(e, "HEL*", full));  CHECK(full == hello);
+    CHECK(load_full(e, "S?DE2", full)); CHECK(full == side2);
+    CHECK(load_full(e, "*", full));     CHECK(full == hello);       // first entry
+    std::vector<uint8_t> pay; uint16_t addr = 0;
+    CHECK(e.hostLoadFile("SIDE2", pay, addr));
+    CHECK_EQ(addr, 0x2000); CHECK(pay == std::vector<uint8_t>(side2.begin() + 2, side2.end()));
+    CHECK_EQ(status_code(e), 0);
+    pay.clear();
+    CHECK(e.hostLoadFile("$", pay, addr));                          // LOAD"$",8
+    CHECK(bytes_contain(pay, "HELLO") && bytes_contain(pay, "SIDE2") && bytes_contain(pay, "2C"));
+    CHECK(!e.hostLoadFile("GHOST", pay, addr));
+    CHECK_EQ(status_code(e), 62);
+    CHECK(!PetIEEE_TestAccess::load_prg(e, "GHOST", pay, addr));
+
+    // --- OPEN/INPUT#/GET# style read (a PRG through a data channel keeps its address) ---
+    CHECK(PetIEEE_TestAccess::open_read(e, "HELLO", 2, 2));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 2) == hello);
+    CHECK(PetIEEE_TestAccess::open_read(e, "SIDE*", 3, 0));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 3) == side2);
+    CHECK(!PetIEEE_TestAccess::open_read(e, "GHOST", 4, 0));
+
+    // --- the bus sequence loaders use: OPEN name / TALK / $60 / bytes ---
+    for (const auto* want : { &hello, &side2 }) {
+        Kernal2Bus pet{ e };
+        pet.open(0, want == &hello ? "HELLO" : "SIDE2");
+        pet.talk(0);
+        std::vector<uint8_t> got;
+        for (size_t i = 0; i < want->size() + 2; ++i) {
+            const int b = pet.get();
+            if (b < 0) break;
+            got.push_back((uint8_t)b);
+            if (pet.eoi) break;
+        }
+        pet.untalk();
+        CHECK(!pet.stalled);
+        CHECK(got == *want);
+    }
+
+    // --- soft reset reports the 8050/8250 DOS ---
+    CHECK(PetIEEE_TestAccess::cmd(e, "UJ"));
+    CHECK(PetIEEE_TestAccess::status(e).find(two ? "V2.7 8250" : "V2.7 8050") != std::string::npos);
+
+    // --- SAVE: three sectors, off the BAM/directory tracks, listed and reloaded ---
+    const auto prg = pattern_bytes(700, 5, 0x01, 0x04);
+    CHECK(PetIEEE_TestAccess::save_prg(e, "NEWPRG", prg));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(load_full(e, "NEWPRG", full)); CHECK(full == prg);
+    {
+        D64Catalog cat{};
+        CHECK(PetIEEE_TestAccess::parse_bam(e, cat)); CHECK(PetIEEE_TestAccess::parse_dir(e, cat));
+        int st = 0, ss = 0, blocks = 0;
+        for (const auto& en : cat.entries) if (std::string(en.name) == "NEWPRG") { st = en.startT; ss = en.startS; blocks = en.sizeSectors; }
+        const auto chain = chain_of(e, st, ss);
+        CHECK_EQ((int)chain.size(), 3);
+        CHECK_EQ(blocks, 3);
+        for (const auto& ts : chain) CHECK(ts.first != 38 && ts.first != 39);
+        for (const auto& ts : chain) CHECK(!PetIEEE_TestAccess::bam_free(e, ts.first, ts.second));
+    }
+    dir.clear();
+    CHECK(PetIEEE_TestAccess::build_dir(e, dir, ""));
+    CHECK_EQ(parse_blocks_free(dir), blankFree - 5 - 3);
+    CHECK(read_file(path) == PetIEEE_TestAccess::image(e));       // flushed to the host file
+
+    // --- replace keeps one entry and the same free count ---
+    CHECK(PetIEEE_TestAccess::save_prg(e, "NEWPRG", hello));
+    CHECK_EQ(count_named(e, "NEWPRG"), 1);
+    CHECK(load_full(e, "NEWPRG", full)); CHECK(full == hello);
+    dir.clear();
+    CHECK(PetIEEE_TestAccess::build_dir(e, dir, ""));
+    CHECK_EQ(parse_blocks_free(dir), blankFree - 5 - 3);
+
+    // --- SEQ through OPEN/PRINT#/CLOSE, and a long file that must cross tracks ---
+    PetIEEE_TestAccess::open_ch(e, 3, "LOG,S,W");
+    PetIEEE_TestAccess::put_data(e, 3, vbytes("HELLO 8050"));
+    PetIEEE_TestAccess::close_ch(e, 3);
+    CHECK(PetIEEE_TestAccess::open_read(e, "LOG", 4, 1));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 4) == vbytes("HELLO 8050"));
+    std::vector<uint8_t> big(12000);
+    for (size_t i = 0; i < big.size(); ++i) big[i] = (uint8_t)((i * 31 + 5) & 0xFF);
+    CHECK(PetIEEE_TestAccess::save_typed(e, "BIGSEQ", big, 0x81));
+    CHECK(PetIEEE_TestAccess::open_read(e, "BIGSEQ", 5, 1));
+    CHECK(PetIEEE_TestAccess::stream_data(e, 5) == big);
+    {
+        D64Catalog cat{};
+        CHECK(PetIEEE_TestAccess::parse_bam(e, cat)); CHECK(PetIEEE_TestAccess::parse_dir(e, cat));
+        for (const auto& en : cat.entries) if (std::string(en.name) == "BIGSEQ") {
+            const auto chain = chain_of(e, en.startT, en.startS);
+            CHECK_EQ((int)chain.size(), (int)((big.size() + 253) / 254));
+            std::set<int> tracksUsed;
+            for (const auto& ts : chain) { CHECK(ts.first != 38 && ts.first != 39); tracksUsed.insert(ts.first); }
+            CHECK(tracksUsed.size() > 1);
+        }
+    }
+
+    // --- RENAME, COPY, SCRATCH (frees the blocks again) ---
+    CHECK(PetIEEE_TestAccess::cmd(e, "R:HI=HELLO"));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(load_full(e, "HI", full)); CHECK(full == hello);
+    CHECK(!load_full(e, "HELLO", full));
+    CHECK(PetIEEE_TestAccess::cmd(e, "C:HI2=HI"));
+    CHECK(load_full(e, "HI2", full)); CHECK(full == hello);
+    dir.clear();
+    CHECK(PetIEEE_TestAccess::build_dir(e, dir, ""));
+    const int freeBefore = parse_blocks_free(dir);
+    PetIEEE_TestAccess::cmd(e, "S:HI2,NEWPRG");
+    CHECK(!load_full(e, "HI2", full)); CHECK(!load_full(e, "NEWPRG", full));
+    dir.clear();
+    CHECK(PetIEEE_TestAccess::build_dir(e, dir, ""));
+    CHECK_EQ(parse_blocks_free(dir), freeBefore + 3 + 3);
+    CHECK(load_full(e, "HI", full)); CHECK(full == hello);        // untouched
+
+    // --- block commands: U1/U2 on the last track, B-A / B-F, illegal addresses ---
+    PetIEEE_TestAccess::open_da(e, 8);
+    CHECK(PetIEEE_TestAccess::cmd(e, "U1:8,0," + std::to_string(lastTrack) + ",5"));
+    uint8_t* buf = PetIEEE_TestAccess::da_buf(e, 8);
+    buf[0] = 0xDE; buf[10] = 0xAD; buf[255] = 0xEF;
+    CHECK(PetIEEE_TestAccess::cmd(e, "U2:8,0," + std::to_string(lastTrack) + ",5"));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(PetIEEE_TestAccess::read_sector(e, lastTrack, 5, sec));
+    CHECK(sec[0] == 0xDE && sec[10] == 0xAD && sec[255] == 0xEF);
+    { auto raw = read_file(path); CHECK(raw[soff8(lastTrack, 5)] == 0xDE && raw[soff8(lastTrack, 5) + 255] == 0xEF); }
+    CHECK(PetIEEE_TestAccess::cmd(e, "U1:8,0," + std::to_string(lastTrack) + ",22"));
+    CHECK(!PetIEEE_TestAccess::cmd(e, "U1:8,0," + std::to_string(lastTrack) + ",23"));
+    CHECK_EQ(status_code(e), 66);
+    CHECK(!PetIEEE_TestAccess::cmd(e, "U1:8,0," + std::to_string(lastTrack + 1) + ",0"));
+    CHECK_EQ(status_code(e), 66);
+    CHECK(!PetIEEE_TestAccess::cmd(e, "U1:8,0,1,29"));
+    CHECK_EQ(status_code(e), 66);
+    CHECK(PetIEEE_TestAccess::bam_free(e, 60, 24));
+    CHECK(PetIEEE_TestAccess::cmd(e, "B-A:0,60,24"));
+    CHECK(!PetIEEE_TestAccess::bam_free(e, 60, 24));
+    CHECK(!PetIEEE_TestAccess::cmd(e, "B-A:0,60,24"));            // in use: 65,NO BLOCK
+    CHECK_EQ(status_code(e), 65);
+    if (two) {                                                     // a side-two block lives in the 38/6 or 38/9 BAM block
+        CHECK(PetIEEE_TestAccess::cmd(e, "B-A:0,140,10"));
+        CHECK(!PetIEEE_TestAccess::bam_free(e, 140, 10));
+        CHECK(PetIEEE_TestAccess::cmd(e, "B-F:0,140,10"));
+        CHECK(PetIEEE_TestAccess::bam_free(e, 140, 10));
+    }
+
+    // --- VALIDATE reclaims the orphaned block and keeps the files' blocks ---
+    CHECK(PetIEEE_TestAccess::cmd(e, "V"));
+    CHECK_EQ(status_code(e), 0);
+    CHECK(PetIEEE_TestAccess::bam_free(e, 60, 24));
+    CHECK(!PetIEEE_TestAccess::bam_free(e, 37, 0));
+    CHECK(!PetIEEE_TestAccess::bam_free(e, farT, 22));
+    CHECK(load_full(e, "SIDE2", full)); CHECK(full == side2);
+    dir.clear();
+    CHECK(PetIEEE_TestAccess::build_dir(e, dir, ""));
+    CHECK_EQ(parse_blocks_free(dir), freeBefore + 6);
+
+    // --- NEW: fresh header and BAM, files gone, image size kept, drive usable ---
+    CHECK(PetIEEE_TestAccess::cmd(e, "N:FRESH,XY"));
+    CHECK_EQ(status_code(e), 0);
+    dir.clear();
+    CHECK(PetIEEE_TestAccess::build_dir(e, dir, ""));
+    CHECK(bytes_contain(dir, "\"FRESH") && bytes_contain(dir, "XY 2C"));
+    CHECK(!bytes_contain(dir, "HELLO") && !bytes_contain(dir, "SIDE2"));
+    CHECK_EQ(parse_blocks_free(dir), blankFree);
+    CHECK_EQ((int)PetIEEE_TestAccess::image(e).size(), (int)img.size());
+    {
+        const auto raw = read_file(path);
+        CHECK(raw == PetIEEE_TestAccess::image(e));
+        const uint8_t* h = raw.data() + soff8(39, 0);
+        CHECK(h[0] == 38 && h[1] == 0 && h[2] == 'C' && h[0x1B] == '2' && h[0x1C] == 'C');
+        const uint8_t* b0 = raw.data() + soff8(38, 0);
+        CHECK(b0[0] == 38 && b0[1] == 3 && b0[2] == 'C' && b0[4] == 1 && b0[5] == 51);
+        CHECK_EQ(b0[6 + 37 * 5], 0);                                  // track 38 fully used
+        CHECK_EQ(b0[6 + 38 * 5], 27);                                 // track 39: 39/0 and 39/1 used
+        const uint8_t* bl = raw.data() + soff8(38, two ? 9 : 3);
+        CHECK(bl[0] == 39 && bl[1] == 1);                             // last BAM block links to the directory
+        CHECK_EQ((int)bl[5], two ? 155 : 78);
+    }
+    CHECK(PetIEEE_TestAccess::save_prg(e, "AGAIN", prg));
+    CHECK(load_full(e, "AGAIN", full)); CHECK(full == prg);
+
+    std::error_code ec; std::filesystem::remove(path, ec);
+}
+
+static void test_d80_d82() {
+    run_d8x(false);
+    run_d8x(true);
+}
+
 struct ScratchWorkingDirectory {
     std::filesystem::path previous, dir;
     ScratchWorkingDirectory() {
@@ -1659,6 +2020,7 @@ int main(int argc, char** argv) {
     test_block_commands();
     test_typed_open_and_block_alloc();
     test_d71_readwrite();
+    test_d80_d82();
     test_open_write_modes();
     test_review_fixes();
     test_dir_d64_golden();

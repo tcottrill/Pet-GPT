@@ -1,6 +1,7 @@
 // Standalone MOS 6545 CRTC tests. Compiles mos6545.cpp alone.
 #include <cstdio>
 #include <cstdint>
+#include <vector>
 #include "mos6545.h"
 
 // --- tiny assert framework (matches the other suites) ---
@@ -131,7 +132,43 @@ static void test_frame_timing_unprogrammed_is_nonsense() {
     CHECK_EQ(c.vblankCycles(), 0);
 }
 
+// Save states: a CRTC loaded mid-frame must produce the same raster as the original.
+static void test_state_roundtrip_mid_frame() {
+    Mos6545 a;
+    wr(a, 0, 7); wr(a, 1, 2); wr(a, 3, 0x20); wr(a, 4, 3); wr(a, 5, 1); wr(a, 6, 2); wr(a, 7, 2); wr(a, 9, 1);
+    wr(a, 12, 0x01); wr(a, 13, 0x23); wr(a, 14, 0x12); wr(a, 15, 0x34);
+    a.resetRaster();
+    for (int i = 0; i < 53; ++i) a.tick();              // inside the frame, not at a line start
+    wr(a, 10, 0x40);                                    // leave a different register selected
+
+    std::vector<uint8_t> blob; StateWriter w(blob); a.saveState(w);
+    Mos6545 b;
+    StateReader r(blob.data(), blob.size());
+    CHECK(b.loadState(r)); CHECK(r.atEnd());
+    for (int i = 0; i < 400; ++i) {
+        CHECK_EQ(a.tick(), b.tick());
+        CHECK_EQ(a.horizontalClock(), b.horizontalClock());
+        CHECK_EQ(a.scanline(), b.scanline());
+        CHECK_EQ(a.rasterAddress(), b.rasterAddress());
+        CHECK_EQ(a.rowAddress(), b.rowAddress());
+        CHECK_EQ(a.displayEnabled(), b.displayEnabled());
+        CHECK_EQ(a.verticalSync(), b.verticalSync());
+        CHECK_EQ(a.readStatus(), b.readStatus());
+        CHECK_EQ(a.frameCycles(), b.frameCycles());
+        CHECK_EQ(a.programmed(), b.programmed());
+        CHECK_EQ(a.readData(), b.readData());
+    }
+    // A counter outside what the registers can produce is refused and changes nothing.
+    std::vector<uint8_t> bad = blob; bad[18 + 1 + 1 + 4 + 1 + 3] = 0x7F;   // column_ high byte area
+    Mos6545 c; StateReader rb(bad.data(), bad.size());
+    CHECK(!c.loadState(rb));
+    CHECK(!c.programmed());
+    Mos6545 d; StateReader cut(blob.data(), blob.size() - 1);
+    CHECK(!d.loadState(cut));
+}
+
 int main() {
+    test_state_roundtrip_mid_frame();
     test_reset_state();
     test_8032_style_init_geometry();
     test_register_select_masks_to_5_bits();

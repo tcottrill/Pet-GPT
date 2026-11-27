@@ -53,7 +53,7 @@ struct D64Block {
 // Parsed BAM entry for a single track
 struct D64BamTrack {
 	uint8_t freeCount = 0;   // number of free sectors on this track
-	uint8_t bits[3] = { 0,0,0 }; // 24-bit bitmap; 1=free, 0=used
+	uint8_t bits[4] = { 0,0,0,0 }; // 1=free, 0=used; 1541/1571 use 24 bits, 8050/8250 up to 29
 };
 
 // Cached directory entry (minimal fields for PRG/SEQ/USR)
@@ -75,7 +75,7 @@ struct D64Catalog {
 	uint8_t dirFirstT = 18;            // 18/1 normally
 	uint8_t dirFirstS = 1;
 	bool is40 = false;                  // not used for write in this version
-	int  tracks = 35;                   // 35 (1541/.d64) or 70 (1571/.d71)
+	int  tracks = 35;                   // 35 (1541/.d64), 70 (1571/.d71), 77 (8050/.d80) or 154 (8250/.d82)
 };
 
 enum : int {
@@ -165,6 +165,17 @@ public:
   // to avoid holding handshake lines low when the bus is logically idle.
 	State getState() const { return state; }
 	bool isIdle() const { return state == STATE_IDLE; }
+
+	// True while the drive is in the middle of something a save state cannot
+	// carry: a transfer (state machine or handshake), ATN held low, or an open
+	// channel (read stream, write buffer, '#' buffer, pending command text).
+	bool isBusy() const {
+		if (state != STATE_IDLE || hs_ != HS_IDLE || !atn || !cmd15_buf_.empty()) return true;
+		for (const auto& st : streams) if (st.active()) return true;
+		for (bool active : seq_write_active_) if (active) return true;
+		for (bool active : da_active_) if (active) return true;
+		return false;
+	}
 
 	// Resolve a LOAD name on the mounted disk image, or on the host folder when no
 	// image is mounted, without any bus traffic. "$" (also "$0", "$:A*", ...) gives
@@ -311,8 +322,9 @@ private:
 	// D64/D71 backend
 	std::string d64Path;
 	std::vector<uint8_t> d64;       // entire image; empty if not mounted
-	int d64_tracks_ = 35;           // 35 (.d64/1541) or 70 (.d71/1571); set at mount
-	int d64_image_tracks_ = 35;     // physical tracks for sector geometry: 35, 40 (17-sector tracks 36-40) or 70
+	int d64_tracks_ = 35;           // 35 (.d64/1541), 70 (.d71/1571), 77 (.d80/8050) or 154 (.d82/8250); set at mount
+	int d64_image_tracks_ = 35;     // physical tracks for sector geometry: 35, 40 (17-sector tracks 36-40), 70, 77 or 154
+	bool d64_8x50_ = false;         // .d80/.d82: 8050/8250 layout (29-sector zones, header 39/0, BAM blocks on 38)
 
 	// Core helpers
 	void dataIn(uint8_t d8);
@@ -382,6 +394,28 @@ private:
 	int  d64_num_tracks() const { return d64_tracks_; }               // 35 (.d64) or 70 (.d71): BAM / allocator tracks
 	int  d64_image_num_tracks() const { return d64_image_tracks_; }   // physical tracks: 35, 40 or 70 (sector access)
 	bool d64_double_sided() const { return d64_tracks_ > 35; }
+	// 8050/8250 layout. Directory and header live on track 39, the BAM blocks on
+	// track 38 (sectors 0,3 and, on a .d82, 6,9), 50 tracks per BAM block.
+	static constexpr int D80_DIR_TRACK = 39;
+	static constexpr int D80_BAM_TRACK = 38;
+	int  d64_dir_track() const { return d64_8x50_ ? D80_DIR_TRACK : 18; }  // header/BAM (1541) or dir track
+	// DOS/BAM/directory tracks the allocator never hands to a file.
+	bool d64_reserved_track(int t) const {
+		if (d64_8x50_) return t == D80_BAM_TRACK || t == D80_DIR_TRACK;
+		return t == 18 || (d64_tracks_ > 35 && t == D71_BAM2_TRACK);
+	}
+	int  d64_file_start_track() const { return d64_8x50_ ? 37 : 17; }      // first file block goes next to the directory
+	int  d64_file_interleave() const { return d64_8x50_ ? 1 : (int)D64_FILE_INTERLEAVE; }
+	// Power-on / soft-reset message of the emulated drive model.
+	const char* dos_power_on_text() const {
+		if (!d64_8x50_) return "CBM DOS V2.6 4040";
+		return d64_tracks_ > 77 ? "CBM DOS V2.7 8250" : "CBM DOS V2.7 8050";
+	}
+	int  d80_bam_block_count() const { return d64_tracks_ > 77 ? 4 : 2; }
+	// Fill lo/hi (first track, one past the last) a BAM block covers; trusts the
+	// block's own bytes 4/5 when they are sane, else the standard 50-track split.
+	void d80_bam_range(const uint8_t* blk, int index, int& lo, int& hi) const;
+	bool d80_format(const std::string& diskName, const std::string& id);
 	// 1571 split-BAM constants: side-1 free counts live in 18/0, bitmaps in 53/0.
 	static constexpr int D71_BAM2_TRACK = 53;
 	static constexpr int D71_SIDE1_COUNT_OFF = 0xDD;  // 18/0: 35 count bytes for tracks 36..70

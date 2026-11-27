@@ -21,6 +21,7 @@
 #define VIA6522_H
 
 #include <cstdint>
+#include "state_io.h"
 
 
 // -----------------------------------------------------------------------------
@@ -133,6 +134,15 @@ public:
     {
         return cb2_level_frame_start;
     }
+
+    // -------------------------------------------------------------------------
+    // Save states: registers, both timers (with the reload pass in flight), the
+    // shift register, edge-detect history, pulse counters and CB2 bookkeeping.
+    // The CB2 edge log itself is not saved: loading empties it, and the host
+    // restarts it with its next audio slice.
+    // -------------------------------------------------------------------------
+    void saveState(StateWriter& w) const;
+    bool loadState(StateReader& r);
 
 private:
     // -------------------------------------------------------------------------

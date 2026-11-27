@@ -18,10 +18,15 @@ CrtDialog::CrtDialog(wxWindow* parent)
     auto* grid = new wxFlexGridSizer(3, FromDIP(8), FromDIP(8));
     grid->AddGrowableCol(1);
     const char* names[] = {"Horizontal blur", "Vertical blur", "Halation", "Halation radius",
-                           "Scanlines", "Contrast", "Brightness"};
-    for (int i = 0; i < 7; ++i) {
+                           "Scanlines", "Contrast", "Brightness", "Persistence", "Decay time (ms)",
+                           "Tail amount", "Tail decay (ms)"};
+    for (int i = 0; i < 11; ++i) {
         float lo, hi, step;
         pet_shader_range(i, &lo, &hi, &step);
+        if (i == 7) {   // the four persistence rows follow the running machine's tube
+            grid->Add(new wxStaticText(this, wxID_ANY, "Persistence settings are saved for each machine"), 0, wxTOP, FromDIP(6));
+            grid->AddSpacer(0); grid->AddSpacer(0);
+        }
         grid->Add(new wxStaticText(this, wxID_ANY, names[i]), 0, wxALIGN_CENTER_VERTICAL);
         sliders_[i] = new wxSlider(this, wxID_ANY, 0, 0, 1000, wxDefaultPosition, FromDIP(wxSize(210, -1)));
         values_[i] = new wxSpinCtrlDouble(this, wxID_ANY, "", wxDefaultPosition,
@@ -62,7 +67,7 @@ CrtDialog::CrtDialog(wxWindow* parent)
 
 void CrtDialog::Sync() {
     enabled_->SetValue(pet_get_crt() != 0); tint_->SetSelection(pet_get_monitor() ? 0 : 1);
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < 11; ++i) {
         float lo, hi, step; pet_shader_range(i, &lo, &hi, &step);
         const float value = pet_shader_get(i);
         sliders_[i]->SetValue(hi > lo ? static_cast<int>(std::lround((value - lo) * 1000 / (hi - lo))) : 0);

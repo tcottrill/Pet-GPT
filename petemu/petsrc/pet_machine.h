@@ -8,6 +8,7 @@
 #include "deftypes.h"
 #include "cpu_6502.h"
 #include "pet_mem.h"
+#include "state_io.h"
 
 // -----------------------------------------------------------------------------
 // PetMachine
@@ -59,7 +60,29 @@ public:
     void setBasic1DiskTraps(bool enabled);
     bool basic1DiskTrapsActive() const { return basic1TrapsActive_; }
 
+    // Save states. Call between runCycles() calls, never from inside one.
+    // saveState() appends the chunks CPU , MCH , MEM , PIA1, PIA2, VIA , CRTC, IO  ,
+    // VID , TAPE and DISK; the caller writes the file header and the MACH chunk,
+    // which describe things only the host knows (model, RAM size, ROM set).
+    // *warning, when given, is set if something was saved that a load cannot
+    // bring back exactly (the disk drive in the middle of a transfer).
+    void saveState(StateWriter& w, std::string* warning = nullptr);
+
+    // Reads every chunk of a file on a scratch machine, so a damaged file is
+    // refused without touching this one. The machine must already be set up like
+    // the saved one (ROM set, video geometry, RAM size); ROM bytes are not in the file.
+    bool validateState(const StateFile& file, std::string& error) const;
+
+    // validateState() and then the real load. On success *warning receives notes
+    // about media that could not be attached again (tape, disk image). The tape
+    // and disk image are re-attached from their saved paths, and the disk drive
+    // restarts in its power-on state: open channels and transfers are lost.
+    bool loadState(const StateFile& file, std::string& error, std::string* warning = nullptr);
+
 private:
+    // media false = scratch run: parse and range-check everything, touch no files.
+    bool applyState(const StateFile& file, std::string& error, std::string* warning, bool media);
+
     // Backing 64K RAM image used as cpu.MEM (same bytes as PetMem::ram)
     //std::vector<uint8_t> ramImage;
 
@@ -84,6 +107,8 @@ private:
     VideoWrite videoWrite_{};
     bool videoWritePending_ = false;
     bool timeVideoWrites_ = false;
+    bool timeCrtcIo_ = false;
+    int deviceCycles_ = 0;
 
     // Build a single catch-all handler that forwards every address to PetMem
     void installFlatHandlers();

@@ -27,6 +27,10 @@ Loading software
   false turns this off). For machine code the title bar shows the SYS address.
 - .p00 to .p99 (PC64) files load. Other unknown file types are refused with a
   message instead of being loaded as garbage.
+- .d80 (8050) and .d82 (8250 double-sided) disk images mount like .d64/.d71:
+  directory, LOAD, OPEN/INPUT#, SAVE, SCRATCH, RENAME, COPY, NEW, VALIDATE and
+  the block commands all work, read and write. Blocks free leaves out tracks 38
+  and 39 (BAM and directory), as it leaves out track 18 on a 1541.
 - Dropping a file no longer blocks the window it was dragged from; extra
   dropped files are reported as ignored.
 

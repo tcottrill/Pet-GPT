@@ -39,18 +39,31 @@
 uint8_t PetMachine::s_read8(UINT32 ofs, MemoryReadByte* h)
 {
     // ofs is relative; reconstruct absolute: lowAddr + ofs
-    auto* pm = reinterpret_cast<PetMem*>(h->pUserArea);
+    auto* machine = static_cast<PetMachine*>(h->pUserArea);
     const uint16_t addr = static_cast<uint16_t>(h->lowAddr + ofs);
-    return pm->readByte(addr);
+    if (machine->timeCrtcIo_ && (addr == 0xe840 || addr == 0xe844 ||
+        addr == 0xe845 || addr == 0xe880)) {
+        // The CPU samples the bus before devices advance at the end of the
+        // data-read clock. Run the preceding clocks before supplying the byte.
+        const int clock = machine->cpuPtr->absoluteDataReadCycle() - 1;
+        while (machine->deviceCycles_ < clock) {
+            machine->stepCycle();
+            ++machine->deviceCycles_;
+        }
+    }
+    return machine->memory.readByte(addr);
 }
 
 void PetMachine::s_write8(UINT32 ofs, UINT8 data, MemoryWriteByte* h)
 {
     auto* machine = static_cast<PetMachine*>(h->pUserArea);
     const uint16_t addr = static_cast<uint16_t>(h->lowAddr + ofs);
-    if (machine->timeVideoWrites_ && ((addr & 0xf000) == 0x8000 || addr == 0xe84c)) {
+    if (machine->timeVideoWrites_ && ((addr & 0xf000) == 0x8000 ||
+        addr == 0xe84c || addr == 0xe880 || addr == 0xe881 ||
+        (machine->timeCrtcIo_ && addr >= 0xe844 && addr <= 0xe847))) {
         // This core emits a single final data write for stores and RMW
-        // instructions. Screen SRAM and the charset pin change on that clock.
+        // instructions. Screen SRAM, the CRTC, and the VIA timer used to
+        // synchronize to the raster see that write on the final clock.
         machine->videoWrite_ = {addr, data};
         machine->videoWritePending_ = true;
         return;
@@ -105,7 +118,7 @@ void PetMachine::installFlatHandlers()
     rAll.lowAddr = 0x0000;
     rAll.highAddr = 0xFFFF;
     rAll.memoryCall = &PetMachine::s_read8;
-    rAll.pUserArea = &memory;
+    rAll.pUserArea = this;
     rdTbl.push_back(rAll);
 
     MemoryReadByte rEnd{ static_cast<UINT32>(-1), 0, nullptr, nullptr };
@@ -300,7 +313,8 @@ void PetMachine::basic1DiskTrap()
 int PetMachine::runCycles(int cycles)
 {
     int executed = 0;
-    timeVideoWrites_ = memory.video().hasDiscreteRaster();
+    timeVideoWrites_ = memory.video().hasRaster();
+    timeCrtcIo_ = memory.io().hasCrtc();
 
     while (executed < cycles)
     {
@@ -308,10 +322,11 @@ int PetMachine::runCycles(int cycles)
         if (basic1TrapsActive_) basic1DiskTrap();
 
         // Step CPU one instruction or interrupt entry.
+        deviceCycles_ = 0;
         const int c = cpuPtr->step6502();
 
         // Advance devices for each CPU cycle executed.
-        for (int i = 0; i < c; ++i) {
+        for (int i = deviceCycles_; i < c; ++i) {
             stepCycle();
         }
         // The video fetch precedes the 6502 write on the same clock.
@@ -332,6 +347,7 @@ int PetMachine::runCycles(int cycles)
     }
 
     timeVideoWrites_ = false;
+    timeCrtcIo_ = false;
     return executed;
 }
 
@@ -340,6 +356,176 @@ int PetMachine::runCycles(int cycles)
 void PetMachine::stepCycle()
 {
     memory.stepCycle(); // Pet2001IO: PIA/VIA timers & CB2/handshakes in lockstep
-    
+
+}
+
+// ---- Save states -------------------------------------------------------------
+
+namespace {
+struct TapeChunk {
+    bool mounted = false, playing = false;
+    std::string path;
+    uint32_t pulses = 0, remaining = 0;
+    uint64_t position = 0;
+};
+struct DiskChunk {
+    std::string path;
+    bool busy = false;
+};
+
+bool readTapeChunk(StateReader r, TapeChunk& out)
+{
+    out.mounted = r.flag();
+    out.path = r.str();
+    out.pulses = r.u32();
+    out.position = r.u64();
+    out.remaining = r.u32();
+    out.playing = r.flag();
+    return !r.failed() && (!out.mounted || out.position <= out.pulses);
+}
+
+bool readDiskChunk(StateReader r, DiskChunk& out)
+{
+    out.path = r.str();
+    out.busy = r.flag();
+    return !r.failed();
+}
+
+bool readFileBytes(const std::string& path, std::vector<uint8_t>& out)
+{
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(std::filesystem::u8path(path), ec)) return false;
+    std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
+    if (!f) return false;
+    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return !out.empty();
+}
+
+std::string baseName(const std::string& path)
+{
+    return std::filesystem::u8path(path).filename().u8string();
+}
+
+void addNote(std::string* warning, const std::string& text)
+{
+    if (!warning) return;
+    if (!warning->empty()) *warning += "; ";
+    *warning += text;
+}
+} // namespace
+
+void PetMachine::saveState(StateWriter& w, std::string* warning)
+{
+    // The CPU chunk is the core's own portable blob (see cpu_6502.h).
+    uint8_t cpuBlob[cpu_6502::kStateMaxSize];
+    const size_t cpuBytes = cpuPtr->save_state(cpuBlob, sizeof cpuBlob);
+    w.beginChunk("CPU "); w.bytes(cpuBlob, cpuBytes); w.endChunk();
+    // Machine-level latch that is not CPU state.
+    w.beginChunk("MCH "); w.flag(basic1LoadPending_); w.endChunk();
+
+    w.beginChunk("MEM "); memory.saveState(w); w.endChunk();
+    memory.io().saveState(w);   // PIA1, PIA2, VIA , CRTC, IO
+    w.beginChunk("VID "); memory.video().saveState(w); w.endChunk();
+
+    const PetTape& tape = memory.io().tape();
+    w.beginChunk("TAPE");
+    w.flag(tape.mounted());
+    w.str(tape.sourcePath());
+    w.u32(uint32_t(tape.pulseCount()));
+    w.u64(uint64_t(tape.position()));
+    w.u32(tape.remaining());
+    w.flag(tape.playing());
+    w.endChunk();
+
+    const bool busy = memory.ieee().isBusy();
+    w.beginChunk("DISK");
+    w.str(memory.ieee().getD64Image());
+    w.flag(busy);
+    w.endChunk();
+    if (busy && warning) *warning = "saved while the disk drive was busy; a load in progress will not resume";
+}
+
+bool PetMachine::validateState(const StateFile& file, std::string& error) const
+{
+    PetMachine scratch;
+    return scratch.applyState(file, error, nullptr, false);
+}
+
+bool PetMachine::loadState(const StateFile& file, std::string& error, std::string* warning)
+{
+    if (!validateState(file, error)) return false;
+    return applyState(file, error, warning, true);
+}
+
+bool PetMachine::applyState(const StateFile& file, std::string& error, std::string* warning, bool media)
+{
+    // The small chunks first: everything that can be refused is checked before
+    // the first byte of this machine changes (the device chunks are covered by
+    // loadState() having run this on a scratch machine already).
+    TapeChunk tape; DiskChunk disk;
+    // load_state() leaves the CPU alone when it refuses, so the register
+    // file is the first thing applied and the first thing that can fail.
+    const uint8_t* cpuBlob = nullptr; size_t cpuBytes = 0;
+    if (!file.chunkData("CPU ", cpuBlob, cpuBytes) || !cpuPtr->load_state(cpuBlob, cpuBytes)) { error = "the CPU chunk is missing or damaged"; return false; }
+    bool basic1Pending = false;
+    if (file.has("MCH ")) { StateReader mch = file.find("MCH "); basic1Pending = mch.flag(); }
+    if (!readTapeChunk(file.find("TAPE"), tape)) { error = "the tape chunk is missing or damaged"; return false; }
+    if (!readDiskChunk(file.find("DISK"), disk)) { error = "the disk chunk is missing or damaged"; return false; }
+
+    StateReader mem = file.find("MEM ");
+    if (!memory.loadState(mem)) { error = "the memory chunk is missing or damaged"; return false; }
+
+    // The drive's image first: loading the I/O chunks restarts the drive, and its
+    // power-on message depends on the mounted image type.
+    if (media) {
+        Pet2001IO& io = memory.io();
+        if (disk.path.empty()) {
+            if (io.ieeeIsD64Mounted()) io.setIeeeD64Image("");
+        } else if (!(io.ieeeIsD64Mounted() && memory.ieee().getD64Image() == disk.path)) {
+            std::error_code ec;
+            if (!std::filesystem::exists(std::filesystem::u8path(disk.path), ec) || !io.setIeeeD64Image(disk.path)) {
+                if (io.ieeeIsD64Mounted()) io.setIeeeD64Image("");
+                addNote(warning, "disk image " + baseName(disk.path) + " was not found or cannot be read: drive 8 is the files folder");
+            }
+        }
+    }
+
+    if (!memory.io().loadState(file)) { error = "a device chunk (PIA1, PIA2, VIA, CRTC or IO) is missing or damaged"; return false; }
+    StateReader vid = file.find("VID ");
+    if (!memory.video().loadState(vid)) { error = "the video chunk is missing or damaged"; return false; }
+
+    if (media) {
+        PetTape& transport = memory.io().tape();
+        if (!tape.mounted) {
+            transport.eject();
+        } else {
+            std::vector<uint8_t> image;
+            PetTape staged;
+            std::string reason;
+            if (tape.path.empty()) {
+                transport.eject();
+                addNote(warning, "the saved tape was not attached from a file, so no tape is attached");
+            } else if (!readFileBytes(tape.path, image)) {
+                transport.eject();
+                addNote(warning, "tape file " + baseName(tape.path) + " was not found: no tape attached");
+            } else if (!staged.attach(image, reason)) {
+                transport.eject();
+                addNote(warning, "tape file " + baseName(tape.path) + " cannot be attached (" + reason + "): no tape attached");
+            } else {
+                staged.setSourcePath(tape.path);
+                if (staged.pulseCount() != tape.pulses || !staged.restore(size_t(tape.position), tape.remaining, tape.playing))
+                    addNote(warning, "tape file " + baseName(tape.path) + " has changed since the save: the tape was rewound");
+                transport = std::move(staged);
+            }
+        }
+    }
+
+    videoWritePending_ = false;
+    deviceCycles_ = 0;
+    last_irq_level_ = false;
+    irq_vector_ready_ = false;
+    updateBasic1DiskTraps();                       // the ROM set may differ from the one before
+    basic1LoadPending_ = basic1TrapsActive_ && basic1Pending;
+    return true;
 }
 

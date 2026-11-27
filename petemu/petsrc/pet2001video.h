@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include "state_io.h"
 
 /*
     Pet2001Video
@@ -59,12 +60,14 @@ public:
     void setColumns(int cols);
     // Display geometry does not change the machine's SRAM or pixel clock.
     void setCrtcGeometry(int columns, int rows, int scanlines, uint16_t byteOffset);
-    void setDiscreteRaster(bool enabled);
-    bool hasDiscreteRaster() const { return !raster_.empty(); }
-    void fetchDiscreteCharacter(int line, int column);
-    void finishDiscreteFrame();
+    void enableRaster();
+    bool hasRaster() const { return !raster_.empty(); }
+    void fetchCharacter(int line, int column, int glyphLine, uint16_t byteOffset);
+    void finishRasterFrame();
     // Byte offset in screen SRAM; 8032 glue converts CRTC two-byte units.
     void setScreenStart(uint16_t byteOffset);
+    // 8296: 4 KB screen memory (mask 0xFFF). Survives setColumns(); off = size by columns.
+    void setScreen4K(bool on);
     int  columns() const { return cols_; }
     static constexpr int BLANK_DELAY_MS = 100;
 
@@ -72,6 +75,13 @@ public:
 
     // Provide the character ROMs (required before drawing anything).
     void setCharsets(const uint8_t* charset1_128x8, const uint8_t* charset2_128x8);
+
+    // Second (upper) pair of a 4 KB character ROM (8296-D). Call after
+    // setCharsets, which drops any earlier upper pair and returns to the lower bank.
+    void setCharsetsUpper(const uint8_t* charset1_128x8, const uint8_t* charset2_128x8);
+    // Chargen top address line (CRTC R12 bit 5): false = lower pair, true = upper.
+    // Keeps the graphics/text choice and redraws; does nothing without an upper pair.
+    void setCharBank(bool upper);
 
     // Reset state and clear screen.
     void reset();
@@ -92,6 +102,14 @@ public:
     std::string save() const;
     void load(const std::string& s);
 
+    // Binary save states: screen SRAM at its current size, geometry, blank
+    // state and charset choice. The framebuffer and the raster being scanned are
+    // not stored; loading clears them and redraws from the screen memory (the
+    // character ROMs come from the installed ROM set). False, with nothing
+    // changed, for a payload that is cut short or out of range.
+    void saveState(StateWriter& w) const;
+    bool loadState(StateReader& r);
+
     // Access framebuffer (RGBA8888).
     const uint32_t* framebuffer() const { return fb.data(); }
     uint32_t*       framebuffer()       { return fb.data(); }
@@ -110,6 +128,8 @@ private:
     // Video state
     std::vector<uint8_t> vidram; // at least VIDRAM_SIZE; we allow larger to match JS pattern
     int cols_    = COLS;         // machine configuration (40 or 80)
+    int screenMask_ = 0x3ff;     // screen SRAM address mask: 1 KB, 2 KB (80 col) or 4 KB (8296)
+    bool screen4K_ = false;
     int displayCols_ = COLS;    // displayed characters / row stride
     int scanlines_ = CHAR_H;    // raster lines per character row
     int fbHeight_ = FB_H;       // expands for taller CRTC character rows
@@ -126,6 +146,11 @@ private:
     const uint8_t* charset1; // 128 * 8 bytes
     const uint8_t* charset2; // 128 * 8 bytes
     const uint8_t* activeCharset;
+    const uint8_t* upperCharset1 = nullptr; // optional second bank (4 KB character ROM)
+    const uint8_t* upperCharset2 = nullptr;
+    bool charBankUpper_ = false;
+    bool textSet_ = false;    // last setCharset() choice: false = graphics (set 1), true = text (set 2)
+    void selectCharset();
 
     // Blanking
     bool blank;               // current "blanked" state

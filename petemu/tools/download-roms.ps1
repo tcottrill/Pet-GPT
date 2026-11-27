@@ -10,8 +10,9 @@
     <RomsDir>\pet2001\     (original 2001, BASIC 1, 8 KB)
     <RomsDir>\pet2001n\    (2001N / 3000, BASIC 2)
     <RomsDir>\pet4000-9\   (9-inch 4000, discrete video, BASIC 4)
-    <RomsDir>\pet4000-12\  (12-inch 4000, 40-column CRTC, 60 Hz)
-    <RomsDir>\cbm8032\     (8032, 80-column business CRTC, 60 Hz)
+    <RomsDir>\pet4000-12\  (12-inch 4000, 40-column CRTC, 50/60 Hz)
+    <RomsDir>\cbm8032\     (8032, 80-column business CRTC, 50/60 Hz)
+    <RomsDir>\cbm8296\     (CBM 8296, 60 Hz; the optional 8296-D files give the European 50 Hz model)
   Every filename here is the same one used on zimmers.net -- no renaming.
 
 .PARAMETER RomsDir
@@ -22,7 +23,7 @@
   Pet-GPT's ROM setup dialog passes this explicitly.
 
 .PARAMETER Sets
-  Which ROM sets to fetch: Pet2001, Pet2001N, Pet4000-9, Pet4000-12, CBM8032.
+  Which ROM sets to fetch: Pet2001, Pet2001N, Pet4000-9, Pet4000-12, CBM8032, CBM8296.
   Legacy names Basic2, Basic4, and 8032 remain accepted aliases.
 
 .PARAMETER Force
@@ -42,8 +43,8 @@ param(
         elseif ($env:APPDATA) { Join-Path $env:APPDATA "Pet-GPT\roms" }
         else { Join-Path $HOME "Pet-GPT/roms" }
     ),
-    [ValidateSet("Pet2001", "Pet2001N", "Pet4000-9", "Pet4000-12", "CBM8032", "Basic2", "Basic4", "8032")]
-    [string[]]$Sets = @("Pet2001", "Pet2001N", "Pet4000-9", "Pet4000-12", "CBM8032"),
+    [ValidateSet("Pet2001", "Pet2001N", "Pet4000-9", "Pet4000-12", "CBM8032", "CBM8296", "Basic2", "Basic4", "8032")]
+    [string[]]$Sets = @("Pet2001", "Pet2001N", "Pet4000-9", "Pet4000-12", "CBM8032", "CBM8296"),
     [switch]$Force
 )
 
@@ -82,6 +83,7 @@ $Manifest = @{
         "basic-4-c000.901465-20.bin",
         "basic-4-d000.901465-21.bin",
         "edit-4-40-n-60Hz.901499-01.bin",
+        "edit-4-40-n-50Hz.901498-01.bin",
         "kernal-4.901465-22.bin"
     ) + $CharRoms
     "CBM8032" = @(
@@ -89,8 +91,20 @@ $Manifest = @{
         "basic-4-c000.901465-20.bin",
         "basic-4-d000.901465-21.bin",
         "edit-4-80-b-60Hz.901474-03.bin",
+        "edit-4-80-b-50Hz.901474-04-0283.bin",
         "kernal-4.901465-22.bin"
     ) + $CharRoms
+    # A name may carry a sub-path of the base URL ("8296/x.bin"); it is saved under the bare name.
+    "CBM8296" = @(
+        "basic-4-b000.901465-23.bin",
+        "basic-4-c000.901465-20.bin",
+        "basic-4-d000.901465-21.bin",
+        "edit-4-80-b-60Hz.901474-03.bin",
+        "kernal-4.901465-22.bin",
+        "characters-2.901447-10.bin",
+        "8296/edit-50hz-324243-04.bin",
+        "8296/characters-324242-01.bin"
+    )
 }
 
 $downloaded = 0
@@ -108,7 +122,8 @@ foreach ($set in $Sets) {
     New-Item -ItemType Directory -Force -Path $destDir | Out-Null
 
     Write-Host "== $set -> $destDir ==" -ForegroundColor Cyan
-    foreach ($name in $Manifest[$set]) {
+    foreach ($entry in $Manifest[$set]) {
+        $name = Split-Path $entry -Leaf
         $destPath = Join-Path $destDir $name
 
         if (-not $Force -and (Test-Path $destPath) -and (Get-Item $destPath).Length -gt 0) {
@@ -117,7 +132,7 @@ foreach ($set in $Sets) {
             continue
         }
 
-        $url = "$BaseUrl/$name"
+        $url = "$BaseUrl/$entry"
         $ok = $false
         for ($attempt = 1; $attempt -le 2 -and -not $ok; $attempt++) {
             try {

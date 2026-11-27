@@ -8,7 +8,9 @@ Copy-Item -LiteralPath (Join-Path $root 'x64/Release/roms') -Destination $runtim
 Copy-Item -LiteralPath (Join-Path $root 'x64/Release/pet.ini') -Destination $runtime -Force
 $env:PETGPT_DATA_DIR = $runtime
 $exe = Join-Path $root 'dist/pet-gpt.exe'
-foreach ($model in @('-pet2001','-basic2','-basic4','-4032','-8032')) {
+$models = @('-pet2001','-basic2','-basic4','-4032','-8032')
+if (Test-Path -LiteralPath (Join-Path $root 'x64/Release/roms/cbm8296')) { $models += '-8296' }   # the 8296 ROM folder is optional
+foreach ($model in $models) {
     $image = Join-Path $runtime ($model.TrimStart('-') + '.png')
     $arguments = @('--smoke-test=' + $image, $model, '-window')
     $process = Start-Process -FilePath $exe -ArgumentList $arguments -WindowStyle Hidden -PassThru

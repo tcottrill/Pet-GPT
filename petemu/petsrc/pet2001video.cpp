@@ -44,8 +44,26 @@ void Pet2001Video::setCharsets(const uint8_t* charset1_128x8, const uint8_t* cha
 {
     charset1 = charset1_128x8;
     charset2 = charset2_128x8;
+    // A one-pair install leaves no stale second bank from an earlier ROM set.
+    upperCharset1 = upperCharset2 = nullptr;
+    charBankUpper_ = false;
+    textSet_ = false;
     // Default to charset1 until caller switches.
     activeCharset = charset1;
+}
+
+void Pet2001Video::setCharsetsUpper(const uint8_t* charset1_128x8, const uint8_t* charset2_128x8)
+{
+    upperCharset1 = charset1_128x8;
+    upperCharset2 = charset2_128x8;
+    charBankUpper_ = false;
+}
+
+void Pet2001Video::setCharBank(bool upper)
+{
+    if (!upperCharset1 || !upperCharset2 || charBankUpper_ == upper) return;
+    charBankUpper_ = upper;
+    selectCharset();
 }
 
 void Pet2001Video::reset()
@@ -60,6 +78,8 @@ void Pet2001Video::reset()
     // Hardware reset drives CA2 back to the graphics charset (VIA PCR resets
     // to 0); without this a reset from text mode kept rendering charset2.
     if (charset1) activeCharset = charset1;
+    textSet_ = false;
+    charBankUpper_ = false;
     // If charsets are set, show empty screen; otherwise still fine.
     redrawScreen();
 }
@@ -77,7 +97,7 @@ void Pet2001Video::write(int addr, uint8_t value)
     vidram[addr] = value;
 
     // Translate physical SRAM to a visible cell, wrapping at the SRAM boundary.
-    const int mask = (cols_ == 80) ? 0x7ff : 0x3ff;
+    const int mask = screenMask_;
     const int cell = (addr - screenStart_) & mask;
     if (!rasterFrameReady_ && !blank && activeCharset != nullptr) {
         // Larger programmed displays can show the same SRAM byte more than once.
@@ -129,34 +149,52 @@ void Pet2001Video::setColumns(int cols)
     scaleX_  = (nc == 80) ? 1 : 2;
     cellW_   = CHAR_W * scaleX_;
     visible_ = nc * ROWS;
-    const int sramSize = (nc == 80) ? 2048 : 1024;
+    // Keep a 4 KB screen selected earlier; the caller may also set it afterwards.
+    screenMask_ = screen4K_ ? 0xfff : (nc == 80) ? 0x7ff : 0x3ff;
+    const int sramSize = screenMask_ + 1;
     if ((int)vidram.size() < sramSize) vidram.resize(sramSize, 0x20);
     redrawScreen();
 }
 
-void Pet2001Video::setDiscreteRaster(bool enabled)
+void Pet2001Video::setScreen4K(bool on)
 {
-    raster_.assign(enabled ? FB_W * FB_H : 0, RGBA_BLACK);
+    screen4K_ = on;
+    screenMask_ = on ? 0xfff : (cols_ == 80) ? 0x7ff : 0x3ff;
+    if ((int)vidram.size() <= screenMask_) vidram.resize(screenMask_ + 1, 0x20);
+    redrawScreen();
+}
+
+void Pet2001Video::enableRaster()
+{
+    raster_.assign(FB_W * FB_H, RGBA_BLACK);
     rasterFrameReady_ = false;
     redrawScreen();
 }
 
-void Pet2001Video::fetchDiscreteCharacter(int line, int column)
+void Pet2001Video::fetchCharacter(int line, int column, int glyphLine, uint16_t byteOffset)
 {
-    // The same SRAM byte is fetched again for each scanline of the glyph.
-    const uint8_t ch = vidram[(line / CHAR_H) * COLS + column];
-    auto* pixels = raster_.data() + line * SCALE * FB_W + column * CELL_W;
-    const uint8_t bits = (blank || !activeCharset) ? 0 : glyphRow(ch, line % CHAR_H);
+    if (column * cellW_ >= FB_W) return;
+    const int lastPixel = (line + 1) * SCALE * FB_W;
+    if (lastPixel > static_cast<int>(raster_.size()))
+        raster_.resize(lastPixel, RGBA_BLACK);
+    if (blank || !activeCharset || glyphLine >= CHAR_H) return;
+    const uint8_t ch = vidram[byteOffset & screenMask_];
+    auto* pixels = raster_.data() + line * SCALE * FB_W + column * cellW_;
+    const uint8_t bits = glyphRow(ch, glyphLine);
     for (int x = 0; x < CHAR_W; ++x) {
         const uint32_t pixel = (bits & (0x80u >> x)) ? RGBA_WHITEISH : RGBA_BLACK;
-        pixels[2 * x] = pixels[2 * x + 1] = pixel;
-        pixels[FB_W + 2 * x] = pixels[FB_W + 2 * x + 1] = pixel;
+        for (int dx = 0; dx < scaleX_; ++dx) {
+            pixels[x * scaleX_ + dx] = pixel;
+            pixels[FB_W + x * scaleX_ + dx] = pixel;
+        }
     }
 }
 
-void Pet2001Video::finishDiscreteFrame()
+void Pet2001Video::finishRasterFrame()
 {
     fb.swap(raster_);
+    fbHeight_ = static_cast<int>(fb.size()) / FB_W;
+    raster_.assign(FB_W * FB_H, RGBA_BLACK);
     rasterFrameReady_ = true;
 }
 
@@ -171,9 +209,11 @@ void Pet2001Video::setCrtcGeometry(int columns, int rows, int scanlines, uint16_
     displayCols_ = columns;
     visible_ = visible;
     scanlines_ = scanlines;
-    fbHeight_ = std::max(FB_H, rows * scanlines * SCALE);
-    fb.resize(FB_W * fbHeight_, RGBA_BLACK);
     screenStart_ = byteOffset;
+    if (!rasterFrameReady_) {
+        fbHeight_ = std::max(FB_H, rows * scanlines * SCALE);
+        fb.resize(FB_W * fbHeight_, RGBA_BLACK);
+    }
     redrawScreen();
 }
 
@@ -186,7 +226,16 @@ void Pet2001Video::setScreenStart(uint16_t byteOffset)
 
 void Pet2001Video::setCharset(bool useSecond)
 {
-    const uint8_t* newSet = useSecond ? charset2 : charset1;
+    textSet_ = useSecond;
+    selectCharset();
+}
+
+// Points activeCharset at the pair chosen by the bank and the graphics/text line.
+void Pet2001Video::selectCharset()
+{
+    const bool upper = charBankUpper_ && upperCharset1 && upperCharset2;
+    const uint8_t* newSet = textSet_ ? (upper ? upperCharset2 : charset2)
+                                     : (upper ? upperCharset1 : charset1);
     if (newSet == activeCharset) return;
 
     activeCharset = newSet;
@@ -228,7 +277,7 @@ std::string Pet2001Video::save() const
 
     s += (blank ? '1' : '0');
     s += ',';
-    s += (activeCharset == charset1 ? '1' : '2');
+    s += (textSet_ ? '2' : '1');
     s += ',';
 
     for (int i = 0; i < (int)vidram.size(); ++i) {
@@ -288,6 +337,54 @@ void Pet2001Video::load(const std::string& s)
     }
 }
 
+void Pet2001Video::saveState(StateWriter& w) const
+{
+    w.u32(static_cast<uint32_t>(vidram.size()));
+    w.bytes(vidram.data(), vidram.size());
+    w.i32(cols_); w.i32(screenMask_); w.flag(screen4K_);
+    w.i32(displayCols_); w.i32(scanlines_); w.i32(fbHeight_); w.i32(scaleX_); w.i32(cellW_); w.i32(visible_);
+    w.u16(screenStart_);
+    w.flag(blank); w.flag(blankRequested); w.i32(blankCountdownMs);
+    w.flag(textSet_); w.flag(charBankUpper_);
+}
+
+bool Pet2001Video::loadState(StateReader& r)
+{
+    const uint32_t size = r.u32();
+    if (r.failed() || size < 1024 || size > 65536 || r.remaining() < size) { r.fail(); return false; }
+    std::vector<uint8_t> ram(size);
+    r.bytes(ram.data(), size);
+    const int cols = r.i32(), mask = r.i32();
+    const bool is4K = r.flag();
+    const int displayCols = r.i32(), scanlines = r.i32(), height = r.i32(), scaleX = r.i32(), cellW = r.i32(), visible = r.i32();
+    const uint16_t start = r.u16();
+    const bool isBlank = r.flag(), requested = r.flag();
+    const int countdown = r.i32();
+    const bool text = r.flag(), upper = r.flag();
+    // The sizes below decide how big the framebuffer gets, so check them all.
+    const bool ok = !r.failed() && (cols == 40 || cols == 80) && (mask == 0x3ff || mask == 0x7ff || mask == 0xfff) &&
+        size > static_cast<uint32_t>(mask) && displayCols >= 0 && displayCols <= 510 && scanlines >= 1 && scanlines <= 32 &&
+        height >= 1 && height <= 16384 && (scaleX == 1 || scaleX == 2) && cellW == CHAR_W * scaleX &&
+        visible >= 0 && visible <= 510 * 127 && countdown >= -1 && countdown <= 10000;
+    if (!ok) { r.fail(); return false; }
+
+    vidram.swap(ram);
+    cols_ = cols; screenMask_ = mask; screen4K_ = is4K;
+    displayCols_ = displayCols; scanlines_ = scanlines; fbHeight_ = height; scaleX_ = scaleX; cellW_ = cellW; visible_ = visible;
+    screenStart_ = start;
+    blank = isBlank; blankRequested = requested; blankCountdownMs = countdown;
+    textSet_ = text; charBankUpper_ = upper;
+    // Same pick as selectCharset(), but the redraw below is unconditional.
+    const bool useUpper = charBankUpper_ && upperCharset1 && upperCharset2;
+    activeCharset = textSet_ ? (useUpper ? upperCharset2 : charset2) : (useUpper ? upperCharset1 : charset1);
+    fb.assign(static_cast<size_t>(FB_W) * height, RGBA_BLACK);
+    if (!raster_.empty()) raster_.assign(static_cast<size_t>(FB_W) * FB_H, RGBA_BLACK);
+    // Incremental drawing resumes at once; the next finished raster frame takes over again.
+    rasterFrameReady_ = false;
+    if (blank) blankScreen(); else redrawScreen();
+    return true;
+}
+
 void Pet2001Video::redrawScreen()
 {
     if (rasterFrameReady_) return;
@@ -303,8 +400,7 @@ void Pet2001Video::redrawScreen()
     std::fill(fb.begin(), fb.end(), RGBA_BLACK);
 
     for (int addr = 0; addr < visible_; ++addr) {
-        const int mask = (cols_ == 80) ? 0x7ff : 0x3ff;
-        drawCharCell(addr, vidram[(screenStart_ + addr) & mask]);
+        drawCharCell(addr, vidram[(screenStart_ + addr) & screenMask_]);
     }
 }
 

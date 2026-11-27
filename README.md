@@ -7,9 +7,9 @@
 <p align="center">
   A modern, modular Commodore PET emulator for Windows and Linux — cycle-driven 6502, accurate
   VIA&nbsp;6522 / PIA&nbsp;6520 I/O, full CB2 sound, a mono-monitor CRT shader,
-  <strong>five PET/CBM models</strong> from the original 2001 to the 80-column 8032,
+  <strong>six PET/CBM models</strong> from the original 2001 to the 80-column 8032 and the 8296,
   <strong>.tap cassette playback</strong> and <strong>.t64</strong> loading, SNES&nbsp;user-port
-  gamepad support, and a bug-fixed HLE IEEE-488 disk drive with <strong>.d64 and .d71</strong>
+  gamepad support, and a bug-fixed HLE IEEE-488 disk drive with <strong>.d64, .d71, .d80 and .d82</strong>
   images. Now <strong>version&nbsp;2.7</strong>.
 </p>
 
@@ -41,7 +41,7 @@ https://github.com/user-attachments/assets/0e11d07d-d96a-43b2-86fe-575940d97524
 1. Download the latest release zip from the [GitHub Releases page](https://github.com/tcottrill/Pet-GPT/releases) and unzip it anywhere.
 2. Run the program.
 3. **ROMs are not included.** On the first start, when no PET ROM set can be loaded, a **ROM setup** window opens. It shows the folder Pet-GPT reads ROMs from. **Download ROMs** fetches them for you from zimmers.net (this needs an internet connection and PowerShell), or use **Open ROM folder** and copy your own ROM files into the per-model sub-folders (the exact file names are listed [below](#roms--your-commodore-rom-dumps-pet-gpt-ships-none)). Then press **Try again**.
-4. Use **File ▸ Load Program / Disk / Tape...** (`Ctrl+O`), or drag a `.prg`, `.d64` or `.tap` file (`.t64`, `.d71` also work) onto the window. A BASIC program starts by itself; for a disk or tape image the title bar tells you what to type next.
+4. Use **File ▸ Load Program / Disk / Tape...** (`Ctrl+O`), or drag a `.prg`, `.d64` or `.tap` file (`.t64`, `.d71`, `.d80`, `.d82` also work) onto the window. A BASIC program starts by itself; for a disk or tape image the title bar tells you what to type next.
 
 <p align="center">
   Note to anyone actually stumbling on this repository, this actually is a halfway decent
@@ -74,9 +74,9 @@ a **bug-fixed HLE disk drive**.
 
 **Version 2.6** — *the one with the features* — fills out the family tree and adds tape:
 
-- **Five machine models** — the **original PET 2001** (BASIC 1, 8 KB), **2001N / 3000**
+- **Six machine models** — the **original PET 2001** (BASIC 1, 8 KB), **2001N / 3000**
   (BASIC 2), **4000 9-inch** (BASIC 4, discrete video), the new **4000 12-inch** (40-column
-  **CRTC**, 60 Hz), and the **CBM 8032** (80-column) — all from **Machine ▸ Model**.
+  **CRTC**, 60 Hz), the **CBM 8032** (80-column), and the **CBM 8296** (8032 with 64 KB expansion RAM and 4 KB screen memory) — all from **Machine ▸ Model**.
 - **TAP cassette playback** — attach a `.tap` to cassette port 1 and drive it from
   **File ▸ Tape** (Play / Stop / Rewind / Eject); the real PET ROM does the loading.
 - **T64 archive loading** — single-program archives load directly; multi-program archives
@@ -113,7 +113,7 @@ a **bug-fixed HLE disk drive**.
 - 🔊 **Full CB2 sound** — the VIA shift-register / CB2 line is reconstructed to PCM in real
   time, so the classic PET sound demos (e.g. *Faulty Robots*) play correctly.
 - 🖳 **PET models** — **original 2001 (BASIC 1, 8 KB)**, **2001N/3000 (BASIC 2)**,
-  **4000 9-inch (BASIC 4)**, **4000 12-inch CRTC**, and **8032 (80-column)**; the CRTC models
+  **4000 9-inch (BASIC 4)**, **4000 12-inch CRTC**, **8032 (80-column)**, and **8296**; the CRTC models
   use a functional **MOS 6545 CRTC** with CRTC-derived frame timing.
 - 📼 **TAP cassette playback** — `.tap` v0/v1 images on cassette port 1, read by the real PET
   ROM at tape speed, with motor control and a **File ▸ Tape** transport.
@@ -124,7 +124,7 @@ a **bug-fixed HLE disk drive**.
   (F9 / PgUp-PgDn / F8) and saved to `pet.ini`.
 - 🎮 **SNES gamepad support** — an emulated SNES user-port adapter maps a supported native controller to PETSCII-Robots-style games. Toggle in **Machine ▸ SNES Adapter**.
 - 💾 **HLE IEEE-488 disk drive (device 8), fully bug-fixed**
-  - Mounts **.d64** (1541, 35-track) **and .d71** (1571 double-sided, 70-track) images —
+  - Mounts **.d64** (1541, 35-track), **.d71** (1571 double-sided, 70-track), **.d80** (8050, 77-track) **and .d82** (8250 double-sided, 154-track) images —
     read **and** write (SAVE / SCRATCH / RENAME / COPY / NEW).
   - **DOS block / direct-access commands** — `OPEN "#"` buffer channels, `U1`/`U2` block
     read/write, `B-P`, `B-A`/`B-F` — the API Zork-style Infocom interpreters use.
@@ -232,7 +232,8 @@ PET-data/roms/
 ├─ pet2001n\    PET 2001N / 3000, BASIC 2, discrete video
 ├─ pet4000-9\   PET 4000, 9-inch, BASIC 4, discrete video
 ├─ pet4000-12\  PET 4000, 12-inch, BASIC 4, 40-column CRTC, 60 Hz
-└─ cbm8032\     CBM 8032, BASIC 4, 80-column CRTC, 60 Hz
+├─ cbm8032\     CBM 8032, BASIC 4, 80-column CRTC, 60 Hz
+└─ cbm8296\     CBM 8296, BASIC 4, 80-column CRTC, 64K expansion, 60 Hz (8296-D: 50 Hz)
 ```
 
 **ROM fetch script.** ROMs are never included in builds or installed packages. The ROM
@@ -259,15 +260,27 @@ character ROMs (`characters-1.901447-08.bin`, `characters-2.901447-10.bin`):
 | `roms\pet2001\` | Seven `rom-1-*.901447-0*.bin` ROMs (C000, C800, D000, D800, E000, F000, F800) plus `characters-1.901447-08.bin` |
 | `roms\pet2001n\` | `basic-2-c000.901465-01.bin`, `basic-2-d000.901465-02.bin`, `edit-2-n.901447-24.bin`, `kernal-2.901465-03.bin` + chars |
 | `roms\pet4000-9\` | `basic-4-b000.901465-23.bin`, `basic-4-c000.901465-20.bin`, `basic-4-d000.901465-21.bin`, `edit-4-n.901447-29.bin`, `kernal-4.901465-22.bin` + chars |
-| `roms\pet4000-12\` | Same BASIC/KERNAL/character ROMs as pet4000-9, with `edit-4-40-n-60Hz.901499-01.bin` replacing the editor |
-| `roms\cbm8032\` | `basic-4-b000.901465-19.bin`, `basic-4-c000.901465-20.bin`, `basic-4-d000.901465-21.bin`, `edit-4-80-b-60Hz.901474-03.bin`, `kernal-4.901465-22.bin` + chars |
+| `roms\pet4000-12\` | Same BASIC/KERNAL/character ROMs as pet4000-9, with `edit-4-40-n-60Hz.901499-01.bin` replacing the editor (optional 50 Hz editor: `edit-4-40-n-50Hz.901498-01.bin`) |
+| `roms\cbm8032\` | `basic-4-b000.901465-19.bin`, `basic-4-c000.901465-20.bin`, `basic-4-d000.901465-21.bin`, `edit-4-80-b-60Hz.901474-03.bin`, `kernal-4.901465-22.bin` + chars (optional 50 Hz editor: `edit-4-80-b-50Hz.901474-04-0283.bin`) |
+| `roms\cbm8296\` | `basic-4-b000.901465-23.bin`, `basic-4-c000.901465-20.bin`, `basic-4-d000.901465-21.bin`, `edit-4-80-b-60Hz.901474-03.bin`, `kernal-4.901465-22.bin`, `characters-2.901447-10.bin` (optional 8296-D, European 50 Hz: `edit-50hz-324243-04.bin` and `characters-324242-01.bin`, both 4096 bytes, in the `8296/` folder on zimmers.net) |
 
-Pick the model at runtime with **Machine ▸ Model**, `-pet2001` / `-basic2` / `-basic4` / `-4032` / `-8032`, or `[machine] basic`
-in `pet.ini`. Existing values 2/4/8 retain their meaning; 12 selects the new CRTC model.
+On the CRTC models (12-inch 4000, 8032 and 8296), **Machine ▸ 50 Hz video (European editor ROM)** (or `-50hz` / `-60hz`, or
+`[machine] video50hz` in `pet.ini`) swaps in the 50 Hz editor ROM, which makes the CRTC run a 50 Hz frame. It is
+available only when that optional file is present; otherwise the 60 Hz editor is used.
+
+The **CBM 8296** (`-8296`, or `[machine] basic = 96`) is an 80-column, business-keyboard machine with 32 KB of base RAM
+plus the 64 KB banked expansion RAM controlled through `$FFF0` and a 4 KB screen memory at `$8000-$8FFF`. The
+North American 60 Hz machine is the default. With **Machine ▸ 50 Hz video** (or `-8296d`, or `-8296 -50hz`) it becomes
+the European **8296-D**, which uses a 4 KB editor ROM and a 4 KB character ROM (its upper half is chosen through CRTC
+register 12, bit 5, for the DIN national character set). The 8296-D editor expects a DIN keyboard, so some keys may
+not match a US layout.
+
+Pick the model at runtime with **Machine ▸ Model**, `-pet2001` / `-basic2` / `-basic4` / `-4032` / `-8032` / `-8296`, or `[machine] basic`
+in `pet.ini`. Existing values 2/4/8 retain their meaning; 12 selects the 12-inch CRTC model and 96 the CBM 8296.
 
 The 4000 models cover 4016/4032 configurations according to RAM size (default 32 KB; smaller
 sizes are custom configurations). The original PET 2001 uses BASIC 1 and 8 KB RAM. Only the
-12-inch 4000 and the 8032 have the CRTC. Banked 8096/8296 models are not implemented.
+12-inch 4000, the 8032 and the 8296 have the CRTC. The 8096 is not implemented.
 
 > **Upgrading from 2.5?** Inside `roms`, rename `basic2` → `pet2001n`, `basic4` → `pet4000-9`,
 > and `8032` → `cbm8032` — or just run `download-roms.ps1` again. The downloader still accepts
@@ -275,7 +288,7 @@ sizes are custom configurations). The original PET 2001 uses BASIC 1 and 8 KB RA
 
 ### `files/` — your programs and disks (the virtual drive root)
 
-Drop `.prg`, `.d64`, and `.d71` files here, then `LOAD"NAME",8` / `LOAD"$",8` from BASIC, or
+Drop `.prg`, `.d64`, `.d71`, `.d80`, and `.d82` files here, then `LOAD"NAME",8` / `LOAD"$",8` from BASIC, or
 use **File ▸ Load** (or drag-and-drop onto the window). File ▸ Load also accepts `.t64`
 archives and `.tap` cassette images (see [TAP cassette playback](#-tap-cassette-playback)).
 
@@ -312,8 +325,10 @@ TAP is separate from the IEEE disk drive and the `-disk` option.
 
 ```text
 pet-gpt [program] [options]
-  -pet2001 | -basic2 | -basic4 | -4032 | -8032   select the machine profile
-  -disk <file>          mount a .d64 / .d71, or prime a .prg from ./files
+  -pet2001 | -basic2 | -basic4 | -4032 | -8032 | -8296   select the machine profile
+  -8296d                CBM 8296-D, the European 50 Hz 8296 (same as -8296 -50hz)
+  -50hz | -60hz         12-inch 4000 / 8032 / 8296: 50 Hz (European) or 60 Hz editor ROM
+  -disk <file>          mount a .d64 / .d71 / .d80 / .d82, or prime a .prg from ./files
   -rom <file>           load a program/disk at startup
   -scale <1|2|3|fit>    initial window scale       -fullscreen | -window
   -monitor <n>          start on monitor n (1 = primary; clears the ini id)
@@ -372,6 +387,8 @@ lives in `pet.ini` (`[input] snes_invert`).
 | `Ctrl+E` | Eject disk (back to the `./files` virtual drive) |
 | `Ctrl+R` | Reset |
 | `Pause/Break` / `Ctrl+P` | Pause or resume emulation and audio |
+| `Ctrl+S` / `Ctrl+L` | Quick save / quick load the whole machine (`states/quick.petstate`) |
+| `Ctrl+Shift+S` / `Ctrl+Shift+L` | Save / load a state with a file dialog (`.petstate`) |
 | `F6` | Save a PNG screenshot (also works while paused) |
 | `F10` | Toggle CRT look (mono monitor shader) |
 | `F9` / `PgUp` / `PgDn` | Select a CRT shader knob / adjust it |
@@ -400,10 +417,12 @@ File ─┬─ Load Program/Disk/Tape…   (Ctrl+O)
       ├─ Eject Disk                (Ctrl+E)
       ├─ Tape (cassette 1) ▸ Play / Stop / Rewind / Eject Tape
       ├─ Save Screenshot           (F6)
+      ├─ Save State… / Load State… (Ctrl+Shift+S / Ctrl+Shift+L)
+      ├─ Quick Save / Quick Load State (Ctrl+S / Ctrl+L)
       ├─ Reset                     (Ctrl+R)
       └─ Exit
 Machine ─┬─ Pause                    (Ctrl+P / Pause)                   (checkbox)
-         ├─ Model ▸ PET 2001 / PET 2001N/3000 / PET 4000 9-inch / PET 4000 12-inch CRTC / CBM 8032   (radio)
+         ├─ Model ▸ PET 2001 / PET 2001N/3000 / PET 4000 9-inch / PET 4000 12-inch CRTC / CBM 8032 / CBM 8296   (radio)
          ├─ Memory ▸ 4K / 8K / 16K / 32K                              (radio)
          ├─ 2× Speed                                                  (checkbox)
          ├─ Graphics Keyboard    (F12)                                (checkbox)
@@ -436,8 +455,8 @@ names are not stable IDs; replace them with the logged physical ID.
 
 | Section / key | Values | Notes |
 |---|---|---|
-| `[machine] basic` | `1`, `2`, `4`, `8`, `12` | Model: original 2001 / 2001N / 4000 9-inch / 8032 / 4000 12-inch |
-| `[machine] ram` | `4`, `8`, `16`, `32` | RAM size in KB (default 32; 2001 is fixed at 8; 8032 is fixed at 32) |
+| `[machine] basic` | `1`, `2`, `4`, `8`, `12`, `96` | Model: original 2001 / 2001N / 4000 9-inch / 8032 / 4000 12-inch / CBM 8296 |
+| `[machine] ram` | `4`, `8`, `16`, `32` | RAM size in KB (default 32; 2001 is fixed at 8; 8032 and 8296 are fixed at 32) |
 | `[machine] speed2x` | `0`/`1` | 2× emulation speed |
 | `[machine] autorun` | `0`/`1` | After loading a BASIC `.prg`/`.t64` (load address `$0401`), type `RUN` for you (default `1`). Machine-language programs are never auto-run; the title bar shows the `SYS` address to type. |
 | `[input] snes_adapter` | `0`/`1` | emulate the user-port SNES pad |
@@ -457,6 +476,11 @@ names are not stable IDs; replace them with the logged physical ID.
 
 The CRT knobs are best set live from **View ▸ CRT Monitor Settings** (or F9 / PgUp-PgDn); F8
 dumps the current values to the log as a paste-ready block.
+
+The four persistence settings (persistence, decay time, tail amount, tail decay) are stored per
+machine, because the tubes differ: the CBM 8296's glows for seconds, the others barely at all. They
+are saved in `[video]` as `mono_persistence_m<id>` and so on (id 1, 2, 4, 8, 12 or 96, as in
+`[machine] basic`); the other CRT settings are shared by all machines.
 
 ---
 

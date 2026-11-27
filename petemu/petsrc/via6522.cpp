@@ -1591,6 +1591,55 @@ uint32_t VIA6522::cb2_get_tick_counter() const
 }
 
 // -----------------------------------------------------------------------------
+// Save states
+// -----------------------------------------------------------------------------
+void VIA6522::saveState(StateWriter& w) const
+{
+	w.u8(ora); w.u8(orb); w.u8(ddra); w.u8(ddrb); w.u8(acr); w.u8(pcr); w.u8(ifr); w.u8(ier); w.u8(sr);
+	w.u16(t1_counter); w.u16(t1_latch);
+	w.flag(t1_free_running); w.flag(t1_enabled); w.flag(t1_pb7_toggle); w.flag(t1_pb7_output);
+	w.flag(t1_reload_pending); w.flag(t2_reload_pending); w.flag(t2_oneshot_fired); w.flag(t1_oneshot_fired);
+	w.u16(t2_counter); w.u16(t2_latch);
+	w.flag(t2_enabled); w.flag(t2_counts_external);
+	w.u8(sr_latch); w.u8(sr_bits_remaining); w.u8(sr_bits_left); w.u8(sr_mode);
+	w.flag(sr_clock_external); w.flag(sr_shift_out); w.flag(sr_t2_phase); w.flag(sr_reload_pending);
+	w.flag(cb2_level_frame_start); w.flag(last_cb2_out);
+	w.u8(portA_in); w.u8(portB_in); w.u8(ira_latch); w.u8(irb_latch);
+	w.flag(ca1_in); w.flag(old_ca1); w.flag(cb1_in); w.flag(old_cb1);
+	w.flag(ca2_in); w.flag(cb2_in); w.flag(ca2_out); w.flag(cb2_out); w.flag(old_ca2); w.flag(old_cb2);
+	w.u8(ca2_pulse_count); w.u8(cb2_pulse_count);
+	w.flag(cb2_out_state); w.flag(cb2_is_output); w.flag(cb2_shift_override);
+	w.u32(cb2_tick_counter); w.flag(cb2_last_logged);
+}
+
+bool VIA6522::loadState(StateReader& r)
+{
+	// This object is too big to copy for an all-or-nothing read, so check the
+	// length first (every field is fixed size) and read the flags leniently:
+	// after that nothing can fail half way.
+	constexpr size_t kBytes = 61;
+	if (r.remaining() < kBytes) { r.fail(); return false; }
+	auto fl = [&r]() { return r.u8() != 0; };
+	ora = r.u8(); orb = r.u8(); ddra = r.u8(); ddrb = r.u8(); acr = r.u8(); pcr = r.u8(); ifr = r.u8(); ier = r.u8(); sr = r.u8();
+	t1_counter = r.u16(); t1_latch = r.u16();
+	t1_free_running = fl(); t1_enabled = fl(); t1_pb7_toggle = fl(); t1_pb7_output = fl();
+	t1_reload_pending = fl(); t2_reload_pending = fl(); t2_oneshot_fired = fl(); t1_oneshot_fired = fl();
+	t2_counter = r.u16(); t2_latch = r.u16();
+	t2_enabled = fl(); t2_counts_external = fl();
+	sr_latch = r.u8(); sr_bits_remaining = r.u8(); sr_bits_left = r.u8(); sr_mode = r.u8();
+	sr_clock_external = fl(); sr_shift_out = fl(); sr_t2_phase = fl(); sr_reload_pending = fl();
+	cb2_level_frame_start = fl(); last_cb2_out = fl();
+	portA_in = r.u8(); portB_in = r.u8(); ira_latch = r.u8(); irb_latch = r.u8();
+	ca1_in = fl(); old_ca1 = fl(); cb1_in = fl(); old_cb1 = fl();
+	ca2_in = fl(); cb2_in = fl(); ca2_out = fl(); cb2_out = fl(); old_ca2 = fl(); old_cb2 = fl();
+	ca2_pulse_count = r.u8(); cb2_pulse_count = r.u8();
+	cb2_out_state = fl(); cb2_is_output = fl(); cb2_shift_override = fl();
+	cb2_tick_counter = r.u32(); cb2_last_logged = fl();
+	cb2_edge_count = 0;   // the log belongs to the audio slice in progress, which a load abandons
+	return !r.failed();
+}
+
+// -----------------------------------------------------------------------------
 // updateCB2State
 // Helper for CB2 output modes that use pulses (modes 4 and 5).
 //

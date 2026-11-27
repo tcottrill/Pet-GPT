@@ -3,12 +3,14 @@
 
 #include "sys_log.h"
 #include "iniFile.h"    // get_config_* (pet.ini already opened by the host)
+#include "phosphor_profile.h"
 
 #include <cstdio>
 #include <vector>
 #include <string>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 #include <functional>
 
 static const char* VS_SRC = R"(
@@ -61,6 +63,9 @@ uniform float uContrast;   // video gain (>=1); overdrive fattens strokes via sa
 uniform float uBright;     // black-level lift 0..0.25 (misadjusted-tube glow)
 uniform int   uTintOn;
 uniform vec3  uTint;
+uniform sampler2D uPhos;   // phosphor state (R = fast, G = slow tail; same UVs as uTex), unit 1
+uniform float uPersist;    // 0 = persistence off; uPhos is then never sampled
+uniform float uTail;       // share of the glow that belongs to the slow component, 0..1
 
 void main(){
     vec2 px = 1.0 / uSrcSize;
@@ -70,16 +75,24 @@ void main(){
     float sh = max(uBlurH, 0.02);
     float sv = max(uBlurV, 0.02);
     vec3  acc  = vec3(0.0);
+    vec2  accP = vec2(0.0);    // same taps through the phosphor state (linear, combined once below)
     float wsum = 0.0;
     for (int i = -3; i <= 3; ++i) {
         float wx = exp(-0.5 * float(i*i) / (sh*sh));
         for (int j = -1; j <= 1; ++j) {
             float w = wx * exp(-0.5 * float(j*j) / (sv*sv));
-            acc  += w * texture(uTex, vUV + vec2(float(i), float(j)) * px).rgb;
+            vec2 tc = vUV + vec2(float(i), float(j)) * px;
+            acc  += w * texture(uTex, tc).rgb;
+            if (uPersist > 0.0) accP += w * texture(uPhos, tc).rg;
             wsum += w;
         }
     }
     vec3 col = acc / wsum;
+    if (uPersist > 0.0) {
+        // The blend is linear, so combining after the tap sum is exact.
+        float g = mix(accP.r, accP.g, uTail) / wsum;
+        col = mix(col, vec3(g), uPersist);
+    }
 
     // 1b) Beam overdrive: video gain, clamped like a saturating phosphor.
     //     Gain pushes the spot's dim skirt past full-white, so strokes get
@@ -97,6 +110,13 @@ void main(){
                   + textureLod(uTex, vUV + vec2(-o.x,  o.y), lod).rgb
                   + textureLod(uTex, vUV + vec2( o.x,  o.y), lod).rgb;
         glow *= 0.25;
+        if (uPersist > 0.0) {
+            vec2 gp = textureLod(uPhos, vUV + vec2(-o.x, -o.y), lod).rg
+                    + textureLod(uPhos, vUV + vec2( o.x, -o.y), lod).rg
+                    + textureLod(uPhos, vUV + vec2(-o.x,  o.y), lod).rg
+                    + textureLod(uPhos, vUV + vec2( o.x,  o.y), lod).rg;
+            glow = mix(glow, vec3(mix(gp.r, gp.g, uTail) * 0.25), uPersist);
+        }
         col = 1.0 - (1.0 - col) * (1.0 - glow * uHalation);
     }
 
@@ -118,6 +138,24 @@ void main(){
 }
 )";
 
+// ---- Phosphor update pass: F,S_new = max(lit, F,S_old * decay), one texel per
+//      source pixel. Uses gl_FragCoord + texelFetch, so the state texel (x,y)
+//      always corresponds to source texel (x,y): the quad's V flip in VS_SRC
+//      only affects vUV, which this pass ignores.
+static const char* PHOS_FS_SRC = R"(
+#version 330 core
+out vec4 fragColor;
+uniform sampler2D uSrc;    // source framebuffer (unit 0; its filter may be LINEAR)
+uniform sampler2D uPrev;   // previous state (unit 1)
+uniform vec2  uDecay;      // exp(-dt / tau): x = fast, y = slow tail
+void main(){
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    vec3 s = texelFetch(uSrc, p, 0).rgb;
+    float lit = max(s.r, max(s.g, s.b));
+    vec2 prev = texelFetch(uPrev, p, 0).rg;   // R = fast, G = slow tail
+    fragColor = vec4(max(vec2(lit), prev * uDecay), 0.0, 1.0);
+}
+)";
 
 static void GLAPIENTRY gl_debug(GLenum source, GLenum type, GLuint id, GLenum severity,
     GLsizei length, const GLchar* message, const void* userParam)
@@ -223,28 +261,65 @@ bool PetGL::init(int winW, int winH, const char* title,
     m_scanline  = get_config_float("video", "mono_scanline", 0.0f);
     m_contrast  = get_config_float("video", "mono_contrast", 1.0f);
     m_bright    = get_config_float("video", "mono_brightness", 0.0f);
+    // Persistence is per machine: sane fallback row until setPhosphorModel() is called.
+    {
+        const PhosphorDefaults d = phosphor_defaults(m_phosModel);
+        m_persist = d.persistence; m_persistMs = d.decayMs;
+        m_persistTail = d.tail;    m_persistTailMs = d.tailMs;
+    }
     clampKnobs();
 
     // ---- Mono monitor program (single pass; reuses the same quad VAO/VS) ----
     {
         GLuint cvs = compile(GL_VERTEX_SHADER, VS_SRC);
         GLuint cfs = compile(GL_FRAGMENT_SHADER, CRT_FS_SRC);
-        crtProg = link(cvs, cfs);
+        // A failed compile yields 0; skip link so we never hand it a bad shader.
+        crtProg = (cvs && cfs) ? link(cvs, cfs) : 0;
         glDeleteShader(cvs);
         glDeleteShader(cfs);
-        glUseProgram(crtProg);
-        uCrtTexLoc      = glGetUniformLocation(crtProg, "uTex");
-        uCrtSrcSizeLoc  = glGetUniformLocation(crtProg, "uSrcSize");
-        uCrtBlurHLoc    = glGetUniformLocation(crtProg, "uBlurH");
-        uCrtBlurVLoc    = glGetUniformLocation(crtProg, "uBlurV");
-        uCrtHalationLoc = glGetUniformLocation(crtProg, "uHalation");
-        uCrtHalRadLoc   = glGetUniformLocation(crtProg, "uHalRadius");
-        uCrtScanLoc     = glGetUniformLocation(crtProg, "uScanline");
-        uCrtContrastLoc = glGetUniformLocation(crtProg, "uContrast");
-        uCrtBrightLoc   = glGetUniformLocation(crtProg, "uBright");
-        uCrtTintOnLoc   = glGetUniformLocation(crtProg, "uTintOn");
-        uCrtTintLoc     = glGetUniformLocation(crtProg, "uTint");
-        glUniform1i(uCrtTexLoc, 0);
+        if (crtProg != 0) {
+            glUseProgram(crtProg);
+            uCrtTexLoc      = glGetUniformLocation(crtProg, "uTex");
+            uCrtSrcSizeLoc  = glGetUniformLocation(crtProg, "uSrcSize");
+            uCrtBlurHLoc    = glGetUniformLocation(crtProg, "uBlurH");
+            uCrtBlurVLoc    = glGetUniformLocation(crtProg, "uBlurV");
+            uCrtHalationLoc = glGetUniformLocation(crtProg, "uHalation");
+            uCrtHalRadLoc   = glGetUniformLocation(crtProg, "uHalRadius");
+            uCrtScanLoc     = glGetUniformLocation(crtProg, "uScanline");
+            uCrtContrastLoc = glGetUniformLocation(crtProg, "uContrast");
+            uCrtBrightLoc   = glGetUniformLocation(crtProg, "uBright");
+            uCrtTintOnLoc   = glGetUniformLocation(crtProg, "uTintOn");
+            uCrtTintLoc     = glGetUniformLocation(crtProg, "uTint");
+            uCrtPhosLoc     = glGetUniformLocation(crtProg, "uPhos");
+            uCrtPersistLoc  = glGetUniformLocation(crtProg, "uPersist");
+            uCrtTailLoc     = glGetUniformLocation(crtProg, "uTail");
+            glUniform1i(uCrtTexLoc, 0);
+            glUniform1i(uCrtPhosLoc, 1);
+            glUniform1f(uCrtPersistLoc, 0.0f);
+
+            // Persistence update program; failure only disables persistence.
+            GLuint pvs = compile(GL_VERTEX_SHADER, VS_SRC);
+            GLuint pfs = compile(GL_FRAGMENT_SHADER, PHOS_FS_SRC);
+            phosProg = (pvs && pfs) ? link(pvs, pfs) : 0;
+            glDeleteShader(pvs);
+            glDeleteShader(pfs);
+            if (phosProg != 0) {
+                glUseProgram(phosProg);
+                uPhosSrcLoc   = glGetUniformLocation(phosProg, "uSrc");
+                uPhosPrevLoc  = glGetUniformLocation(phosProg, "uPrev");
+                uPhosDecayLoc = glGetUniformLocation(phosProg, "uDecay");
+                glUniform1i(uPhosSrcLoc, 0);
+                glUniform1i(uPhosPrevLoc, 1);
+            }
+            else {
+                LOG_ERROR("[GL] phosphor shader unavailable; persistence disabled");
+                phosFailed = true;
+            }
+        }
+        else {
+            // Not fatal: draw() falls back to the plain pass instead of a black screen.
+            LOG_ERROR("[GL] CRT shader unavailable; using the plain pass");
+        }
     }
 
     glUseProgram(0);
@@ -270,6 +345,10 @@ static const struct { const char* name; float step, lo, hi, def; } k_knobs[] = {
     { "mono_scanline",        0.02f, 0.0f, 1.0f,  0.00f },
     { "mono_contrast",        0.05f, 1.0f, 3.0f,  1.00f },
     { "mono_brightness",      0.01f, 0.0f, 0.25f, 0.00f },
+    { "mono_persistence",     0.02f, 0.0f, 1.0f,  0.12f },
+    { "mono_persist_ms",      25.0f, 25.0f, 5000.0f, 1500.0f },  // the 8296 tube glows for seconds
+    { "mono_persist_tail",    0.02f, 0.0f, 1.0f,  0.00f },       // 0 = single decay, as before
+    { "mono_persist_tail_ms", 100.0f, 100.0f, 20000.0f, 4000.0f },
 };
 static const int k_knobCount = (int)(sizeof(k_knobs) / sizeof(k_knobs[0]));
 
@@ -282,7 +361,12 @@ float* PetGL::knobPtr(int idx)
     case 3: return &m_halRadius;
     case 4: return &m_scanline;
     case 5: return &m_contrast;
-    default: return &m_bright;
+    case 6: return &m_bright;
+    case 7: return &m_persist;
+    case 8: return &m_persistMs;
+    case 9: return &m_persistTail;
+    case 10: return &m_persistTailMs;
+    default: return nullptr;   // callers range-check; never alias a real knob
     }
 }
 
@@ -313,16 +397,41 @@ void PetGL::setKnob(int idx, float v)
     clampKnobs();
     // Live apply happens on the next draw (uniforms set every frame);
     // persist immediately so the setting survives however the app exits.
-    set_config_float("video", k_knobs[idx].name, *knobPtr(idx));
+    // Persistence knobs (7-10) are saved per machine; the rest are global.
+    if (idx >= 7) set_config_float("video", phosphor_key(k_knobs[idx].name, m_phosModel).c_str(), *knobPtr(idx));
+    else set_config_float("video", k_knobs[idx].name, *knobPtr(idx));
 }
 
 void PetGL::restoreKnobDefaults()
 {
-    for (int i = 0; i < k_knobCount; ++i) {
+    for (int i = 0; i < 7; ++i) {
         *knobPtr(i) = k_knobs[i].def;
         set_config_float("video", k_knobs[i].name, k_knobs[i].def);
     }
-    LOG_INFO("[CRT] shader knobs restored to defaults");
+    // Persistence goes back to the running machine's row only.
+    const PhosphorDefaults d = phosphor_defaults(m_phosModel);
+    const float v[4] = { d.persistence, d.decayMs, d.tail, d.tailMs };
+    for (int i = 7; i < k_knobCount; ++i) {
+        *knobPtr(i) = v[i - 7];
+        clampKnobs();
+        set_config_float("video", phosphor_key(k_knobs[i].name, m_phosModel).c_str(), *knobPtr(i));
+    }
+    LOG_INFO("[CRT] shader knobs restored to defaults (machine %d)", m_phosModel);
+}
+
+void PetGL::setPhosphorModel(int modelId)
+{
+    m_phosModel = modelId;
+    const PhosphorDefaults d = phosphor_defaults(modelId);
+    float def[4] = { d.persistence, d.decayMs, d.tail, d.tailMs };
+    for (int i = 7; i < k_knobCount; ++i) {
+        float fb = def[i - 7];
+        // The 8296 was tuned before per-machine keys: the old global key is its fallback.
+        // (The ini helper cannot report an absent key, so it is read with the 8296 default.)
+        if (modelId == 96) fb = get_config_float("video", k_knobs[i].name, fb);
+        *knobPtr(i) = get_config_float("video", phosphor_key(k_knobs[i].name, modelId).c_str(), fb);
+    }
+    clampKnobs();
 }
 
 PetGL* PetGL::create(int winW, int winH, const char* title,
@@ -343,6 +452,103 @@ PetGL::~PetGL()
     if (vao) glDeleteVertexArrays(1, &vao);
     if (prog) glDeleteProgram(prog);
     if (crtProg) glDeleteProgram(crtProg);
+    if (phosProg) glDeleteProgram(phosProg);
+    destroyPhosphor();
+}
+
+void PetGL::destroyPhosphor()
+{
+    if (phosTex[0] || phosTex[1]) glDeleteTextures(2, phosTex);
+    phosTex[0] = phosTex[1] = 0;
+    if (phosFbo) glDeleteFramebuffers(1, &phosFbo);
+    phosFbo = 0;
+    phosW = phosH = 0;
+}
+
+// (Re)create both state textures at w x h, cleared to 0. One-time FBO check; on
+// any failure persistence is disabled for good and the old look is used.
+bool PetGL::ensurePhosphor(int w, int h)
+{
+    if (phosFailed) return false;
+    if (phosTex[0] && phosW == w && phosH == h) return true;
+
+    GLint prevFbo = 0, prevTex = 0, vp[4];
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+    glGetIntegerv(GL_VIEWPORT, vp);
+
+    destroyPhosphor();
+    glGenTextures(2, phosTex);
+    glGenFramebuffers(1, &phosFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, phosFbo);
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+    bool ok = phosTex[0] && phosTex[1] && phosFbo;
+    for (int i = 0; ok && i < 2; ++i) {
+        glBindTexture(GL_TEXTURE_2D, phosTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, w, h, 0, GL_RG, GL_HALF_FLOAT, nullptr);
+        // The CRT pass blurs and takes mip halation from the state like from the source.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, phosTex[i], 0);
+        if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) ok = false;
+        else { glClear(GL_COLOR_BUFFER_BIT); glGenerateMipmap(GL_TEXTURE_2D); }
+    }
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prevFbo);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+    glViewport(vp[0], vp[1], vp[2], vp[3]);
+    glClearColor(0.f, 0.f, 0.f, 1.f);   // draw() relies on this
+
+    if (!ok) {
+        LOG_ERROR("[GL] phosphor state (RG16F %dx%d) unavailable; persistence disabled", w, h);
+        destroyPhosphor();
+        phosFailed = true;
+        return false;
+    }
+    phosW = w; phosH = h; phosCur = 0;
+    return true;
+}
+
+// One step: render max(lit, prev*decay) per component into the other texture, then swap.
+void PetGL::updatePhosphor(double elapsedSeconds)
+{
+    if (!ensurePhosphor(texW, texH)) return;
+
+    GLint prevFbo = 0, vp[4];
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);   // host may not use 0
+    glGetIntegerv(GL_VIEWPORT, vp);                          // host set a letterboxed one
+
+    const int dst = 1 - phosCur;
+    // Guard against a zero time constant (knob ranges forbid it, ini is clamped anyway).
+    const double tauF = (std::max)(m_persistMs * 0.001, 1e-3);   // parens: windows.h max macro
+    const double tauS = (std::max)(m_persistTailMs * 0.001, 1e-3);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, phosFbo);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, phosTex[dst], 0);
+    glViewport(0, 0, texW, texH);
+
+    glUseProgram(phosProg);
+    glUniform2f(uPhosDecayLoc, (float)std::exp(-elapsedSeconds / tauF),
+                               (float)std::exp(-elapsedSeconds / tauS));
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, phosTex[phosCur]);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+    glUseProgram(0);
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prevFbo);
+    glViewport(vp[0], vp[1], vp[2], vp[3]);
+
+    phosCur = dst;
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, phosTex[phosCur]);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
 }
 
 void PetGL::updateTexture(const uint32_t* rgba, int w, int h)
@@ -367,7 +573,7 @@ void PetGL::updateTexture(const uint32_t* rgba, int w, int h)
     // CRT path samples smoothly and pulls halation from the mip pyramid;
     // plain path stays pixel-sharp NEAREST. (Source is 640x400 -> mip
     // regeneration is cheap.)
-    if (m_crt) {
+    if (crtActive()) {
         if (!m_texMipFilter) {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -394,7 +600,8 @@ void PetGL::draw()
     glBindTexture(GL_TEXTURE_2D, tex);
     glBindVertexArray(vao);
 
-    if (m_crt) {
+    bool persistOn = false;
+    if (crtActive()) {
         // ---- Mono monitor pass: softness + halation + optional ripple + tint ----
         glUseProgram(crtProg);
         glUniform2f(uCrtSrcSizeLoc, (float)texW, (float)texH);
@@ -407,21 +614,42 @@ void PetGL::draw()
         glUniform1f(uCrtBrightLoc,   m_bright);
         glUniform1i(uCrtTintOnLoc,   m_tintOn ? 1 : 0);
         glUniform3f(uCrtTintLoc, m_tint[0], m_tint[1], m_tint[2]);
+        if (m_persist > 0.0f && !phosFailed && phosTex[0]) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, phosTex[phosCur]);
+            glActiveTexture(GL_TEXTURE0);
+            glUniform1f(uCrtPersistLoc, m_persist);
+            glUniform1f(uCrtTailLoc, m_persistTail);
+            persistOn = true;
+        }
+        else glUniform1f(uCrtPersistLoc, 0.0f);
     }
     else {
-        // ---- Plain pass: pixel-sharp passthrough, no tint ----
+        // ---- Plain pass: pixel-sharp passthrough, still tinted by the monitor
+        // colour so Green phosphor holds with the CRT look off ----
         glUseProgram(prog);
-        glUniform1i(uTintOnLoc, 0);
+        glUniform1i(uTintOnLoc, m_tintOn ? 1 : 0);
         glUniform3f(uTintLoc, m_tint[0], m_tint[1], m_tint[2]);
     }
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
+    if (persistOn) {   // leave unit 1 clean for the plain pass
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
+    }
     glBindVertexArray(0);
     glUseProgram(0);
 }
 
-void PetGL::present(const uint32_t* rgba, int srcW, int srcH)
+void PetGL::present(const uint32_t* rgba, int srcW, int srcH, double elapsedSeconds)
 {
     updateTexture(rgba, srcW, srcH);
+    // Persistence is a tube property: CRT path only. elapsed == 0 is a redraw
+    // (repaint, screenshot) and must not advance or fade the state.
+    if (crtActive() && elapsedSeconds > 0.0 && phosProg != 0 && !phosFailed && texW > 0)
+        updatePhosphor(elapsedSeconds);
+    else if (crtActive() && !phosFailed && phosProg != 0 && texW > 0 && !phosTex[0])
+        updatePhosphor(0.0);   // first redraw before any advance: create state so it is never sampled unallocated
     draw();
 }

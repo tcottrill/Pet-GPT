@@ -42,17 +42,19 @@ void verify_model(int menu, int model) {
         check("PET 2001 fixed 8 KB", pet_get_ram() == 8);
         check("PET 2001 incompatible RAM disabled", !frame->GetMenuBar()->IsEnabled(Ram4) && !frame->GetMenuBar()->IsEnabled(Ram32));
     }
-    if (model == 8) {
-        check("8032 fixed 32 KB", pet_get_ram() == 32);
-        check("8032 incompatible RAM disabled", !frame->GetMenuBar()->IsEnabled(Ram4) && !frame->GetMenuBar()->IsEnabled(Ram8));
+    if (model == 8 || model == 96) {
+        check("8032-class model fixed 32 KB", pet_get_ram() == 32);
+        check("80-column model incompatible RAM disabled", !frame->GetMenuBar()->IsEnabled(Ram4) && !frame->GetMenuBar()->IsEnabled(Ram8));
     }
+    check("50 Hz video item enabled only on a CRTC model with the 50 Hz ROM",
+        frame->GetMenuBar()->IsEnabled(Video50) == pet_video50_available(model) && (model == 12 || model == 8 || model == 96 || !frame->GetMenuBar()->IsEnabled(Video50)));
 }
 } // namespace
 
 int main(int argc, char** argv) {
     wxString directory;
     if (!wxGetEnv("PETGPT_DATA_DIR", &directory) || !std::filesystem::is_regular_file(std::filesystem::u8path(std::string(directory.utf8_string())) / "pet.ini")) {
-        std::fprintf(stderr, "SKIP: PETGPT_DATA_DIR must name isolated data with writable pet.ini and all five ROM sets.\n");
+        std::fprintf(stderr, "SKIP: PETGPT_DATA_DIR must name isolated data with writable pet.ini and all five ROM sets (the CBM 8296 set is optional).\n");
         return 77;
     }
     std::vector<std::string> testArgs = {argv[0], "--smoke-test"};
@@ -97,11 +99,16 @@ int main(int argc, char** argv) {
         frame->GetEventHandler()->ProcessEvent(menuOpen);
         const wxString dash(static_cast<wchar_t>(0x2014));
         check("title contains Unicode em dash", frame->GetTitle() == "Commodore PET " + dash + " Pet-GPT " PETGPT_VERSION);
-        const int modelMenu[] = {Model1, Model2, Model4, Model12, Model8};
-        const int models[] = {1, 2, 4, 12, 8};
-        for (int i = 0; i < 5; ++i) {
+        const int modelMenu[] = {Model1, Model2, Model4, Model12, Model8, Model96};
+        const int models[] = {1, 2, 4, 12, 8, 96};
+        for (int i = 0; i < 6; ++i) {
             auto* item = frame->GetMenuBar()->FindItem(modelMenu[i]);
-            check("model label contains Unicode em dash", item && item->GetItemLabel().Contains(dash));
+            // The CBM 8296 set is optional: with no cbm8296 ROM folder its item is just greyed out.
+            if (models[i] == 96 && !pet_rom_set_available(96)) {
+                check("CBM 8296 greyed out without its ROMs", item && !frame->GetMenuBar()->IsEnabled(Model96));
+                continue;
+            }
+            if (models[i] != 96) check("model label contains Unicode em dash", item && item->GetItemLabel().Contains(dash));
             verify_model(modelMenu[i], models[i]);
         }
         check("all menu groups present", frame->GetMenuBar()->GetMenuCount() == 4);

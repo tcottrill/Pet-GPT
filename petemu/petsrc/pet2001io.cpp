@@ -36,8 +36,7 @@ void Pet2001IO::configureCrtc(bool present, int bytesPerCharacter)
 	m_hasCrtc = present;
 	m_crtcBytesPerCharacter = bytesPerCharacter == 2 ? 2 : 1;
 	m_crtc.reset();
-	m_video.setDiscreteRaster(!present);
-	refreshFrameTiming();
+	m_video.enableRaster();
 }
 
 void Pet2001IO::reset()
@@ -65,10 +64,12 @@ void Pet2001IO::reset()
 	// Initialize Video Logic
 	// Cycle 0 = Start of V-BLANK (Video OFF)
 	m_videoCycle = 0;
+	m_crtc.resetRaster();
+	m_crtcSync = false;
 
 	// Set initial signal state: Low (Blank)
 	// This will also prime the IRQ/PIA edge detectors
-	setVideoOnSignal(false);
+	setVideoOnSignal(m_hasCrtc);
 
 	// Force a clean IRQ drive after reset (even if false)
 	m_lastIrqLevel = false;
@@ -169,20 +170,11 @@ void Pet2001IO::updateIrq(bool force)
 // -----------------------------------------------------------------------------
 void Pet2001IO::setVideoOnSignal(bool active)
 {
-	// From "Theory of Operation":
-	// The VIDEO ON signal is:
-	//   LOW  during V-BLANK
-	//   HIGH during Active Video
-	//
-	// Connections:
-	//   1. PIA1 CB1: Trigger IRQ on High->Low transition (Start of V-Blank).
-	//   2. VIA PB5:  Reads '0' during V-Blank (Snow check).
+	// The discrete video board signals vertical blank. CRTC boards route
+	// active-low VSYNC to these pins instead.
 
 	// 1. Drive PIA1 CB1
 	m_pia1.setSyncCB1(active);
-
-	// 6545 status bit 5 = vertical blank (LOW video-on phase = VBLANK)
-	m_crtc.setVerticalRetrace(!active);
 
 	// 2. Drive VIA PB5 (bit 5) input
 	uint8_t pb_in = via_drb_in;
@@ -204,7 +196,7 @@ uint8_t Pet2001IO::read(uint16_t a)
 	const uint8_t addr = (uint8_t)(a & 0xFF);
 
 	switch (addr) {
-	// ---- 6545 CRTC ($E880/$E881, 8032) ----
+	// ---- 6545 CRTC ($E880/$E881) ----
 	case 0x80: return m_hasCrtc ? m_crtc.readStatus() : 0xFF;
 	case 0x81: return m_hasCrtc ? m_crtc.readData() : 0xFF;
 
@@ -464,7 +456,9 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 	case PIA2_CRA:
 	{
 		m_pia2.write(PIA2_CRA, d8);
-		const bool ndac = (d8 & 0x08) != 0;
+		// CA2 pulls the line low only in manual-low output mode (bits 5,4,3 = 110).
+		// As an input or in handshake/pulse mode the pin idles high.
+		const bool ndac = (d8 & 0x38) != 0x30;
 		m_ieee.NDACout(ndac);
 		return;
 	}
@@ -472,7 +466,9 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 	case PIA2_CRB:
 	{
 		m_pia2.write(PIA2_CRB, d8);
-		const bool dav = (d8 & 0x08) != 0;
+		// Same rule for CB2: software that zeroes CRB leaves DAV floating high,
+		// and the kernal waits for exactly that before it sends a command.
+		const bool dav = (d8 & 0x38) != 0x30;
 		m_ieee.DAVout(dav);
 		return;
 	}
@@ -551,13 +547,15 @@ void Pet2001IO::write(uint16_t a, uint8_t d8)
 	case VIA_IFR: m_via.writeReg(0x0D, d8); updateIrq(false); return;
 	case VIA_IER: m_via.writeReg(0x0E, d8); updateIrq(false); return;
 
-	case 0x80:  // 6545 CRTC address (8032)
+	case 0x80:  // 6545 CRTC address
 		if (!m_hasCrtc) return;
 		m_crtc.writeAddr(d8);
 		return;
 	case 0x81:  // 6545 CRTC data
 		if (!m_hasCrtc) return;
 		m_crtc.writeData(d8);
+		// R12 bit 5 (MA13) drives the top address line of a 4 KB character ROM (8296-D); the stored R12 keeps it.
+		m_video.setCharBank((m_crtc.reg(12) & 0x20) != 0);
 		// The renderer skips unchanged geometry itself. Reapply even when
 		// register values match, since the host may have switched ROM models.
 		m_video.setCrtcGeometry(m_crtc.cols() * m_crtcBytesPerCharacter, m_crtc.rows(),
@@ -604,18 +602,35 @@ void Pet2001IO::cycle()
 	// Recompute combined IRQ each cycle so CPU sees level IRQ correctly.
 	updateIrq(false);
 
-	// -------------------------------------------------------------------------
-	// Video Timing Logic (Theory of Operation)
-	// -------------------------------------------------------------------------
-	m_videoCycle++;
-	if (m_videoCycle >= m_frameCycles)
+	if (m_hasCrtc)
 	{
-		if (m_video.hasDiscreteRaster()) m_video.finishDiscreteFrame();
+		if (!m_crtc.programmed()) return;
+		// The 8032 video path accepts a screen-store one clock later than
+		// the 4032 (see the hardware comparisons in VICE ticket #1954).
+		const int column = m_crtc.horizontalClock() - (m_crtcBytesPerCharacter - 1);
+		if (m_crtc.displayEnabled() && column >= 0 && column < m_crtc.cols())
+		{
+			const int x = column * m_crtcBytesPerCharacter;
+			const int address = m_crtc.rowAddress() * m_crtcBytesPerCharacter + x;
+			for (int i = 0; i < m_crtcBytesPerCharacter; ++i)
+				m_video.fetchCharacter(m_crtc.scanline(), x + i, m_crtc.rasterAddress(),
+					static_cast<uint16_t>(address + i));
+		}
+		if (m_crtc.tick()) m_video.finishRasterFrame();
+		m_crtc.setVerticalRetrace(!m_crtc.displayEnabled());
+		const bool sync = m_crtc.verticalSync();
+		if (sync != m_crtcSync) {
+			m_crtcSync = sync;
+			setVideoOnSignal(!sync);
+		}
+		return;
+	}
+
+	m_videoCycle++;
+	if (m_videoCycle >= kCyclesPerFrame)
+	{
+		if (m_video.hasRaster()) m_video.finishRasterFrame();
 		m_videoCycle = 0;
-		// Timing source can change (8032 editor programs the CRTC; ROM-set
-		// switch flips 40<->80 columns). Re-evaluate at the frame boundary so
-		// a frame in flight never sees its geometry move under it.
-		refreshFrameTiming();
 	}
 
 	// Update Signals on transitions
@@ -626,52 +641,22 @@ void Pet2001IO::cycle()
 		// Falling edge on PIA1 CB1 triggers System Interrupt (IRQ).
 		setVideoOnSignal(false);
 	}
-	else if (m_videoCycle == m_vblankEnd)
+	else if (m_videoCycle == kVBlankEnd)
 	{
 		// End of V-BLANK. VIDEO ON goes HIGH.
 		setVideoOnSignal(true);
 	}
 
-	if (m_video.hasDiscreteRaster() && m_videoCycle >= kFirstDiscreteFetch)
+	if (m_video.hasRaster() && m_videoCycle >= kFirstDiscreteFetch)
 	{
 		const int beam = int(m_videoCycle - kFirstDiscreteFetch);
 		const int column = beam % kDiscreteLineCycles;
-		if (column < Pet2001Video::COLS)
-			m_video.fetchDiscreteCharacter(beam / kDiscreteLineCycles, column);
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Pet2001IO::refreshFrameTiming
-// 40-col machines use the fixed discrete-logic frame (16640/3840). In
-// either CRTC profile the CRTC generates sync, so derive the frame from its
-// register file: this makes the 60 Hz editor's real cadence (and a 50 Hz
-// editor ROM's 50 Hz) come out automatically. The sanity window guards
-// against a half-programmed register file mid-init.
-// -----------------------------------------------------------------------------
-void Pet2001IO::refreshFrameTiming()
-{
-	uint32_t frame = kCyclesPerFrame;
-	uint32_t vblank = kVBlankEnd;
-
-	if (m_hasCrtc)
-	{
-		const int fc = m_crtc.frameCycles();
-		const int vb = m_crtc.vblankCycles();
-		// Accept ~40..83 Hz worth of frame and a nonempty blank window.
-		if (fc >= 12000 && fc <= 25000 && vb > 0 && vb < fc)
-		{
-			frame = (uint32_t)fc;
-			vblank = (uint32_t)vb;
+		if (column < Pet2001Video::COLS) {
+			const int line = beam / kDiscreteLineCycles;
+			const int address = (line / Pet2001Video::CHAR_H) * Pet2001Video::COLS + column;
+			m_video.fetchCharacter(line, column, line % Pet2001Video::CHAR_H,
+				static_cast<uint16_t>(address));
 		}
-	}
-
-	if (frame != m_frameCycles || vblank != m_vblankEnd)
-	{
-		LOG_INFO("[PETIO] frame timing: %u cycles/frame (%.3f Hz), vblank %u cycles",
-			frame, 1000000.0 / frame, vblank);
-		m_frameCycles = frame;
-		m_vblankEnd = vblank;
 	}
 }
 
@@ -681,6 +666,68 @@ void Pet2001IO::refreshFrameTiming()
 void Pet2001IO::ieeeLoadData(uint16_t addr, const std::vector<uint8_t>& bytes)
 {
 	m_ieee.ieeeLoadData(addr, bytes);
+}
+
+// -----------------------------------------------------------------------------
+// Pet2001IO::saveState / loadState
+// -----------------------------------------------------------------------------
+void Pet2001IO::saveState(StateWriter& w) const
+{
+	w.beginChunk("PIA1"); m_pia1.saveState(w); w.endChunk();
+	w.beginChunk("PIA2"); m_pia2.saveState(w); w.endChunk();
+	w.beginChunk("VIA "); m_via.saveState(w); w.endChunk();
+	w.beginChunk("CRTC"); m_crtc.saveState(w); w.endChunk();
+
+	w.beginChunk("IO  ");
+	w.flag(m_hasCrtc);
+	w.u8(uint8_t(m_crtcBytesPerCharacter));
+	w.u32(m_videoCycle);
+	w.flag(m_crtcSync);
+	w.flag(m_lastIrqLevel);
+	w.u8(via_drb_in);
+	w.u8(via_dra_in);
+	m_snes.saveState(w);
+	w.endChunk();
+}
+
+bool Pet2001IO::loadState(const StateFile& file)
+{
+	StateReader pia1 = file.find("PIA1"), pia2 = file.find("PIA2"), via = file.find("VIA "), crtc = file.find("CRTC");
+	StateReader glue = file.find("IO  ");
+
+	// The glue is the one chunk this class range-checks itself.
+	const bool hasCrtc = glue.flag();
+	const int bytesPerCharacter = glue.u8();
+	const uint32_t videoCycle = glue.u32();
+	const bool crtcSync = glue.flag(), lastIrq = glue.flag();
+	const uint8_t drb = glue.u8(), dra = glue.u8();
+	SnesAdapter snes = m_snes;   // keeps the host's enabled/invert choices
+	if (!snes.loadState(glue) || glue.failed() || (bytesPerCharacter != 1 && bytesPerCharacter != 2) || videoCycle >= kCyclesPerFrame)
+		return false;
+	if (!m_pia1.loadState(pia1) || !m_pia2.loadState(pia2) || !m_via.loadState(via) || !m_crtc.loadState(crtc))
+		return false;
+
+	m_hasCrtc = hasCrtc;
+	m_crtcBytesPerCharacter = bytesPerCharacter;
+	m_videoCycle = videoCycle;
+	m_crtcSync = crtcSync;
+	m_lastIrqLevel = lastIrq;
+	via_drb_in = drb;
+	via_dra_in = dra;
+	m_snes = snes;
+
+	// The drive restarts as if switched off and on, so its view of the bus is
+	// stale. Put back the lines the PET drives, the same way the register writes
+	// do. DAV is left released: a byte half sent cannot be resumed.
+	m_ieee.reset();
+	m_ieee.NDACout((m_pia2.getPIA_CRA() & 0x38) != 0x30);
+	m_ieee.EOIout(m_pia1.getPIA_CA2_out());
+	const uint8_t ddrb = m_via.readReg(0x02);
+	const uint8_t orb = m_via.getPortBOutput();
+	if (ddrb & 0x02) m_ieee.NRFDout((orb & 0x02) != 0);
+	if (m_pia2.getPIA_CRB() & 0x04) m_ieee.DIOout(m_pia2.getPIA_PB_out());
+	if ((ddrb & 0x04) && !(orb & 0x04)) m_ieee.ATNout(false);
+	return true;
 }
 
 // -----------------------------------------------------------------------------

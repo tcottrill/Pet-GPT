@@ -18,7 +18,7 @@ bool is_user_content(const std::string& relative) {
     const fs::path p = fs::u8path(relative);
     if (p.empty()) return false;
     const std::string first = p.begin()->u8string();
-    return first == "files" || first == "roms" || first == "screenshots";
+    return first == "files" || first == "roms" || first == "screenshots" || first == "states";   // states: save states (.petstate)
 }
 
 fs::path route(const Layout& l, const std::string& relative) {
@@ -93,12 +93,13 @@ void write_user_readme(const fs::path& user, const fs::path& config) {
     std::ofstream out(readme);
     out << "Pet-GPT - your PET programs, ROMs and screenshots\n"
            "=================================================\n\n"
-           "files/        Programs and disk images (.prg .t64 .tap .d64 .d71).\n"
+           "files/        Programs and disk images (.prg .t64 .tap .d64 .d71 .d80 .d82).\n"
            "              This folder is the emulated drive 8: LOAD\"$\",8 lists it.\n"
            "roms/         The PET ROM sets, one folder per model:\n"
            "                pet2001  pet2001n  pet4000-9  pet4000-12  cbm8032\n"
            "              The README in the Pet-GPT distribution lists the file names.\n"
-           "screenshots/  F6 saves a PNG here.\n\n"
+           "screenshots/  F6 saves a PNG here.\n"
+           "states/       File > Save State writes .petstate files here.\n\n"
            "Settings (pet.ini) and the log are kept separately, in\n"
         << config.u8string() << ",\n"
            "so resetting them never touches anything here.\n";

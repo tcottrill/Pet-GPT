@@ -194,7 +194,7 @@ bool PetIEEE::cmd_block_u(const std::string& up)
 
 	if (sub == 'I' || sub == 'J' || sub == '9' || sub == ':') {
 		// Soft reset: report the DOS power-on message.
-		set_status(73, "CBM DOS V2.6 4040", 0, 0);
+		set_status(73, dos_power_on_text(), 0, 0);
 		return true;
 	}
 
@@ -278,11 +278,11 @@ bool PetIEEE::cmd_block_alloc_free(const std::string& up, bool alloc)
 	if (alloc) {
 		if (!d64_bam_is_free(cat, track, sector)) {
 			// In use: hint the next free block at or after the request, skipping
-			// the DOS/BAM tracks the allocator reserves (18, and 53 on a .d71).
+			// the DOS/BAM tracks the allocator reserves (18, and 53 on a .d71;
+			// 38 and 39 on a .d80/.d82).
 			int nt = 0, ns = 0;
 			for (int t2 = track; t2 <= d64_num_tracks() && nt == 0; ++t2) {
-				if (t2 == 18) continue;
-				if (d64_num_tracks() > 35 && t2 == D71_BAM2_TRACK) continue;
+				if (d64_reserved_track(t2)) continue;
 				for (int s2 = (t2 == track ? sector + 1 : 0); s2 < d64_sectors_per_track(t2); ++s2)
 					if (d64_bam_is_free(cat, t2, s2)) { nt = t2; ns = s2; break; }
 			}
@@ -531,7 +531,7 @@ void PetIEEE::reset() {
 	talk_addressed_ = false;
 	// A bus reset (IFC) restarts the drive's DOS, which reports its power-on
 	// message. This also keeps the error channel readable at all times.
-	set_status(73, "CBM DOS V2.6 4040", 0, 0);
+	set_status(73, dos_power_on_text(), 0, 0);
 	da_active_.fill(false);
 	da_ptr_.fill(0);
 
@@ -575,6 +575,7 @@ bool PetIEEE::setD64Image(const std::string& path) {
 		d64.clear();
 		d64_tracks_ = 35;
 		d64_image_tracks_ = 35;
+		d64_8x50_ = false;
 		return true;
 	}
 
@@ -593,10 +594,14 @@ bool PetIEEE::setD64Image(const std::string& path) {
 	//  - 349,696  = 70-track (1571/.d71), no error map
 	//  - 351,062  = 70-track, 1366 error bytes
 	//  - 196,608 / 197,376 = 40-track "extended" images (read-only here)
+	//  - 533,248  = 77-track (8050/.d80), no error map
+	//  - 1,066,496 = 154-track (8250/.d82), no error map
 	const bool is35 = (n == 174848 || n == 175531);
 	const bool is71 = (n == 349696 || n == 351062);
 	const bool is40 = (n == 196608 || n == 197376);
-	if (!is35 && !is71 && !is40) {
+	const bool is80 = (n == 533248);
+	const bool is82 = (n == 1066496);
+	if (!is35 && !is71 && !is40 && !is80 && !is82) {
 		LOG_ERROR("IEEE: %s is not a known disk image size (%zu bytes); mount rejected", path.c_str(), n);
 		return false;
 	}
@@ -604,10 +609,15 @@ bool PetIEEE::setD64Image(const std::string& path) {
 	clear_channels();
 	d64Path = path;
 	d64.swap(img);
-	d64_tracks_ = is71 ? 70 : 35;   // BAM math: 40-track images use the 35-track BAM
-	d64_image_tracks_ = is71 ? 70 : (is40 ? 40 : 35);
+	d64_8x50_ = is80 || is82;
+	d64_tracks_ = is82 ? 154 : is80 ? 77 : is71 ? 70 : 35;   // BAM math: 40-track images use the 35-track BAM
+	d64_image_tracks_ = d64_8x50_ ? d64_tracks_ : (is71 ? 70 : (is40 ? 40 : 35));
 
-	if (is71) {
+	if (d64_8x50_) {
+		LOG_INFO("[IEEE] %s (%zu bytes) mounted read/write (%s, %d tracks)",
+			is82 ? ".d82" : ".d80", n, is82 ? "8250 double-sided" : "8050", d64_tracks_);
+	}
+	else if (is71) {
 		LOG_INFO("[IEEE] .d71 (%zu bytes) mounted read/write (1571 double-sided, 70 tracks)", n);
 	}
 	else if (is40) {

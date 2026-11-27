@@ -232,7 +232,7 @@ bool PetIEEE::loadHostPRG_D64(const std::string& petName,
 	const std::string wantU = to_upper_ascii(petName);
 
 	uint8_t sec[256];
-	int t = 18, s = 1;
+	int t = d64_dir_track(), s = 1;   // 18/1, or 39/1 on a .d80/.d82
 	int startT = 0, startS = 0;
 	bool found = false;
 

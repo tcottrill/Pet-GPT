@@ -63,6 +63,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include "deftypes.h"  // MemoryReadByte / MemoryWriteByte (MAME-style handler structs)
@@ -120,6 +121,9 @@ public:
 	int exec6502(int timerTicks);
 	int step6502();
 	int get6502ticks(int reset);
+	// Final data-read clock for an ordinary absolute I/O read. Zero outside
+	// the instruction's data phase or for a different kind of instruction.
+	int absoluteDataReadCycle() const;
 
 	// 2. Add a callback setter for the 6510 Port
 	// The emulator calls this to set a function that triggers when the port changes.
@@ -151,6 +155,55 @@ public:
 	void m6502clearpendingint();
 	void check_interrupts_after_cli();
 	bool is_irq_pending() const { return _irqPending != 0; }
+
+	// -------------------------------------------------------------------------
+	// Portable CPU state blob (save states; needs only the C++ standard library)
+	//
+	// Saved ONLY at an instruction boundary (between step6502() calls). Memory
+	// is not part of the blob; the machine owns it. All multi-byte values are
+	// little-endian, written byte by byte, no padding.
+	//
+	//  offset size  field
+	//  ------ ----  -----------------------------------------------------------
+	//   0      4    magic, the ASCII characters "6502"
+	//   4      1    format version (1)
+	//   5      1    CPU variant: 0 NMOS 6502, 1 65C02, 2 NES 2A03, 3 6510
+	//                (others reserved; the reader ignores it)
+	//   6      2    length of everything after this field (REST)
+	//  REST begins at offset 8:
+	//   8      2    PC
+	//  10      1    A
+	//  11      1    X
+	//  12      1    Y
+	//  13      1    SP (low byte of the stack address, stack is $0100+SP)
+	//  14      1    P as the processor pushes it: unused bit ($20) set
+	//  15      1    interrupt lines: bit 0 IRQ line asserted, bit 1 NMI pending
+	//                (edge latched, not yet taken); other bits zero
+	//  16      8    total cycle counter (0 if the core keeps none)
+	//        -- end of the PORTABLE section (16 bytes) --
+	//  24      2    length N of the CORE-PRIVATE section (optional; a foreign
+	//                emulator may stop after the portable section, or write 0)
+	//  26      N    core-private bytes. This core writes N = 8:
+	//                  PPC (2), IRQ mode (1: 0 pulse, 1 hold),
+	//                  IRQ-inhibit-after-CLI counter (1), JAM flag (1),
+	//                  JAM-logged flag (1), 6510 port data (1), 6510 port direction (1)
+	//
+	// A reader must reject a wrong magic, a version it does not know, and a blob
+	// shorter than its own length fields claim; bytes beyond the stated length
+	// are ignored. When the private section is absent or not 8 bytes long this
+	// core still loads the portable part and uses instruction-boundary defaults
+	// (PPC = PC, hold-mode IRQ, no inhibit, not jammed, 6510 port zero).
+	// This core never has an NMI pending (nmi6502() runs the interrupt at once),
+	// so it writes bit 1 as 0 and ignores it on load.
+	//
+	// The cycle counter wraps at 0x10000000 inside this core and is reduced
+	// modulo that on load.
+	// -------------------------------------------------------------------------
+	static constexpr size_t kStateMaxSize = 34;
+	// Bytes written, or 0 when capacity is below kStateMaxSize.
+	size_t save_state(uint8_t* out, size_t capacity) const;
+	// False, with the CPU untouched, if the blob is not valid.
+	bool load_state(const uint8_t* in, size_t size);
 
 	// -------------------------------------------------------------------------
 	// Debugging and disassembly
@@ -210,6 +263,7 @@ private:
 	bool mmem = false;
 	bool log_debug_rw = false;
 	bool use_handler_for_opfetch = false;
+	bool executingOperation_ = false;
 	bool kil_logged = false;   // one-shot log when a KIL/JAM opcode halts the CPU
 	bool jammed = false;       // only reset/init releases an NMOS JAM
 

@@ -31,4 +31,14 @@
     <glob pattern="*.d71"/>
     <glob pattern="*.D71"/>
   </mime-type>
+  <mime-type type="application/x-commodore-d80">
+    <comment>Commodore 8050 disk image</comment>
+    <glob pattern="*.d80"/>
+    <glob pattern="*.D80"/>
+  </mime-type>
+  <mime-type type="application/x-commodore-d82">
+    <comment>Commodore 8250 disk image</comment>
+    <glob pattern="*.d82"/>
+    <glob pattern="*.D82"/>
+  </mime-type>
 </mime-info>

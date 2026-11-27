@@ -182,7 +182,7 @@ bool PetIEEE::openD64SEQ_for_read(const std::string& rawName, uint8_t sa, uint8_
 	const std::string wantU = petName;
 
 	uint8_t sec[256];
-	int t = 18, s = 1;
+	int t = d64_dir_track(), s = 1;   // 18/1, or 39/1 on a .d80/.d82
 	int startT = 0, startS = 0;
 	bool found = false;
 

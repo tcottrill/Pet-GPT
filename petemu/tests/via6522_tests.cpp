@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <vector>
 #include "via6522.h"
 #include "pia6520.h"
 #include "sys_log.h"
@@ -493,7 +494,86 @@ static void test_pia_strobe_idle(){
     CHECK(p.getPIA_CA2_out());
 }
 
+// ---------------------------------------------------------------------------
+// Save states: a saved-and-loaded VIA/PIA must behave exactly like the original.
+// ---------------------------------------------------------------------------
+static void sameVia(VIA6522& a, VIA6522& b){
+    // Only registers whose read has no side effect.
+    CHECK_EQ(a.getIFR(), b.getIFR());   CHECK_EQ(a.getIER(), b.getIER());
+    CHECK_EQ(a.getIRQ(), b.getIRQ());   CHECK_EQ(a.irqLine(), b.irqLine());
+    CHECK_EQ(a.readReg(R_T1CH), b.readReg(R_T1CH));
+    CHECK_EQ(a.readReg(R_T2CH), b.readReg(R_T2CH));
+    CHECK_EQ(a.readReg(R_T1LL), b.readReg(R_T1LL));
+    CHECK_EQ(a.getCB2Output(), b.getCB2Output());
+    CHECK_EQ(a.getCA2Output(), b.getCA2Output());
+    CHECK_EQ(a.cb2_get_tick_counter(), b.cb2_get_tick_counter());
+}
+
+static void test_via_state_roundtrip(){
+    VIA6522 a;
+    a.writeReg(R_ACR, 0x50);                 // T1 free-run + SR shift-out under T2 (free-run)
+    a.writeReg(R_T1CL, 30); a.writeReg(R_T1CH, 0);
+    a.writeReg(R_T2CL, 3);
+    a.writeReg(R_IER, 0xC4);                 // T1 and SR interrupts enabled
+    a.writeReg(R_SR, 0x55);
+    tickN(a, 47);                            // T1 has timed out; the shift register is mid byte
+    CHECK(a.getIFR() & 0x40);
+    CHECK(a.irqLine());
+
+    std::vector<uint8_t> blob; StateWriter w(blob); a.saveState(w);
+    VIA6522 b;
+    StateReader r(blob.data(), blob.size());
+    CHECK(b.loadState(r)); CHECK(r.atEnd());
+    sameVia(a, b);
+    for (int i = 0; i < 3000; ++i) {
+        a.tick(); b.tick();
+        if (i % 7 == 0) sameVia(a, b);
+        if (i == 1000) { a.writeReg(R_IFR, 0x40); b.writeReg(R_IFR, 0x40); }
+    }
+    sameVia(a, b);
+    a.cb2_reset_edge_log(); b.cb2_reset_edge_log();
+    tickN(a, 500); tickN(b, 500);
+    CHECK_EQ(a.cb2_get_edge_count(), b.cb2_get_edge_count());
+    CHECK(a.cb2_get_edge_count() > 0);
+    for (uint32_t i = 0; i < a.cb2_get_edge_count() && i < b.cb2_get_edge_count(); ++i)
+        CHECK(a.cb2_get_edges()[i].cycle == b.cb2_get_edges()[i].cycle && a.cb2_get_edges()[i].level == b.cb2_get_edges()[i].level);
+
+    VIA6522 c;                               // a cut-short payload is refused and changes nothing
+    StateReader cut(blob.data(), blob.size() - 1);
+    CHECK(!c.loadState(cut));
+    CHECK_EQ(c.getIER(), 0);
+}
+
+static void test_pia_state_roundtrip(){
+    PIA6520 a;
+    a.writePIA_CRA(0x07);                    // CA1 rising edge, IRQ enabled, data register
+    a.writePIA_CRB(0x24);                    // CB1 falling edge, CB2 strobe output
+    a.writePIA_PA(0xF0); a.setPIA_PB_in(0x3C);
+    a.setCA1(true);                          // edge latched in IRQA
+    a.setCB1(true);
+    CHECK(a.getIRQ());
+    std::vector<uint8_t> blob; StateWriter w(blob); a.saveState(w);
+    PIA6520 b;
+    StateReader r(blob.data(), blob.size());
+    CHECK(b.loadState(r)); CHECK(r.atEnd());
+    CHECK_EQ(b.getIRQ(), a.getIRQ());
+    for (int i = 0; i < 40; ++i) {
+        CHECK_EQ(a.readPIA_CRA(), b.readPIA_CRA());
+        CHECK_EQ(a.readPIA_CRB(), b.readPIA_CRB());
+        CHECK_EQ(a.getIRQ(), b.getIRQ());
+        CHECK_EQ(a.getPIA_CB2_out(), b.getPIA_CB2_out());
+        a.setCB1(i & 1); b.setCB1(i & 1); a.tick(); b.tick();
+        if (i == 5) { CHECK_EQ(a.readPIA_PA(), b.readPIA_PA()); }   // clears the A-side flag in both
+        if (i == 9) { a.writePIA_PB(0x11); b.writePIA_PB(0x11); }
+        CHECK_EQ(a.getPIA_PB_out(), b.getPIA_PB_out());
+    }
+    PIA6520 c; StateReader cut(blob.data(), blob.size() - 1);
+    CHECK(!c.loadState(cut)); CHECK(!c.getIRQ());
+}
+
 int main(){
+    test_via_state_roundtrip();
+    test_pia_state_roundtrip();
     test_phi2_sr_restarts();
     test_t2_sr_completion_is_once_per_byte();
     test_external_sr_clocks();

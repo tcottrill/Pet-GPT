@@ -398,3 +398,32 @@ bool PIA6520::getIRQ() const
 {
 	return getIRQA() || getIRQB();
 }
+
+// -----------------------------------------------------------------------------
+// Save states
+// -----------------------------------------------------------------------------
+void PIA6520::saveState(StateWriter& w) const
+{
+	w.u8(pa_in); w.u8(pa_out); w.u8(ddra); w.u8(cra);
+	w.u8(pb_in); w.u8(pb_out); w.u8(ddrb); w.u8(crb);
+	w.u8(cb1);
+	w.flag(ca1_in); w.flag(cb1_in); w.flag(old_ca1); w.flag(old_cb1);
+	w.flag(ca2_in); w.flag(cb2_in); w.flag(old_ca2); w.flag(old_cb2);
+	w.flag(ca2_out); w.flag(cb2_out);
+	w.flag(irq_a1); w.flag(irq_a2); w.flag(irq_b1); w.flag(irq_b2);
+}
+
+bool PIA6520::loadState(StateReader& r)
+{
+	PIA6520 t = *this;   // all or nothing: a short payload leaves this PIA as it was
+	t.pa_in = r.u8(); t.pa_out = r.u8(); t.ddra = r.u8(); t.cra = r.u8();
+	t.pb_in = r.u8(); t.pb_out = r.u8(); t.ddrb = r.u8(); t.crb = r.u8();
+	t.cb1 = r.u8();
+	t.ca1_in = r.flag(); t.cb1_in = r.flag(); t.old_ca1 = r.flag(); t.old_cb1 = r.flag();
+	t.ca2_in = r.flag(); t.cb2_in = r.flag(); t.old_ca2 = r.flag(); t.old_cb2 = r.flag();
+	t.ca2_out = r.flag(); t.cb2_out = r.flag();
+	t.irq_a1 = r.flag(); t.irq_a2 = r.flag(); t.irq_b1 = r.flag(); t.irq_b2 = r.flag();
+	if (r.failed()) return false;
+	*this = t;
+	return true;
+}

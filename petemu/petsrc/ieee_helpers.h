@@ -21,7 +21,9 @@ namespace ieee_helpers {
         std::set<std::pair<int, int>> seen_;
     public:
         bool visit(int track, int sector) {
-            return track >= 1 && track <= 70 && sector >= 0 && sector < 21 &&
+            // Widest geometry: 154 tracks of up to 29 sectors (.d82). Chain links are
+            // still checked against the mounted image's real geometry on every read.
+            return track >= 1 && track <= 154 && sector >= 0 && sector < 29 &&
                 seen_.emplace(track, sector).second;
         }
     };
@@ -41,7 +43,9 @@ namespace ieee_helpers {
     };
 
     inline bool writable_disk_size(size_t n) {
-        return n == 174848 || n == 175531 || n == 349696 || n == 351062;
+        // 533248 = .d80 (8050), 1066496 = .d82 (8250), both without an error map.
+        return n == 174848 || n == 175531 || n == 349696 || n == 351062 ||
+               n == 533248 || n == 1066496;
     }
 
     // The virtual drive is flat. Reject path syntax (including Windows ADS),
@@ -308,6 +312,24 @@ namespace ieee_helpers {
         const int m = bitIndex & 7;
         if (val) bits[b] |= (uint8_t)(1u << m);
         else     bits[b] &= (uint8_t)~(1u << m);
+    }
+
+    // The 8050/8250 BAM keeps 4 bitmap bytes per track (up to 29 sectors); the
+    // 1541/1571 only use the first 3, so these give the same answers for them.
+    inline bool test_bit_32(const uint8_t bits[4], int bitIndex /*0..31*/)
+    {
+        return (bits[bitIndex >> 3] >> (bitIndex & 7)) & 1;
+    }
+    inline int count_bits_32(const uint8_t bits[4])
+    {
+        int n = 0;
+        for (int i = 0; i < 32; ++i) n += test_bit_32(bits, i) ? 1 : 0;
+        return n;
+    }
+    inline void set_bit_32(uint8_t bits[4], int bitIndex, bool val)
+    {
+        if (val) bits[bitIndex >> 3] |= (uint8_t)(1u << (bitIndex & 7));
+        else     bits[bitIndex >> 3] &= (uint8_t)~(1u << (bitIndex & 7));
     }
 
     // Remove quotes, drive prefix, and mode tokens (",S,R", ",S,W", etc.).

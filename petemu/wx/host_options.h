@@ -12,7 +12,8 @@
 struct HostOptions {
     std::string rom, monitorId, disk;
     int fullscreen = -1, scale = -1, monitor = -1;
-    int model = 0;   // 0 = not given; else 1, 2, 4, 8 or 12 (pet_set_basic ids). Last flag wins.
+    int model = 0;   // 0 = not given; else 1, 2, 4, 8, 12 or 96 (pet_set_basic ids). Last flag wins.
+    int video50 = -1; // CRTC models only: -1 = not given, 0 = 60 Hz editor ROM, 1 = 50 Hz editor ROM. Last flag wins.
     bool monitorIdSet = false, help = false;
 };
 inline std::string host_lower(std::string text) {
@@ -54,6 +55,10 @@ inline HostOptions parse_host_options(const std::vector<std::string>& args) {
         else if (option == "-basic4") result.model = 4;
         else if (option == "-4032") result.model = 12;
         else if (option == "-8032") result.model = 8;
+        else if (option == "-8296") result.model = 96;
+        else if (option == "-8296d") { result.model = 96; result.video50 = 1; }   // European 8296-D = 50 Hz
+        else if (option == "-50hz") result.video50 = 1;
+        else if (option == "-60hz") result.video50 = 0;
         else if (args[i][0] != '-' && result.rom.empty()) result.rom = args[i];
     }
     return result;
