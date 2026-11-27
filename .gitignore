@@ -47,3 +47,7 @@ screenshots/
 
 # Local design notes and plans (not published)
 docs/superpowers/
+
+# Test sources (kept local, not published)
+petemu/tests/
+petemu/sys_audio/tests/
