@@ -40,17 +40,18 @@ public:
     // Knob index order matches k_knobs in pet_gl.cpp:
     // 0 blur_h, 1 blur_v, 2 halation, 3 halation_radius, 4 scanline,
     // 5 contrast, 6 brightness, 7 persistence (0..1), 8 persist_ms (decay time),
-    // 9 persist_tail (slow share, 0..1), 10 persist_tail_ms (slow decay time).
-    static constexpr int kKnobCount = 11;
+    // 9 persist_tail (slow share, 0..1), 10 persist_tail_ms (slow decay time),
+    // 11 bloom (amount, 0 = off), 12 bloom_spread, 13 bloom_tail, 14 bloom_core.
+    static constexpr int kKnobCount = 15;
     // Value access for the settings dialog: set clamps + saves to pet.ini.
     float getKnob(int idx) const;
     void  setKnob(int idx, float v);
     void  knobRange(int idx, float* lo, float* hi, float* step) const;
     // Reset all knobs to the built-in defaults and save them to pet.ini.
-    // Persistence (7-10) resets to the current machine's defaults only.
+    // Persistence and bloom (7-14) reset to the current machine's defaults only.
     void restoreKnobDefaults();
-    // Persistence knobs 7-10 are stored per machine (<name>_m<id>); load that machine's
-    // values. Cheap; call after every ROM-set change.
+    // Persistence and bloom knobs 7-14 are stored per machine (<name>_m<id>); load that
+    // machine's values. Cheap; call after every ROM-set change.
     void setPhosphorModel(int modelId);
 
 
@@ -62,6 +63,10 @@ private:
     bool ensurePhosphor(int w, int h);          // (re)create + clear the state textures
     void updatePhosphor(double elapsedSeconds); // one decay/excite step into the other state texture
     void destroyPhosphor();
+    bool bloomWanted() const;                   // amount > 0, CRT path, not failed
+    bool ensureBloom(int w, int h);             // (re)create the pyramid textures
+    void updateBloom();                         // rebuild the pyramid from the emitted picture
+    void destroyBloom();
     void clampKnobs();
     float* knobPtr(int idx);
 
@@ -97,6 +102,8 @@ private:
     int uCrtPhosLoc     = -1;       // slow-phosphor state sampler (unit 1)
     int uCrtPersistLoc  = -1;       // persistence amount, 0 = shader never samples uPhos
     int uCrtTailLoc     = -1;       // share of the glow from the slow tail component
+    int uCrtBloomLoc    = -1;       // bloom pyramid result (unit 2)
+    int uCrtBloomAmtLoc = -1;       // bloom amount, 0 = shader never samples uBloom
 
     // ---- Phosphor persistence: per-source-pixel state (R fast, G slow), ping-pong RG16F ----
     unsigned phosProg = 0;          // update pass: max(lit, prev * decay) per component
@@ -106,6 +113,21 @@ private:
     int phosCur = 0;                // index of the current (latest) state texture
     int phosW = 0, phosH = 0;
     bool phosFailed = false;        // creation/FBO failed: permanent fallback, no retries
+
+    // ---- Bloom: dual-filter pyramid (4 levels, R16F) of the emitted picture ----
+    // Level 0 is half the source size, each next level half again. bloomDown[]
+    // holds the prefilter (level 0) and the down chain; bloomUp[k] is the up
+    // chain's output at level k (k = 0 is the final bloom picture).
+    unsigned bloomPreProg = 0, bloomDownProg = 0, bloomUpProg = 0;
+    int uBloomPreSrcLoc = -1, uBloomPrePhosLoc = -1, uBloomPrePersistLoc = -1, uBloomPreTailLoc = -1;
+    int uBloomDownSrcLoc = -1, uBloomDownHalfLoc = -1;
+    int uBloomUpSrcLoc = -1, uBloomUpAddLoc = -1, uBloomUpHalfLoc = -1, uBloomUpWeightLoc = -1;
+    unsigned bloomDown[4] = {0, 0, 0, 0};
+    unsigned bloomUp[3] = {0, 0, 0};
+    unsigned bloomFbo = 0;
+    int bloomLW[4] = {0, 0, 0, 0}, bloomLH[4] = {0, 0, 0, 0};
+    int bloomSrcW = 0, bloomSrcH = 0;
+    bool bloomFailed = false;       // creation/FBO/shader failed: behave as with bloom off
 
     bool  m_crt        = false;            // master CRT toggle
     bool  m_tintOn      = true;             // apply phosphor tint (CRT and plain pass)
@@ -126,6 +148,10 @@ private:
     float m_persistMs = 1500.0f; // 25..5000 phosphor decay time constant, ms
     float m_persistTail   = 0.0f;    // 0..1 share of the glow from the slow tail (0 = off)
     float m_persistTailMs = 4000.0f; // 100..20000 tail decay time constant, ms
+    float m_bloom       = 0.15f;  // 0..2   bloom amount (0 = off, nothing allocated)
+    float m_bloomSpread = 1.0f;   // 0.5..4 tap radius scale in every pyramid level
+    float m_bloomTail   = 0.6f;   // 0..1.5 down-level re-injection weight on the way up
+    float m_bloomCore   = 0.0f;   // 0..2   prefiltered-picture weight in the final up pass
 
     int  m_phosModel = 8;       // machine whose persistence settings are active
     int  m_tuneSel = 0;        // selected knob for live tuning

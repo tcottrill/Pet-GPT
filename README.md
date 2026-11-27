@@ -482,6 +482,12 @@ machine, because the tubes differ: the CBM 8296's glows for seconds, the others 
 are saved in `[video]` as `mono_persistence_m<id>` and so on (id 1, 2, 4, 8, 12 or 96, as in
 `[machine] basic`); the other CRT settings are shared by all machines.
 
+**Bloom** is the tube's wide glow around bright areas: the emitted picture (live pixels plus
+afterglow) is blurred through a four-level dual-filter pyramid and added to the CRT pass. It has
+four settings (`mono_bloom` amount, `mono_bloom_spread`, `mono_bloom_tail`, `mono_bloom_core`;
+amount 0 turns it off and allocates nothing) and, like persistence, is stored per machine
+(`mono_bloom_m<id>` and so on). It needs the CRT shader.
+
 ---
 
 ## 🗂️ Project layout

@@ -71,8 +71,9 @@ bool native_wayland() {
 }
 const char* knobNames[] = {"mono_blur_h", "mono_blur_v", "mono_halation", "mono_halation_radius",
                           "mono_scanline", "mono_contrast", "mono_brightness", "mono_persistence", "mono_persist_ms",
-                          "mono_persist_tail", "mono_persist_tail_ms"};
-const int kKnobTotal = 11;  // must match PetGL::kKnobCount
+                          "mono_persist_tail", "mono_persist_tail_ms", "mono_bloom", "mono_bloom_spread",
+                          "mono_bloom_tail", "mono_bloom_core"};
+const int kKnobTotal = 15;  // must match PetGL::kKnobCount
 class ProgramDropTarget final : public wxFileDropTarget {
 public:
     explicit ProgramDropTarget(std::function<void(const wxString&, size_t)> load) : load_(std::move(load)) {}

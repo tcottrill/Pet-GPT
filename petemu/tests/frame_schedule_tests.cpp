@@ -86,6 +86,12 @@ int main() {
         tube = phosphor_defaults(id);
         require(tube.persistence == 0.15f && tube.decayMs == 100.0f && tube.tail == 0.0f && tube.tailMs == 4000.0f, "8032, 4000 12-inch and unknown ids use the 8032 row");
     }
+    for (int id : {1, 2, 4, 8, 12, 96, 99}) {
+        tube = phosphor_defaults(id);
+        require(tube.bloomSpread == 1.0f && tube.bloomTail == 0.6f && tube.bloomCore == 0.0f, "bloom spread, tail and core are the same on every machine");
+        require(tube.bloom == (id == 96 ? 0.35f : 0.15f), "bloom amount: 8296 stronger, all others 0.15");
+    }
+    require(phosphor_key("mono_bloom", 96) == "mono_bloom_m96", "bloom key gets the model suffix");
     require(phosphor_key("mono_persistence", 96) == "mono_persistence_m96", "persistence key gets the model suffix");
     require(phosphor_key("mono_persist_tail_ms", 8) == "mono_persist_tail_ms_m8", "suffix is _m<id> after the full knob name");
     std::puts("frame schedule tests passed");

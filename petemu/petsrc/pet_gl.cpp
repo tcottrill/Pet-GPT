@@ -66,6 +66,8 @@ uniform vec3  uTint;
 uniform sampler2D uPhos;   // phosphor state (R = fast, G = slow tail; same UVs as uTex), unit 1
 uniform float uPersist;    // 0 = persistence off; uPhos is then never sampled
 uniform float uTail;       // share of the glow that belongs to the slow component, 0..1
+uniform sampler2D uBloom;  // blurred emitted picture (R; same UVs as uTex), unit 2
+uniform float uBloomAmt;   // 0 = bloom off; uBloom is then never sampled
 
 void main(){
     vec2 px = 1.0 / uSrcSize;
@@ -120,6 +122,11 @@ void main(){
         col = 1.0 - (1.0 - col) * (1.0 - glow * uHalation);
     }
 
+    // 2b) Bloom: wide haze from the dual-filter pyramid (live picture + afterglow),
+    //     added before ripple/lift/tint so it takes the phosphor colour.
+    if (uBloomAmt > 0.0)
+        col = min(col + vec3(texture(uBloom, vUV).r * uBloomAmt), vec3(1.0));
+
     // 3) Optional soft beam ripple. The PET framebuffer doubles each raster
     //    line (400 rows = 200 lines), so beam centers sit at fbY = 2k+1.
     if (uScanline > 0.0) {
@@ -154,6 +161,80 @@ void main(){
     float lit = max(s.r, max(s.g, s.b));
     vec2 prev = texelFetch(uPrev, p, 0).rg;   // R = fast, G = slow tail
     fragColor = vec4(max(vec2(lit), prev * uDecay), 0.0, 1.0);
+}
+)";
+
+// ---- Bloom pyramid (dual filter, after Bjorge/ARM as used in AAE). Single channel.
+//      Own vertex shader WITHOUT the V flip: every pyramid texel (x,y) then lies
+//      at the same orientation as source texel (x,y), so the CRT pass can sample
+//      the result with the same vUV it uses for the source.
+static const char* BLOOM_VS_SRC = R"(
+#version 330 core
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec2 aUV;
+out vec2 vUV;
+void main() {
+    vUV = aUV;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+})";
+
+// Prefilter: the brightness the tube is emitting, same mix as the CRT pass.
+// textureLod(.., 0) because the source and state min filters are mipmapped and
+// the 2:1 bilinear read of level 0 is the exact box filter.
+static const char* BLOOM_PRE_FS_SRC = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uSrc;    // unit 0
+uniform sampler2D uPhos;   // unit 1, only read when uPersist > 0
+uniform float uPersist;
+uniform float uTail;
+void main(){
+    vec3 s = textureLod(uSrc, vUV, 0.0).rgb;
+    float e = max(s.r, max(s.g, s.b));
+    if (uPersist > 0.0) {
+        vec2 p = textureLod(uPhos, vUV, 0.0).rg;
+        e = mix(e, mix(p.r, p.g, uTail), uPersist);
+    }
+    fragColor = vec4(e, 0.0, 0.0, 1.0);
+}
+)";
+
+static const char* BLOOM_DOWN_FS_SRC = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+uniform vec2 uHalfPixel;   // 0.5/dstSize * spread: diagonal taps land between source texels
+void main(){
+    float sum = texture(uSrc, vUV).r * 4.0;
+    sum += texture(uSrc, vUV + uHalfPixel).r;
+    sum += texture(uSrc, vUV - uHalfPixel).r;
+    sum += texture(uSrc, vUV + vec2(uHalfPixel.x, -uHalfPixel.y)).r;
+    sum += texture(uSrc, vUV - vec2(uHalfPixel.x, -uHalfPixel.y)).r;
+    fragColor = vec4(sum * (1.0 / 8.0), 0.0, 0.0, 1.0);
+}
+)";
+
+static const char* BLOOM_UP_FS_SRC = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uSrc;    // the lower (smaller) level, unit 0
+uniform sampler2D uAdd;    // same-size down level re-injected, unit 1
+uniform vec2  uHalfPixel;  // 0.5/srcSize * spread
+uniform float uAddWeight;
+void main(){
+    float sum = texture(uSrc, vUV + vec2(-uHalfPixel.x * 2.0, 0.0)).r;
+    sum += texture(uSrc, vUV + vec2(-uHalfPixel.x,  uHalfPixel.y)).r * 2.0;
+    sum += texture(uSrc, vUV + vec2(0.0,  uHalfPixel.y * 2.0)).r;
+    sum += texture(uSrc, vUV + vec2( uHalfPixel.x,  uHalfPixel.y)).r * 2.0;
+    sum += texture(uSrc, vUV + vec2( uHalfPixel.x * 2.0, 0.0)).r;
+    sum += texture(uSrc, vUV + vec2( uHalfPixel.x, -uHalfPixel.y)).r * 2.0;
+    sum += texture(uSrc, vUV + vec2(0.0, -uHalfPixel.y * 2.0)).r;
+    sum += texture(uSrc, vUV + vec2(-uHalfPixel.x, -uHalfPixel.y)).r * 2.0;
+    float v = sum * (1.0 / 12.0) + texture(uAdd, vUV).r * uAddWeight;
+    fragColor = vec4(v, 0.0, 0.0, 1.0);
 }
 )";
 
@@ -266,6 +347,8 @@ bool PetGL::init(int winW, int winH, const char* title,
         const PhosphorDefaults d = phosphor_defaults(m_phosModel);
         m_persist = d.persistence; m_persistMs = d.decayMs;
         m_persistTail = d.tail;    m_persistTailMs = d.tailMs;
+        m_bloom = d.bloom;         m_bloomSpread = d.bloomSpread;
+        m_bloomTail = d.bloomTail; m_bloomCore = d.bloomCore;
     }
     clampKnobs();
 
@@ -296,6 +379,46 @@ bool PetGL::init(int winW, int winH, const char* title,
             glUniform1i(uCrtTexLoc, 0);
             glUniform1i(uCrtPhosLoc, 1);
             glUniform1f(uCrtPersistLoc, 0.0f);
+            uCrtBloomLoc    = glGetUniformLocation(crtProg, "uBloom");
+            uCrtBloomAmtLoc = glGetUniformLocation(crtProg, "uBloomAmt");
+            glUniform1i(uCrtBloomLoc, 2);
+            glUniform1f(uCrtBloomAmtLoc, 0.0f);
+
+            // Bloom programs; any failure only disables bloom.
+            {
+                GLuint bvs  = compile(GL_VERTEX_SHADER, BLOOM_VS_SRC);
+                GLuint bpf  = compile(GL_FRAGMENT_SHADER, BLOOM_PRE_FS_SRC);
+                GLuint bdf  = compile(GL_FRAGMENT_SHADER, BLOOM_DOWN_FS_SRC);
+                GLuint buf  = compile(GL_FRAGMENT_SHADER, BLOOM_UP_FS_SRC);
+                bloomPreProg  = (bvs && bpf) ? link(bvs, bpf) : 0;
+                bloomDownProg = (bvs && bdf) ? link(bvs, bdf) : 0;
+                bloomUpProg   = (bvs && buf) ? link(bvs, buf) : 0;
+                glDeleteShader(bvs); glDeleteShader(bpf); glDeleteShader(bdf); glDeleteShader(buf);
+                if (bloomPreProg && bloomDownProg && bloomUpProg) {
+                    glUseProgram(bloomPreProg);
+                    uBloomPreSrcLoc     = glGetUniformLocation(bloomPreProg, "uSrc");
+                    uBloomPrePhosLoc    = glGetUniformLocation(bloomPreProg, "uPhos");
+                    uBloomPrePersistLoc = glGetUniformLocation(bloomPreProg, "uPersist");
+                    uBloomPreTailLoc    = glGetUniformLocation(bloomPreProg, "uTail");
+                    glUniform1i(uBloomPreSrcLoc, 0);
+                    glUniform1i(uBloomPrePhosLoc, 1);
+                    glUseProgram(bloomDownProg);
+                    uBloomDownSrcLoc  = glGetUniformLocation(bloomDownProg, "uSrc");
+                    uBloomDownHalfLoc = glGetUniformLocation(bloomDownProg, "uHalfPixel");
+                    glUniform1i(uBloomDownSrcLoc, 0);
+                    glUseProgram(bloomUpProg);
+                    uBloomUpSrcLoc    = glGetUniformLocation(bloomUpProg, "uSrc");
+                    uBloomUpAddLoc    = glGetUniformLocation(bloomUpProg, "uAdd");
+                    uBloomUpHalfLoc   = glGetUniformLocation(bloomUpProg, "uHalfPixel");
+                    uBloomUpWeightLoc = glGetUniformLocation(bloomUpProg, "uAddWeight");
+                    glUniform1i(uBloomUpSrcLoc, 0);
+                    glUniform1i(uBloomUpAddLoc, 1);
+                }
+                else {
+                    LOG_ERROR("[GL] bloom shaders unavailable; bloom disabled");
+                    bloomFailed = true;
+                }
+            }
 
             // Persistence update program; failure only disables persistence.
             GLuint pvs = compile(GL_VERTEX_SHADER, VS_SRC);
@@ -349,6 +472,11 @@ static const struct { const char* name; float step, lo, hi, def; } k_knobs[] = {
     { "mono_persist_ms",      25.0f, 25.0f, 5000.0f, 1500.0f },  // the 8296 tube glows for seconds
     { "mono_persist_tail",    0.02f, 0.0f, 1.0f,  0.00f },       // 0 = single decay, as before
     { "mono_persist_tail_ms", 100.0f, 100.0f, 20000.0f, 4000.0f },
+    // Bloom (per machine like persistence; the real defaults live in phosphor_profile.h)
+    { "mono_bloom",           0.02f, 0.0f, 2.0f,  0.15f },       // 0 = off
+    { "mono_bloom_spread",    0.05f, 0.5f, 4.0f,  1.00f },
+    { "mono_bloom_tail",      0.05f, 0.0f, 1.5f,  0.60f },
+    { "mono_bloom_core",      0.05f, 0.0f, 2.0f,  0.00f },
 };
 static const int k_knobCount = (int)(sizeof(k_knobs) / sizeof(k_knobs[0]));
 
@@ -366,6 +494,10 @@ float* PetGL::knobPtr(int idx)
     case 8: return &m_persistMs;
     case 9: return &m_persistTail;
     case 10: return &m_persistTailMs;
+    case 11: return &m_bloom;
+    case 12: return &m_bloomSpread;
+    case 13: return &m_bloomTail;
+    case 14: return &m_bloomCore;
     default: return nullptr;   // callers range-check; never alias a real knob
     }
 }
@@ -397,7 +529,7 @@ void PetGL::setKnob(int idx, float v)
     clampKnobs();
     // Live apply happens on the next draw (uniforms set every frame);
     // persist immediately so the setting survives however the app exits.
-    // Persistence knobs (7-10) are saved per machine; the rest are global.
+    // Persistence and bloom knobs (7-14) are saved per machine; the rest are global.
     if (idx >= 7) set_config_float("video", phosphor_key(k_knobs[idx].name, m_phosModel).c_str(), *knobPtr(idx));
     else set_config_float("video", k_knobs[idx].name, *knobPtr(idx));
 }
@@ -408,9 +540,10 @@ void PetGL::restoreKnobDefaults()
         *knobPtr(i) = k_knobs[i].def;
         set_config_float("video", k_knobs[i].name, k_knobs[i].def);
     }
-    // Persistence goes back to the running machine's row only.
+    // Persistence and bloom go back to the running machine's row only.
     const PhosphorDefaults d = phosphor_defaults(m_phosModel);
-    const float v[4] = { d.persistence, d.decayMs, d.tail, d.tailMs };
+    const float v[8] = { d.persistence, d.decayMs, d.tail, d.tailMs,
+                         d.bloom, d.bloomSpread, d.bloomTail, d.bloomCore };
     for (int i = 7; i < k_knobCount; ++i) {
         *knobPtr(i) = v[i - 7];
         clampKnobs();
@@ -423,12 +556,14 @@ void PetGL::setPhosphorModel(int modelId)
 {
     m_phosModel = modelId;
     const PhosphorDefaults d = phosphor_defaults(modelId);
-    float def[4] = { d.persistence, d.decayMs, d.tail, d.tailMs };
+    float def[8] = { d.persistence, d.decayMs, d.tail, d.tailMs,
+                     d.bloom, d.bloomSpread, d.bloomTail, d.bloomCore };
     for (int i = 7; i < k_knobCount; ++i) {
         float fb = def[i - 7];
         // The 8296 was tuned before per-machine keys: the old global key is its fallback.
         // (The ini helper cannot report an absent key, so it is read with the 8296 default.)
-        if (modelId == 96) fb = get_config_float("video", k_knobs[i].name, fb);
+        // Bloom (11-14) is new and has no legacy key.
+        if (modelId == 96 && i <= 10) fb = get_config_float("video", k_knobs[i].name, fb);
         *knobPtr(i) = get_config_float("video", phosphor_key(k_knobs[i].name, modelId).c_str(), fb);
     }
     clampKnobs();
@@ -453,7 +588,11 @@ PetGL::~PetGL()
     if (prog) glDeleteProgram(prog);
     if (crtProg) glDeleteProgram(crtProg);
     if (phosProg) glDeleteProgram(phosProg);
+    if (bloomPreProg) glDeleteProgram(bloomPreProg);
+    if (bloomDownProg) glDeleteProgram(bloomDownProg);
+    if (bloomUpProg) glDeleteProgram(bloomUpProg);
     destroyPhosphor();
+    destroyBloom();
 }
 
 void PetGL::destroyPhosphor()
@@ -551,6 +690,150 @@ void PetGL::updatePhosphor(double elapsedSeconds)
     glActiveTexture(GL_TEXTURE0);
 }
 
+void PetGL::destroyBloom()
+{
+    if (bloomDown[0]) glDeleteTextures(4, bloomDown);
+    if (bloomUp[0]) glDeleteTextures(3, bloomUp);
+    for (int i = 0; i < 4; ++i) { bloomDown[i] = 0; bloomLW[i] = bloomLH[i] = 0; }
+    for (int i = 0; i < 3; ++i) bloomUp[i] = 0;
+    if (bloomFbo) glDeleteFramebuffers(1, &bloomFbo);
+    bloomFbo = 0;
+    bloomSrcW = bloomSrcH = 0;
+}
+
+bool PetGL::bloomWanted() const
+{
+    return m_bloom > 0.0f && crtActive() && !bloomFailed && texW > 0 && texH > 0;
+}
+
+// (Re)create the pyramid for a w x h source. Level 0 is half the source (rounded up),
+// each next level half of the previous. One-time FBO check; on failure bloom is off for good.
+bool PetGL::ensureBloom(int w, int h)
+{
+    if (bloomFailed) return false;
+    if (bloomDown[0] && bloomSrcW == w && bloomSrcH == h) return true;
+
+    GLint prevFbo = 0, prevTex = 0, vp[4];
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+    glGetIntegerv(GL_VIEWPORT, vp);
+
+    destroyBloom();
+    int lw = w, lh = h;
+    for (int i = 0; i < 4; ++i) {
+        lw = (std::max)((lw + 1) / 2, 1);
+        lh = (std::max)((lh + 1) / 2, 1);
+        bloomLW[i] = lw; bloomLH[i] = lh;
+    }
+    glGenTextures(4, bloomDown);
+    glGenTextures(3, bloomUp);
+    glGenFramebuffers(1, &bloomFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bloomFbo);
+    bool ok = bloomFbo != 0;
+    for (int i = 0; ok && i < 7; ++i) {
+        const unsigned t = i < 4 ? bloomDown[i] : bloomUp[i - 4];
+        const int lv = i < 4 ? i : i - 4;
+        ok = t != 0;
+        if (!ok) break;
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, bloomLW[lv], bloomLH[lv], 0, GL_RED, GL_HALF_FLOAT, nullptr);
+        // No mipmaps: the pyramid itself is the blur.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+        if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) ok = false;
+    }
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prevFbo);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+    glViewport(vp[0], vp[1], vp[2], vp[3]);
+
+    if (!ok) {
+        LOG_ERROR("[GL] bloom pyramid (R16F, %dx%d source) unavailable; bloom disabled", w, h);
+        destroyBloom();
+        bloomFailed = true;
+        return false;
+    }
+    bloomSrcW = w; bloomSrcH = h;
+    return true;
+}
+
+// Rebuild the pyramid from the picture the tube is emitting (live + afterglow).
+// Runs after updatePhosphor so it sees the current state.
+void PetGL::updateBloom()
+{
+    if (!bloomWanted()) {
+        if (bloomDown[0]) destroyBloom();   // amount 0 / CRT off: hold nothing
+        return;
+    }
+    if (!ensureBloom(texW, texH)) return;
+
+    GLint prevFbo = 0, vp[4];
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    glGetIntegerv(GL_VIEWPORT, vp);
+    const GLboolean wasBlend = glIsEnabled(GL_BLEND);
+    glDisable(GL_BLEND);   // pure overwrites
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bloomFbo);
+    glBindVertexArray(vao);
+
+    auto target = [&](unsigned t, int lv) {
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+        glViewport(0, 0, bloomLW[lv], bloomLH[lv]);
+    };
+
+    // a) Prefilter into level 0 (2:1 bilinear = box filter of the emitted brightness).
+    const bool persistOn = m_persist > 0.0f && !phosFailed && phosTex[0];
+    target(bloomDown[0], 0);
+    glUseProgram(bloomPreProg);
+    glUniform1f(uBloomPrePersistLoc, persistOn ? m_persist : 0.0f);
+    glUniform1f(uBloomPreTailLoc, m_persistTail);
+    if (persistOn) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, phosTex[phosCur]);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    // b) Down chain 0 -> 1 -> 2 -> 3.
+    glUseProgram(bloomDownProg);
+    for (int l = 1; l < 4; ++l) {
+        target(bloomDown[l], l);
+        glUniform2f(uBloomDownHalfLoc, 0.5f / (float)bloomLW[l] * m_bloomSpread,
+                                       0.5f / (float)bloomLH[l] * m_bloomSpread);
+        glBindTexture(GL_TEXTURE_2D, bloomDown[l - 1]);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+    // c) Up chain 3 -> 2 -> 1 -> 0', re-adding the same-size down level
+    //    (tail weight; the prefiltered level 0 gets the core weight on the last pass).
+    glUseProgram(bloomUpProg);
+    for (int l = 2; l >= 0; --l) {
+        target(bloomUp[l], l);
+        glUniform2f(uBloomUpHalfLoc, 0.5f / (float)bloomLW[l + 1] * m_bloomSpread,
+                                     0.5f / (float)bloomLH[l + 1] * m_bloomSpread);
+        glUniform1f(uBloomUpWeightLoc, l == 0 ? m_bloomCore : m_bloomTail);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, bloomDown[l]);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, l == 2 ? bloomDown[3] : bloomUp[l + 1]);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+    glBindVertexArray(0);
+    glUseProgram(0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+
+    if (wasBlend) glEnable(GL_BLEND);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prevFbo);
+    glViewport(vp[0], vp[1], vp[2], vp[3]);
+}
+
 void PetGL::updateTexture(const uint32_t* rgba, int w, int h)
 {
     if (!rgba || w <= 0 || h <= 0) return;
@@ -600,7 +883,7 @@ void PetGL::draw()
     glBindTexture(GL_TEXTURE_2D, tex);
     glBindVertexArray(vao);
 
-    bool persistOn = false;
+    bool persistOn = false, bloomOn = false;
     if (crtActive()) {
         // ---- Mono monitor pass: softness + halation + optional ripple + tint ----
         glUseProgram(crtProg);
@@ -623,6 +906,14 @@ void PetGL::draw()
             persistOn = true;
         }
         else glUniform1f(uCrtPersistLoc, 0.0f);
+        if (bloomWanted() && bloomDown[0] && bloomSrcW == texW && bloomSrcH == texH) {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, bloomUp[0]);
+            glActiveTexture(GL_TEXTURE0);
+            glUniform1f(uCrtBloomAmtLoc, m_bloom);
+            bloomOn = true;
+        }
+        else glUniform1f(uCrtBloomAmtLoc, 0.0f);
     }
     else {
         // ---- Plain pass: pixel-sharp passthrough, still tinted by the monitor
@@ -635,6 +926,11 @@ void PetGL::draw()
 
     if (persistOn) {   // leave unit 1 clean for the plain pass
         glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
+    }
+    if (bloomOn) {
+        glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, 0);
         glActiveTexture(GL_TEXTURE0);
     }
@@ -651,5 +947,6 @@ void PetGL::present(const uint32_t* rgba, int srcW, int srcH, double elapsedSeco
         updatePhosphor(elapsedSeconds);
     else if (crtActive() && !phosFailed && phosProg != 0 && texW > 0 && !phosTex[0])
         updatePhosphor(0.0);   // first redraw before any advance: create state so it is never sampled unallocated
+    updateBloom();   // after the phosphor update so it sees the current state; frees itself when off
     draw();
 }
